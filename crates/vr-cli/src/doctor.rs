@@ -1,0 +1,141 @@
+//! `vr doctor`: explain what is (not) working.
+
+use std::process::ExitCode;
+use std::time::Duration;
+
+use serde::Serialize;
+use vr_core::{Poll, TelemetrySource as _};
+
+use crate::Format;
+use crate::client;
+use crate::skill;
+
+#[derive(Debug, Default, Serialize)]
+struct Report {
+    version: String,
+    platform: String,
+    iracing: Check,
+    server: Check,
+    skills: Vec<String>,
+    hints: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct Check {
+    ok: bool,
+    detail: String,
+}
+
+pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
+    let mut r = Report {
+        version: env!("CARGO_PKG_VERSION").into(),
+        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        ..Default::default()
+    };
+
+    r.iracing = match vr_iracing::open_live() {
+        Err(e) => Check {
+            ok: false,
+            detail: e.to_string(),
+        },
+        Ok(mut s) => match s.poll(Duration::from_secs(1)) {
+            Ok(Poll::Frame(f)) => {
+                let si = s.session_info();
+                Check {
+                    ok: true,
+                    detail: format!(
+                        "connected: {} | session {:?} {:?} | {} cars | player idx {:?}",
+                        si.track_name.as_deref().unwrap_or("?"),
+                        f.session.kind,
+                        f.session.phase,
+                        f.cars.len(),
+                        f.player_car_idx
+                    ),
+                }
+            }
+            Ok(Poll::Idle) => Check {
+                ok: false,
+                detail: "shared memory present but no new data within 1s".into(),
+            },
+            Ok(Poll::Disconnected) => Check {
+                ok: false,
+                detail: "sim running but not in a session (status disconnected)".into(),
+            },
+            Err(e) => Check {
+                ok: false,
+                detail: format!("read error: {e}"),
+            },
+        },
+    };
+
+    r.server = match client::server_url(server) {
+        None => Check {
+            ok: false,
+            detail: "no server configured or discovered".into(),
+        },
+        Some(url) => {
+            match client::HttpClient::new(url.clone(), Some(Duration::from_millis(800))).health() {
+                Ok(h) => Check {
+                    ok: true,
+                    detail: format!(
+                        "{url} pid {} game {} connected={} frames={} age={}",
+                        h.pid,
+                        h.game,
+                        h.connected,
+                        h.frames,
+                        h.age_ms
+                            .map(|a| format!("{a}ms"))
+                            .unwrap_or_else(|| "-".into())
+                    ),
+                },
+                Err(e) => Check {
+                    ok: false,
+                    detail: format!("{url} not reachable: {e}"),
+                },
+            }
+        }
+    };
+
+    for project in [false, true] {
+        for (who, d) in skill::skills_dirs(skill::Target::All, project) {
+            let root = d.join(skill::SKILL_NAME);
+            if root.join("SKILL.md").exists() {
+                r.skills.push(format!("{who}: {}", root.display()));
+            }
+        }
+    }
+
+    if !r.server.ok {
+        r.hints.push("run `vr serve` in a separate terminal while racing for lap history, fuel averages and gap trends".into());
+    }
+    if !r.iracing.ok {
+        r.hints.push(
+            "no live iRacing session; `vr serve --game synthetic --speed 10` gives a demo race"
+                .into(),
+        );
+    }
+    if r.skills.is_empty() {
+        r.hints
+            .push("install the agent skill: `vr skill install`".into());
+    }
+
+    match fmt {
+        Format::Json => println!("{}", serde_json::to_string(&r)?),
+        Format::Text => {
+            let mark = |c: &Check| if c.ok { "ok " } else { "-- " };
+            println!("vr {} ({})", r.version, r.platform);
+            println!("{}iracing: {}", mark(&r.iracing), r.iracing.detail);
+            println!("{}server:  {}", mark(&r.server), r.server.detail);
+            if r.skills.is_empty() {
+                println!("-- skill:   not installed");
+            }
+            for s in &r.skills {
+                println!("ok skill:   {s}");
+            }
+            for h in &r.hints {
+                println!("hint: {h}");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}

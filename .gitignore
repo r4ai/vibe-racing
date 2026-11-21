@@ -1,0 +1,6 @@
+/target
+*.ndjson
+!fixtures/**/*.ndjson
+node_modules/
+mutants.out*/
+mutants.diff

@@ -1,0 +1,34 @@
+# cargo-mutants configuration. Every exclusion needs a reason.
+# Patterns are regexes matched against the mutant name; use TOML literal
+# strings ('...') so backslashes reach the regex engine unchanged.
+
+exclude_re = [
+    # vr-iracing/src/shm.rs `imp`: the live Win32 mapping and its non-Windows
+    # stub. Only testable against a running iRacing; the parsing it feeds is
+    # covered through `MemoryImage`.
+    'imp::',
+    # vr-iracing::open_live: opens the live mapping (see above).
+    'replace open_live ',
+    # Equivalent: the fuel baseline is only ever read for the player's car,
+    # so also storing it for other cars is unobservable.
+    'replace match guard is_player with true in RaceState::track_laps',
+    # Equivalent: CAUTION and CAUTION_WAVING are disjoint bits, so `|` and `^`
+    # build the same mask.
+    'replace \| with \^ in flags',
+    # Log-only: whether "waiting for game" is warned once or on every retry.
+    'delete ! in spawn_collector',
+    # vr-replay/src/synth.rs internals: a demo/test-data generator, not product
+    # logic. Its observable race (pit laps, flags, fuel, finishing order) is
+    # pinned by tests/replay.rs `synthetic_race_story` and the engine tests;
+    # exact pace formulas and PRNG bits are deliberately free to change.
+    'SynthCar::',
+    ' noise',
+    'in SynthSource::(step|frame)',
+    # Pacing offset by one step: the synthetic race starts one tick earlier.
+    'replace \+ with - in <impl TelemetrySource for SynthSource>::poll',
+    # Equality boundaries on wall-clock waits (`t < t0`, `wait > timeout`) and
+    # on the recorder's float epsilon: indistinguishable without a fake clock.
+    'replace < with <= in Pacer::wait_until',
+    'replace > with >= in Pacer::wait_until',
+    'replace < with <= in Recorder::record',
+]

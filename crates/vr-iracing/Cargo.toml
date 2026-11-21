@@ -1,0 +1,16 @@
+[package]
+name = "vr-iracing"
+description = "iRacing shared-memory telemetry adapter for vibe-racing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vr-core.workspace = true
+serde_yaml.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[lints]
+workspace = true

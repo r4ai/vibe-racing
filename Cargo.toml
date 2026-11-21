@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/r4ai/vibe-racing"
+rust-version = "1.88"
+
+[workspace.dependencies]
+vr-core = { path = "crates/vr-core" }
+vr-engine = { path = "crates/vr-engine" }
+vr-replay = { path = "crates/vr-replay" }
+vr-iracing = { path = "crates/vr-iracing" }
+vr-server = { path = "crates/vr-server" }
+
+anyhow = "1.0.98"
+thiserror = "2.0.17"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
+serde_yaml = "0.9.34"
+clap = { version = "4.6.6", features = ["derive", "env"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+axum = "0.8.9"
+ureq = { version = "3.4.2", default-features = false, features = ["json"] }
+dirs = "6.0.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading"] }
+tempfile = "3.20.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

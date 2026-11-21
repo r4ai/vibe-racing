@@ -1,0 +1,18 @@
+[package]
+name = "vr-engine"
+description = "Race state tracking, derived analysis and query API for vibe-racing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vr-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+vr-replay.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,814 @@
+use std::collections::{BTreeSet, HashMap, VecDeque};
+
+use vr_core::{Capabilities, CarState, Flag, Frame, SessionKind, SessionPhase};
+
+use crate::report::*;
+use crate::util::{mean, now_ms, positive, wrap_half};
+use crate::{EventKind, EventLog};
+
+const MAX_LAPS_PER_CAR: usize = 200;
+const MAX_GAP_SAMPLES: usize = 20;
+const FUEL_LAPS_WINDOW: usize = 5;
+const PACE_LAPS_WINDOW: usize = 3;
+const TREND_LAPS_WINDOW: usize = 3;
+/// How long to wait for the game to publish a lap time after the line crossing.
+const PENDING_LAP_TIMEOUT_S: f64 = 3.0;
+const NEARBY_WINDOW_S: f64 = 3.0;
+
+#[derive(Debug, Clone)]
+struct PendingLap {
+    lap: i32,
+    prev_last_lap: Option<f64>,
+    since_s: f64,
+    fuel_used_l: Option<f64>,
+    pit: bool,
+    caution: bool,
+    position: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CarTracker {
+    laps: VecDeque<LapRecord>,
+    last_completed: Option<i32>,
+    last_seen_last_lap: Option<f64>,
+    pending: Option<PendingLap>,
+    pit_this_lap: bool,
+    caution_this_lap: bool,
+    fuel_at_lap_start: Option<f64>,
+    prev_on_pit_road: Option<bool>,
+    /// Gap samples taken when the player crosses the line:
+    /// (player lap, seconds this car is ahead of the player).
+    gap_samples: VecDeque<(i32, f64)>,
+}
+
+impl CarTracker {
+    fn clean_laps(&self) -> impl DoubleEndedIterator<Item = &LapRecord> {
+        self.laps.iter().filter(|l| l.is_clean())
+    }
+
+    fn avg_clean_lap(&self, n: usize) -> Option<f64> {
+        let times: Vec<f64> = self
+            .clean_laps()
+            .rev()
+            .take(n)
+            .filter_map(|l| l.time_s)
+            .collect();
+        mean(&times)
+    }
+
+    fn push_lap(&mut self, lap: LapRecord) {
+        if self.laps.len() == MAX_LAPS_PER_CAR {
+            self.laps.pop_front();
+        }
+        self.laps.push_back(lap);
+    }
+}
+
+/// Accumulated race state. Feed frames with [`RaceState::ingest`]; query with
+/// the methods in `api.rs` (via [`crate::RaceApi`]).
+#[derive(Debug, Clone)]
+pub struct RaceState {
+    game: String,
+    source: SourceKind,
+    capabilities: Capabilities,
+    connected: bool,
+    frame: Option<Frame>,
+    ingested_at_ms: Option<i64>,
+    frames_ingested: u64,
+    session_num: Option<i32>,
+    cars: HashMap<usize, CarTracker>,
+    events: EventLog,
+    prev_flags: BTreeSet<Flag>,
+    prev_phase: Option<SessionPhase>,
+    prev_position: Option<u32>,
+    prev_incidents: Option<i32>,
+    best_lap_s: Option<f64>,
+}
+
+impl RaceState {
+    pub fn new(game: impl Into<String>, source: SourceKind, capabilities: Capabilities) -> Self {
+        Self {
+            game: game.into(),
+            source,
+            capabilities,
+            connected: false,
+            frame: None,
+            ingested_at_ms: None,
+            frames_ingested: 0,
+            session_num: None,
+            cars: HashMap::new(),
+            events: EventLog::default(),
+            prev_flags: BTreeSet::new(),
+            prev_phase: None,
+            prev_position: None,
+            prev_incidents: None,
+            best_lap_s: None,
+        }
+    }
+
+    /// Update the adapter identity once the real source is opened.
+    pub fn set_source(&mut self, game: impl Into<String>, capabilities: Capabilities) {
+        self.game = game.into();
+        self.capabilities = capabilities;
+    }
+
+    pub fn set_connected(&mut self, connected: bool) {
+        self.connected = connected;
+    }
+
+    pub fn frame(&self) -> Option<&Frame> {
+        self.frame.as_ref()
+    }
+
+    pub fn event_log(&self) -> &EventLog {
+        &self.events
+    }
+
+    pub fn frames_ingested(&self) -> u64 {
+        self.frames_ingested
+    }
+
+    pub fn ingest(&mut self, frame: Frame) {
+        self.ingest_at(frame, now_ms());
+    }
+
+    /// Like [`RaceState::ingest`] with an explicit wall clock (for tests).
+    pub fn ingest_at(&mut self, frame: Frame, now_ms: i64) {
+        self.connected = true;
+        let t = frame.session.time_s;
+        let ts = frame.timestamp_ms;
+
+        if self.session_num != Some(frame.session.session_num) {
+            if self.session_num.is_some() {
+                self.reset_session();
+            }
+            self.session_num = Some(frame.session.session_num);
+            self.events.push(
+                t,
+                ts,
+                EventKind::SessionChanged {
+                    session_num: frame.session.session_num,
+                    kind: frame.session.kind,
+                },
+                format!("session: {}", kind_label(frame.session.kind)),
+            );
+        }
+
+        self.detect_session_events(&frame);
+        self.track_laps(&frame);
+        self.detect_player_events(&frame);
+
+        self.frame = Some(frame);
+        self.ingested_at_ms = Some(now_ms);
+        self.frames_ingested += 1;
+    }
+
+    fn reset_session(&mut self) {
+        self.cars.clear();
+        self.prev_flags.clear();
+        self.prev_phase = None;
+        self.prev_position = None;
+        self.prev_incidents = None;
+        self.best_lap_s = None;
+    }
+
+    fn detect_session_events(&mut self, frame: &Frame) {
+        let t = frame.session.time_s;
+        let ts = frame.timestamp_ms;
+        let phase = frame.session.phase;
+        if let Some(prev) = self.prev_phase
+            && prev != phase
+        {
+            self.events.push(
+                t,
+                ts,
+                EventKind::PhaseChanged {
+                    from: prev,
+                    to: phase,
+                },
+                format!("session phase: {}", phase_label(phase)),
+            );
+        }
+        self.prev_phase = Some(phase);
+
+        let flags: BTreeSet<Flag> = frame.session.flags.iter().copied().collect();
+        for f in flags.difference(&self.prev_flags) {
+            self.events.push(
+                t,
+                ts,
+                EventKind::FlagRaised { flag: *f },
+                format!("{} flag", flag_label(*f)),
+            );
+        }
+        for f in self.prev_flags.difference(&flags) {
+            if *f == Flag::Green {
+                // "Green cleared" is implied by whatever flag replaced it.
+                continue;
+            }
+            self.events.push(
+                t,
+                ts,
+                EventKind::FlagCleared { flag: *f },
+                format!("{} flag cleared", flag_label(*f)),
+            );
+        }
+        self.prev_flags = flags;
+    }
+
+    fn track_laps(&mut self, frame: &Frame) {
+        let t = frame.session.time_s;
+        let ts = frame.timestamp_ms;
+        let caution = frame.session.flags.iter().any(|f| {
+            matches!(
+                f,
+                Flag::Yellow | Flag::Caution | Flag::YellowWaving | Flag::Red
+            )
+        });
+        let player_idx = frame.player_car_idx;
+        let player_fuel = frame.player.as_ref().and_then(|p| p.fuel_l);
+        let neighbours = self.neighbour_idxs(frame);
+        let mut new_events = Vec::new();
+        let mut player_completed: Option<i32> = None;
+
+        for car in &frame.cars {
+            let is_player = Some(car.idx) == player_idx;
+            let tr = self.cars.entry(car.idx).or_default();
+
+            // Pit road transitions.
+            if let Some(prev) = tr.prev_on_pit_road
+                && prev != car.on_pit_road
+                && (is_player || neighbours.contains(&car.idx))
+            {
+                let (number, driver) = (car.number.clone(), car.driver.clone());
+                let who = if is_player {
+                    "you".to_string()
+                } else {
+                    format!("#{} {}", number, driver)
+                };
+                if car.on_pit_road {
+                    new_events.push((
+                        EventKind::PitEntry {
+                            car_idx: car.idx,
+                            number,
+                            driver,
+                            is_player,
+                        },
+                        format!("pit in: {who}"),
+                    ));
+                } else {
+                    new_events.push((
+                        EventKind::PitExit {
+                            car_idx: car.idx,
+                            number,
+                            driver,
+                            is_player,
+                        },
+                        format!("pit out: {who}"),
+                    ));
+                }
+            }
+            tr.prev_on_pit_road = Some(car.on_pit_road);
+            tr.pit_this_lap |= car.on_pit_road;
+            tr.caution_this_lap |= caution;
+
+            // Line crossing.
+            if let Some(done) = car.laps_completed {
+                match tr.last_completed {
+                    Some(prev) if done > prev => {
+                        let fuel_used_l = if is_player {
+                            match (tr.fuel_at_lap_start, player_fuel) {
+                                (Some(start), Some(now)) if start >= now => Some(start - now),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        tr.pending = Some(PendingLap {
+                            lap: done,
+                            prev_last_lap: tr.last_seen_last_lap,
+                            since_s: t,
+                            fuel_used_l,
+                            pit: tr.pit_this_lap,
+                            caution: tr.caution_this_lap,
+                            position: car.position,
+                        });
+                        tr.pit_this_lap = car.on_pit_road;
+                        tr.caution_this_lap = caution;
+                        if is_player {
+                            tr.fuel_at_lap_start = player_fuel;
+                            player_completed = Some(done);
+                        }
+                    }
+                    Some(prev) if done < prev => {
+                        // Session reset / tow: drop history for this car.
+                        *tr = CarTracker::default();
+                    }
+                    None if is_player => tr.fuel_at_lap_start = player_fuel,
+                    _ => {}
+                }
+                tr.last_completed = Some(done);
+            }
+
+            // Resolve a pending lap once the game publishes the new lap time.
+            if let Some(p) = tr.pending.clone() {
+                let last = positive(car.last_lap_s);
+                let changed = last.is_some() && last != p.prev_last_lap;
+                let timed_out = t - p.since_s > PENDING_LAP_TIMEOUT_S;
+                if changed || timed_out {
+                    // On timeout the game most likely published an identical
+                    // lap time, so take whatever value it shows.
+                    let time_s = last;
+                    tr.push_lap(LapRecord {
+                        lap: p.lap,
+                        time_s,
+                        fuel_used_l: p.fuel_used_l,
+                        pit: p.pit,
+                        caution: p.caution,
+                        position: p.position,
+                        session_time_s: p.since_s,
+                    });
+                    tr.pending = None;
+                    if is_player {
+                        new_events.push((
+                            EventKind::LapCompleted {
+                                lap: p.lap,
+                                time_s,
+                                position: p.position,
+                            },
+                            format!(
+                                "lap {} {}",
+                                p.lap,
+                                time_s
+                                    .map(crate::render::fmt_lap)
+                                    .unwrap_or_else(|| "--".into())
+                            ),
+                        ));
+                        if let Some(lt) = time_s
+                            && self.best_lap_s.is_none_or(|b| lt < b - 0.0005)
+                        {
+                            if self.best_lap_s.is_some() {
+                                new_events.push((
+                                    EventKind::PersonalBest {
+                                        lap: p.lap,
+                                        time_s: lt,
+                                    },
+                                    format!("personal best {}", crate::render::fmt_lap(lt)),
+                                ));
+                            }
+                            self.best_lap_s = Some(lt);
+                        }
+                    }
+                }
+            }
+            if let Some(l) = positive(car.last_lap_s) {
+                tr.last_seen_last_lap = Some(l);
+            }
+        }
+
+        if let Some(lap) = player_completed
+            && frame.session.kind == SessionKind::Race
+        {
+            self.sample_gaps(frame, lap);
+        }
+
+        for (kind, text) in new_events {
+            self.events.push(t, ts, kind, text);
+        }
+    }
+
+    fn sample_gaps(&mut self, frame: &Frame, lap: i32) {
+        let Some(player) = frame.player_car() else {
+            return;
+        };
+        let Some(pg) = player.gap_to_leader_s else {
+            return;
+        };
+        for car in &frame.cars {
+            if car.idx == player.idx {
+                continue;
+            }
+            if let Some(cg) = car.gap_to_leader_s {
+                let tr = self.cars.entry(car.idx).or_default();
+                if tr.gap_samples.len() == MAX_GAP_SAMPLES {
+                    tr.gap_samples.pop_front();
+                }
+                tr.gap_samples.push_back((lap, pg - cg));
+            }
+        }
+    }
+
+    fn detect_player_events(&mut self, frame: &Frame) {
+        let t = frame.session.time_s;
+        let ts = frame.timestamp_ms;
+        if let Some(car) = frame.player_car() {
+            let multi_class = is_multi_class(frame);
+            let pos = if multi_class {
+                car.class_position
+            } else {
+                car.position
+            };
+            let dir = match (self.prev_position, pos) {
+                (Some(prev), Some(now)) => match now.cmp(&prev) {
+                    std::cmp::Ordering::Less => Some((prev, now, "gained")),
+                    std::cmp::Ordering::Greater => Some((prev, now, "lost")),
+                    std::cmp::Ordering::Equal => None,
+                },
+                _ => None,
+            };
+            if let Some((prev, now, dir)) = dir
+                && frame.session.kind == SessionKind::Race
+            {
+                self.events.push(
+                    t,
+                    ts,
+                    EventKind::PositionChanged {
+                        from: prev,
+                        to: now,
+                    },
+                    format!("{dir} position: P{prev} -> P{now}"),
+                );
+            }
+            if pos.is_some() {
+                self.prev_position = pos;
+            }
+        }
+        if let Some(inc) = frame.player.as_ref().and_then(|p| p.incidents) {
+            if let Some(prev) = self.prev_incidents
+                && inc > prev
+            {
+                self.events.push(
+                    t,
+                    ts,
+                    EventKind::Incident {
+                        added: inc - prev,
+                        total: inc,
+                    },
+                    format!("incident +{}x (total {}x)", inc - prev, inc),
+                );
+            }
+            self.prev_incidents = Some(inc);
+        }
+    }
+
+    /// Cars directly ahead/behind (±2 positions) of the player in scope.
+    fn neighbour_idxs(&self, frame: &Frame) -> Vec<usize> {
+        let Some(player) = frame.player_car() else {
+            return Vec::new();
+        };
+        let multi = is_multi_class(frame);
+        let ppos = if multi {
+            player.class_position
+        } else {
+            player.position
+        };
+        let Some(ppos) = ppos else { return Vec::new() };
+        frame
+            .cars
+            .iter()
+            .filter(|c| c.idx != player.idx && (!multi || c.class_id == player.class_id))
+            .filter(|c| {
+                let pos = if multi { c.class_position } else { c.position };
+                pos.is_some_and(|p| p.abs_diff(ppos) <= 2)
+            })
+            .map(|c| c.idx)
+            .collect()
+    }
+
+    // ---------------------------------------------------------------------
+    // Derived queries
+    // ---------------------------------------------------------------------
+
+    pub fn meta(&self) -> Meta {
+        Meta {
+            game: self.game.clone(),
+            source: self.source,
+            connected: self.connected,
+            age_ms: self.ingested_at_ms.map(|t| (now_ms() - t).max(0)),
+            history: self.source != SourceKind::Oneshot,
+            session_time_s: self.frame.as_ref().map(|f| f.session.time_s),
+            capabilities: self.capabilities,
+        }
+    }
+
+    pub(crate) fn car_laps(&self, idx: usize) -> Vec<LapRecord> {
+        self.cars
+            .get(&idx)
+            .map(|t| t.laps.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn avg_clean_lap(&self, idx: usize) -> Option<f64> {
+        self.cars
+            .get(&idx)
+            .and_then(|t| t.avg_clean_lap(PACE_LAPS_WINDOW))
+    }
+
+    /// Best estimate of the player's current lap time.
+    pub(crate) fn reference_lap(&self, frame: &Frame) -> Option<f64> {
+        let car = frame.player_car()?;
+        self.avg_clean_lap(car.idx)
+            .or(positive(car.last_lap_s))
+            .or(positive(car.best_lap_s))
+            .or(positive(car.est_lap_s))
+    }
+
+    pub(crate) fn session_summary(&self, frame: &Frame) -> SessionSummary {
+        SessionSummary {
+            kind: frame.session.kind,
+            phase: frame.session.phase,
+            track: frame.session.track.as_ref().map(|t| match &t.config {
+                Some(c) if !c.is_empty() => format!("{} - {}", t.name, c),
+                _ => t.name.clone(),
+            }),
+            lap: frame.player_car().and_then(|c| c.lap),
+            laps_total: frame.session.laps_total,
+            laps_remaining: frame.session.laps_remaining,
+            time_remaining_s: frame.session.time_remaining_s,
+            flags: frame.session.flags.clone(),
+        }
+    }
+
+    pub(crate) fn player_summary(&self, frame: &Frame) -> Option<PlayerSummary> {
+        let car = frame.player_car()?;
+        let p = frame.player.clone().unwrap_or_default();
+        Some(PlayerSummary {
+            car: car_ref(car),
+            cars_total: frame.cars.len(),
+            cars_in_class: frame
+                .cars
+                .iter()
+                .filter(|c| c.class_id == car.class_id)
+                .count(),
+            last_lap_s: positive(car.last_lap_s),
+            best_lap_s: positive(car.best_lap_s).or(self.best_lap_s),
+            avg_lap_s: self.avg_clean_lap(car.idx),
+            incidents: p.incidents,
+            on_pit_road: car.on_pit_road,
+            on_track: p.on_track,
+        })
+    }
+
+    pub(crate) fn gap_between(
+        &self,
+        frame: &Frame,
+        player: &CarState,
+        other: &CarState,
+    ) -> GapInfo {
+        let progress = |c: &CarState| {
+            c.laps_completed
+                .map(|l| l as f64 + c.lap_dist_pct.unwrap_or(0.0))
+        };
+        let ahead_by_progress = match (progress(other), progress(player)) {
+            (Some(o), Some(p)) => Some(o - p),
+            _ => None,
+        };
+        let laps = ahead_by_progress
+            .map(|d| d.abs().floor() as i32)
+            .unwrap_or(0);
+
+        let (gap_s, mode) = if frame.session.kind == SessionKind::Race {
+            match (player.gap_to_leader_s, other.gap_to_leader_s) {
+                (Some(pg), Some(og)) if pg >= 0.0 && og >= 0.0 => {
+                    (Some((pg - og).abs()), GapMode::RaceTime)
+                }
+                _ => (
+                    ahead_by_progress
+                        .zip(self.reference_lap(frame))
+                        .map(|(d, lap)| d.abs() * lap),
+                    GapMode::TrackProgress,
+                ),
+            }
+        } else {
+            (
+                positive(player.best_lap_s)
+                    .zip(positive(other.best_lap_s))
+                    .map(|(p, o)| (p - o).abs()),
+                GapMode::BestLap,
+            )
+        };
+
+        // Gap trend from samples taken at the line (seconds `other` is ahead).
+        let trend_s_per_lap = self.cars.get(&other.idx).and_then(|t| {
+            let s: Vec<&(i32, f64)> = t
+                .gap_samples
+                .iter()
+                .rev()
+                .take(TREND_LAPS_WINDOW + 1)
+                .collect();
+            let (newest, oldest) = (s.first()?, s.last()?);
+            let dl = newest.0 - oldest.0;
+            if dl <= 0 {
+                return None;
+            }
+            // Magnitude change: positive = gap growing.
+            Some((newest.1.abs() - oldest.1.abs()) / dl as f64)
+        });
+
+        let their_last = positive(other.last_lap_s);
+        GapInfo {
+            car: car_ref(other),
+            gap_s,
+            laps,
+            mode,
+            trend_s_per_lap,
+            their_last_lap_s: their_last,
+            last_lap_delta_s: their_last
+                .zip(positive(player.last_lap_s))
+                .map(|(o, p)| o - p),
+            on_pit_road: other.on_pit_road,
+        }
+    }
+
+    /// Car one position ahead/behind the player (class scope in multi-class).
+    pub(crate) fn adjacent(&self, frame: &Frame, offset: i32) -> Option<GapInfo> {
+        let player = frame.player_car()?;
+        let multi = is_multi_class(frame);
+        let pos_of = |c: &CarState| if multi { c.class_position } else { c.position };
+        let ppos = pos_of(player)? as i32;
+        let target = ppos + offset;
+        if target < 1 {
+            return None;
+        }
+        let other = frame
+            .cars
+            .iter()
+            .filter(|c| !multi || c.class_id == player.class_id)
+            .find(|c| pos_of(c) == Some(target as u32))?;
+        Some(self.gap_between(frame, player, other))
+    }
+
+    pub(crate) fn nearby(&self, frame: &Frame, window_s: Option<f64>) -> Vec<RelativeCar> {
+        let Some(player) = frame.player_car() else {
+            return Vec::new();
+        };
+        let (Some(ppct), Some(reference)) = (player.lap_dist_pct, self.reference_lap(frame)) else {
+            return Vec::new();
+        };
+        let window = window_s.unwrap_or(NEARBY_WINDOW_S);
+        let pprog = player.laps_completed.map(|l| l as f64 + ppct);
+        let mut out: Vec<RelativeCar> = frame
+            .cars
+            .iter()
+            .filter(|c| c.idx != player.idx && c.surface != vr_core::TrackSurface::NotInWorld)
+            .filter(|c| !c.on_pit_road || player.on_pit_road)
+            .filter_map(|c| {
+                let pct = c.lap_dist_pct?;
+                let d = wrap_half(pct - ppct);
+                let rel_s = d * reference;
+                if rel_s.abs() > window {
+                    return None;
+                }
+                let lap_diff = match (c.laps_completed.map(|l| l as f64 + pct), pprog) {
+                    (Some(cp), Some(pp)) => (cp - pp - d).round() as i32,
+                    _ => 0,
+                };
+                Some(RelativeCar {
+                    car: car_ref(c),
+                    rel_s,
+                    same_class: c.class_id == player.class_id,
+                    lap_diff,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.rel_s.abs().total_cmp(&b.rel_s.abs()));
+        out
+    }
+
+    pub(crate) fn fuel_info(&self, frame: &Frame) -> Option<FuelInfo> {
+        let p = frame.player.as_ref()?;
+        let car = frame.player_car();
+        let fuel = p.fuel_l;
+        let samples: Vec<f64> = car
+            .and_then(|c| self.cars.get(&c.idx))
+            .map(|t| {
+                t.laps
+                    .iter()
+                    .rev()
+                    .filter(|l| !l.pit && !l.caution)
+                    .filter_map(|l| positive(l.fuel_used_l))
+                    .take(FUEL_LAPS_WINDOW)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let reference = self.reference_lap(frame);
+
+        let (per_lap, basis) = match mean(&samples) {
+            Some(m) => (Some(m), FuelBasis::History),
+            None => match (positive(p.fuel_use_lph), reference) {
+                (Some(lph), Some(lap)) => (Some(lph * lap / 3600.0), FuelBasis::Instant),
+                _ => (None, FuelBasis::None),
+            },
+        };
+
+        let laps_of_fuel = fuel.zip(per_lap).map(|(f, pl)| f / pl);
+        let pct = car.and_then(|c| c.lap_dist_pct).unwrap_or(0.0);
+        let laps_to_finish = laps_to_finish(frame, pct, reference);
+        let to_finish_l = laps_to_finish
+            .zip(per_lap)
+            .zip(fuel)
+            .map(|((l, pl), f)| l * pl - f);
+        let add_with_margin_l = to_finish_l
+            .zip(per_lap)
+            .map(|(n, pl)| (n + 0.5 * pl).max(0.0));
+        let last_lap_on_fuel = car
+            .and_then(|c| c.laps_completed)
+            .zip(laps_of_fuel)
+            .map(|(done, lf)| done + (pct + lf).floor() as i32);
+
+        Some(FuelInfo {
+            fuel_l: fuel,
+            capacity_l: p.fuel_capacity_l,
+            per_lap_l: per_lap,
+            basis,
+            laps_sampled: samples.len(),
+            laps_of_fuel,
+            laps_to_finish,
+            to_finish_l,
+            add_with_margin_l,
+            last_lap_on_fuel,
+        })
+    }
+}
+
+/// Laps (fractional, from the current position) the player still has to drive.
+fn laps_to_finish(frame: &Frame, pct: f64, reference: Option<f64>) -> Option<f64> {
+    if frame.session.phase == SessionPhase::Checkered
+        || frame.session.phase == SessionPhase::CoolDown
+    {
+        return Some(0.0);
+    }
+    if let Some(n) = frame
+        .session
+        .laps_remaining
+        .filter(|n| (0..10_000).contains(n))
+    {
+        // The game counts the lap in progress as remaining.
+        return Some(((n as f64) - pct).max(0.0));
+    }
+    let remain = frame
+        .session
+        .time_remaining_s
+        .filter(|t| *t >= 0.0 && *t < 7.0 * 24.0 * 3600.0)?;
+    let lap = reference?;
+    // Timed race: the lap in progress when the clock hits zero is also driven.
+    Some((pct + remain / lap).ceil() - pct)
+}
+
+pub(crate) fn is_multi_class(frame: &Frame) -> bool {
+    let mut ids = frame.cars.iter().filter_map(|c| c.class_id);
+    match ids.next() {
+        Some(first) => ids.any(|i| i != first),
+        None => false,
+    }
+}
+
+pub(crate) fn car_ref(c: &CarState) -> CarRef {
+    CarRef {
+        idx: c.idx,
+        number: c.number.clone(),
+        driver: c.driver.clone(),
+        class_name: c.class_name.clone(),
+        position: c.position,
+        class_position: c.class_position,
+    }
+}
+
+pub(crate) fn flag_label(f: Flag) -> &'static str {
+    match f {
+        Flag::Green => "green",
+        Flag::Yellow => "yellow",
+        Flag::YellowWaving => "local yellow",
+        Flag::Caution => "full course caution",
+        Flag::Red => "red",
+        Flag::Blue => "blue",
+        Flag::White => "white",
+        Flag::Checkered => "chequered",
+        Flag::Black => "black",
+        Flag::Repair => "meatball (repair)",
+        Flag::Disqualify => "disqualify",
+        Flag::Debris => "debris",
+        Flag::OneLapToGreen => "one lap to green",
+    }
+}
+
+pub(crate) fn kind_label(k: SessionKind) -> &'static str {
+    match k {
+        SessionKind::Practice => "practice",
+        SessionKind::Qualify => "qualify",
+        SessionKind::Warmup => "warmup",
+        SessionKind::Race => "race",
+        SessionKind::Other => "other",
+    }
+}
+
+pub(crate) fn phase_label(p: SessionPhase) -> &'static str {
+    match p {
+        SessionPhase::Unknown => "unknown",
+        SessionPhase::GetInCar => "get in car",
+        SessionPhase::Warmup => "warmup",
+        SessionPhase::ParadeLaps => "parade laps",
+        SessionPhase::Racing => "racing",
+        SessionPhase::Checkered => "chequered",
+        SessionPhase::CoolDown => "cool down",
+    }
+}

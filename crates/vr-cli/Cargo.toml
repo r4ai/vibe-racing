@@ -1,0 +1,32 @@
+[package]
+name = "vr-cli"
+description = "vr: race-engineer telemetry CLI for AI agents (iRacing and more)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vr"
+path = "src/main.rs"
+
+[dependencies]
+vr-core.workspace = true
+vr-engine.workspace = true
+vr-replay.workspace = true
+vr-iracing.workspace = true
+vr-server.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
