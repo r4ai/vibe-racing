@@ -4,6 +4,8 @@ description = "Long-running telemetry collector and local HTTP API for vibe-raci
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 vr-core.workspace = true

@@ -4,6 +4,8 @@ description = "NDJSON record/replay and synthetic demo telemetry sources for vib
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 vr-core.workspace = true
