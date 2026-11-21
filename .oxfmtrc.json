@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "proseWrap": "preserve",
+  "ignorePatterns": [
+    "target/**",
+    "Cargo.lock",
+    "pnpm-lock.yaml",
+    "**/*.toml",
+    "**/*.ndjson",
+    ".agents/**",
+    ".claude/**"
+  ]
+}

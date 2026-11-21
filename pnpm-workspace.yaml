@@ -1,0 +1,20 @@
+# Root-only workspace for repository tooling. Add JS/TS packages here if any appear.
+packages:
+  - "."
+
+# --- Supply-chain hardening -------------------------------------------------
+# Only resolve versions published at least 7 days ago (minutes).
+minimumReleaseAge: 10080
+# Never run dependency lifecycle scripts unless explicitly allowed below,
+# and fail the install if an unlisted dependency wants to run one.
+allowBuilds: {}
+strictDepBuilds: true
+# Refuse a version whose publish trust (provenance / trusted publisher) is
+# weaker than that of earlier versions of the same package.
+trustPolicy: no-downgrade
+# Transitive dependencies may only come from the registry (no git/tarball URLs).
+blockExoticSubdeps: true
+# Pin exact versions when adding dependencies.
+savePrefix: ""
+# Refuse to run on a Node.js outside package.json "engines".
+engineStrict: true
