@@ -20,6 +20,9 @@ pub struct Meta {
     pub note: String,
     /// Options of the radio.
     pub radio: Vec<String>,
+    /// Typed questions: no voices, no transcription.
+    #[serde(default)]
+    pub text: bool,
 }
 
 /// Accuracy of a judge on the labelled replies.

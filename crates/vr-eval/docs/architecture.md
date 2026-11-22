@@ -45,14 +45,15 @@ flowchart LR
 | [`src/audio.rs`](../src/audio.rs)         | 声の合成と保存、走行音・切れ・無音                       |
 | [`src/run.rs`](../src/run.rs)             | マイクとスピーカーの模擬、1 回の呼びかけの記録           |
 | [`src/facts.rs`](../src/facts.rs)         | 真実の値、回答中の数字の読み取りと照合                   |
-| [`src/judge.rs`](../src/judge.rs)         | 判定モデルへの質問と評点                                 |
+| [`src/judge.rs`](../src/judge.rs)         | 判定モデル（Codex CLI・OpenRouter）への質問と評点        |
 | [`src/calibrate.rs`](../src/calibrate.rs) | 正解が分かっている回答（判定モデルと照合の精度測定）     |
 | [`src/report.rs`](../src/report.rs)       | 集計、対応のある差と区間                                 |
 | [`src/html.rs`](../src/html.rs)           | HTML レポート（[`src/report.html`](../src/report.html)） |
 
 ## 設計上の不変条件
 
-- **盲検**: 判定モデルには構成名・エージェント名を見せない。調べる側（Anthropic・OpenAI）と別会社のモデルを使う
+- **盲検**: 判定モデルには構成名・エージェント名を見せない
+- **判定役の会社**: 既定は Codex CLI の 2 モデル（ChatGPT の利用枠で動き、従量課金が無い）。Codex を評価するときは同じ会社のモデルが採点するため、報告にその旨を書く
 - **真実は計算**: 期待値を手で書かない。質問の終わりの 3 秒前から最後の文の鳴り始めまでに実在した値を正しいとする
 - **dev で改善、heldout で確認**: heldout の回答を見てプロンプト・語彙・閾値を変えない。言い回しと声の重複はテストが検査
 - **評価の修正は全構成に**: 採点方法を変えたら、比較する構成をすべて採点し直す
@@ -61,7 +62,8 @@ flowchart LR
 
 ## 使い方
 
-前提は VOICEVOX engine、ログイン済みのエージェント、`OPENROUTER_API_KEY`（環境変数か `.env`）。
+前提は VOICEVOX engine、ログイン済みのエージェントと Codex CLI（判定役）。
+`OPENROUTER_API_KEY`（環境変数か `.env`）は、声の合成・文字起こし・OpenRouter の判定役に使う。
 
 ```bash
 cargo build --release -p vr-cli -p vr-eval
@@ -77,9 +79,15 @@ target/release/vr-eval calibrate
 target/release/vr-eval run --name v2 --label "改善版" --append --no-grade --vr target/release/vr -- --agent "npx -y @agentclientprotocol/codex-acp@2.6.0"
 ```
 
+`--text` は声も文字起こしも使わず、質問文をそのまま入力する（`OPENROUTER_API_KEY` が不要）。
+時間の起点は送信した瞬間で、文字起こしが一瞬で終わった場合の下限を測る。
+言葉の無い呼びかけ（雑音だけ）は飛ばし、雑音・切れ・言い直しの聞き取りは検査しない。
+
 ```bash
 target/release/vr-eval grade v2
 ```
+
+判定役は `--judge` で変える（`codex:<model>[@<思考量>]`、または OpenRouter のモデル名）。
 
 ```bash
 target/release/vr-eval report base v2 --problems
@@ -97,3 +105,4 @@ target/release/vr-eval html base v2 --out target/eval/report.html
 - 走行音は倍音と風の合成で、実録ではない
 - レースは合成データで、iRacing の実データではない
 - 判定モデルの精度は、機械的に作った 63 例での値
+- 文字入力（`--text`）は聞き取りを経ないため、伝達時間は音声のときより短く、雑音・切れの影響を含まない

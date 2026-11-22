@@ -310,6 +310,12 @@ impl Radio {
         Ok(pressed + Duration::from_secs_f32(u.speech_end_s))
     }
 
+    /// Sends the words as typed; returns when they were sent.
+    fn type_in(&self, words: &str) -> Instant {
+        let _ = self.cmds.send(Command::Ask(words.into()));
+        Instant::now()
+    }
+
     /// Until the turn is answered and the driver heard it.
     async fn answer(&mut self, seen: &mut Observed) -> Result<()> {
         let began = Instant::now();
@@ -338,16 +344,27 @@ pub struct Runner {
     pub cfg: Config,
     pub voices: Voices,
     pub port: u16,
+    /// Typed questions instead of voices.
+    pub text: bool,
+}
+
+/// Calls of a stint in text mode: a call without words has nothing to type.
+pub fn typed_calls(stint: &Stint) -> impl Iterator<Item = &Call> {
+    stint.calls.iter().filter(|c| !c.words().is_empty())
 }
 
 impl Runner {
     pub async fn stint(&self, stint: &Stint) -> Result<Vec<Record>> {
         // Voices first: the race must not run while they are made.
-        let calls = stint
-            .calls
-            .iter()
-            .map(|c| Ok((c, self.utterances(c)?)))
-            .collect::<Result<Vec<_>>>()?;
+        let calls = if self.text {
+            typed_calls(stint).map(|c| (c, None)).collect()
+        } else {
+            stint
+                .calls
+                .iter()
+                .map(|c| Ok((c, Some(self.utterances(c)?))))
+                .collect::<Result<Vec<_>>>()?
+        };
         let world = World::start(&stint.world, self.port).await?;
         let mut radio = Radio::start(&self.cfg);
         radio.ready().await?;
@@ -356,17 +373,9 @@ impl Runner {
 
         let mut records = Vec::new();
         let mut history = Vec::new();
-        for (call, (main, barge)) in &calls {
+        for (call, voices) in &calls {
             let r = self
-                .call(
-                    stint,
-                    call,
-                    main,
-                    barge.as_ref(),
-                    &world,
-                    &mut radio,
-                    &history,
-                )
+                .call(stint, call, voices.as_ref(), &world, &mut radio, &history)
                 .await?;
             history.push((r.said.clone(), r.spoken()));
             records.push(Record {
@@ -409,29 +418,36 @@ impl Runner {
         &self,
         stint: &Stint,
         call: &Call,
-        main: &Utterance,
-        barge: Option<&Utterance>,
+        voices: Option<&(Utterance, Option<Utterance>)>,
         world: &World,
         radio: &mut Radio,
         history: &[(String, String)],
     ) -> Result<Record> {
         radio.speakers.queue.lock().unwrap().played.clear();
         let mut seen = Observed::default();
-        let mut question_end = radio.say(main, &mut seen).await?;
+        let mut question_end = match voices {
+            Some((main, _)) => radio.say(main, &mut seen).await?,
+            None => radio.type_in(&call.words()),
+        };
         let (mut said, mut facts, mut points) =
             (call.words(), call.facts.clone(), call.points.clone());
-        let mut speech_s = main.speech_end_s;
+        let mut speech_s = voices.map_or(0.0, |(m, _)| m.speech_end_s);
         let mut history = history.to_vec();
-        if let (Some(b), Some(u)) = (&call.barge_in, barge) {
+        if let Some(b) = &call.barge_in {
             radio
                 .follow(Duration::from_secs_f32(b.after_s), &mut seen)
                 .await?;
-            question_end = radio.say(u, &mut seen).await?;
+            question_end = match voices {
+                Some((_, Some(u))) => {
+                    speech_s = u.speech_end_s;
+                    radio.say(u, &mut seen).await?
+                }
+                _ => radio.type_in(&strip_pauses(&b.say)),
+            };
             history.push((said, "（割り込み）".into()));
             said = strip_pauses(&b.say);
             facts = b.facts.clone();
             points = b.points.clone();
-            speech_s = u.speech_end_s;
         }
         let truth_at_question = world.text();
         radio.answer(&mut seen).await?;
@@ -588,6 +604,23 @@ mod tests {
         let q = s.queue.lock().unwrap();
         assert_eq!(q.played.len(), 1);
         assert!(q.played[0].2 - q.played[0].1 < Duration::from_millis(900));
+    }
+
+    #[test]
+    fn typing_skips_the_calls_without_words() {
+        let dev = crate::scenario::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios/dev.yaml"),
+        )
+        .unwrap();
+        let typed: Vec<&str> = dev
+            .iter()
+            .flat_map(typed_calls)
+            .map(|c| c.id.as_str())
+            .collect();
+        let all: usize = dev.iter().map(|s| s.calls.len()).sum();
+        assert_eq!(typed.len(), all - 1);
+        assert!(!typed.contains(&"noise-only"));
+        assert!(typed.contains(&"cut-off"));
     }
 
     #[test]

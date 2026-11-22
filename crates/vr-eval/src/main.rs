@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use vr_eval::audio::Voices;
 use vr_eval::html::{self, Calibration, Meta};
-use vr_eval::judge::{Case, Grade, JUDGES, Judge, Verdict};
+use vr_eval::judge::{Case, Grade, JUDGES, Judge, Verdict, codex_model, needs_key};
 use vr_eval::report::{self, Graded};
 use vr_eval::run::{Record, Runner};
 use vr_eval::{calibrate, scenario};
@@ -47,6 +47,10 @@ enum Cmd {
         /// Records only; `grade` does the rest later.
         #[arg(long)]
         no_grade: bool,
+        /// Types the words instead of saying them: no voices, no
+        /// transcription. Times start when the question is sent.
+        #[arg(long)]
+        text: bool,
         /// Only these stints.
         #[arg(long)]
         stint: Vec<String>,
@@ -63,7 +67,13 @@ enum Cmd {
         radio: Vec<String>,
     },
     /// Grades (again) the records of a run.
-    Grade { name: String },
+    Grade {
+        name: String,
+        /// `codex:<model>[@<effort>]` or an OpenRouter model; the default
+        /// pair otherwise.
+        #[arg(long)]
+        judge: Vec<String>,
+    },
     /// Measures the judges on replies with known grades.
     Calibrate {
         #[arg(long)]
@@ -98,6 +108,8 @@ enum Cmd {
         port: u16,
         #[arg(long)]
         out: PathBuf,
+        #[arg(long)]
+        text: bool,
         #[arg(last = true)]
         radio: Vec<String>,
     },
@@ -124,6 +136,7 @@ fn main() -> Result<()> {
             trials,
             append,
             no_grade,
+            text,
             stint,
             label,
             note,
@@ -146,6 +159,7 @@ fn main() -> Result<()> {
                 label: label.clone().unwrap_or_else(|| name.clone()),
                 note: note.clone(),
                 radio: radio.clone(),
+                text: *text,
             };
             std::fs::write(
                 cli.dir.join(format!("{name}.meta.json")),
@@ -159,15 +173,16 @@ fn main() -> Result<()> {
                 stint,
                 vr.as_deref(),
                 radio,
+                *text,
                 &out,
             )?;
             if *no_grade {
                 return Ok(());
             }
-            grade(&cli.dir, name, key.as_deref())?;
+            grade(&cli.dir, name, &[], key.as_deref())?;
             print_report(&cli.dir, std::slice::from_ref(name), false)
         }
-        Cmd::Grade { name } => grade(&cli.dir, name, key.as_deref()),
+        Cmd::Grade { name, judge } => grade(&cli.dir, name, judge, key.as_deref()),
         Cmd::Calibrate { judge } => calibrate_judges(&cli.dir, judge, key.as_deref()),
         Cmd::Html { names, out } => {
             let out = out.clone().unwrap_or_else(|| cli.dir.join("report.html"));
@@ -181,6 +196,7 @@ fn main() -> Result<()> {
             trial,
             port,
             out,
+            text,
             radio,
         } => {
             let stints = scenario::load(set)?;
@@ -202,6 +218,7 @@ fn main() -> Result<()> {
                 },
                 cfg,
                 port: *port,
+                text: *text,
             };
             let rt = tokio::runtime::Runtime::new()?;
             let records = rt.block_on(runner.stint(spec))?;
@@ -236,6 +253,7 @@ fn run(
     only: &[String],
     vr: Option<&Path>,
     radio: &[String],
+    text: bool,
     out: &Path,
 ) -> Result<()> {
     let stints = scenario::load(set)?;
@@ -282,6 +300,7 @@ fn run(
                     .args(["--trial", &trial.to_string(), "--port", &port.to_string()])
                     .arg("--out")
                     .arg(out)
+                    .args(text.then_some("--text"))
                     .arg("--")
                     .args(&args)
                     .env("VR_SERVER", format!("http://127.0.0.1:{port}"))
@@ -308,11 +327,23 @@ fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     text.lines().map(|l| Ok(serde_json::from_str(l)?)).collect()
 }
 
-fn grade(dir: &Path, name: &str, key: Option<&str>) -> Result<()> {
-    let key = key.context("the judges need OPENROUTER_API_KEY")?;
+fn judges(chosen: &[String]) -> Vec<&str> {
+    if chosen.is_empty() {
+        JUDGES.to_vec()
+    } else {
+        chosen.iter().map(String::as_str).collect()
+    }
+}
+
+fn grade(dir: &Path, name: &str, chosen: &[String], key: Option<&str>) -> Result<()> {
+    let models = judges(chosen);
+    ensure!(
+        key.is_some() || !needs_key(&models),
+        "the judges need OPENROUTER_API_KEY"
+    );
     let records: Vec<Record> = read(&dir.join(format!("{name}.jsonl")))?;
     let cases: Vec<Case> = records.iter().map(Case::from).collect();
-    let judged = judge_all(&cases, &JUDGES, key)?;
+    let judged = judge_all(dir, &cases, &models, key)?;
     let mut file = std::fs::File::create(dir.join(format!("{name}.graded.jsonl")))?;
     for (record, verdicts) in records.into_iter().zip(judged) {
         let g = Graded { record, verdicts };
@@ -322,18 +353,32 @@ fn grade(dir: &Path, name: &str, key: Option<&str>) -> Result<()> {
 }
 
 /// Every case by every judge, several at a time.
-fn judge_all(cases: &[Case], models: &[&str], key: &str) -> Result<Vec<Vec<Verdict>>> {
+fn judge_all(
+    dir: &Path,
+    cases: &[Case],
+    models: &[&str],
+    key: Option<&str>,
+) -> Result<Vec<Vec<Verdict>>> {
+    let cwd = std::path::absolute(dir.join("judge"))?;
+    // The CLI is a process with its own rate limit.
+    let at_once = if models.iter().any(|m| codex_model(m).is_some()) {
+        4
+    } else {
+        16
+    };
     let mut out = Vec::new();
-    for chunk in cases.chunks(16) {
+    for chunk in cases.chunks(at_once) {
         let results: Vec<Result<Vec<Verdict>>> = std::thread::scope(|s| {
             let threads: Vec<_> = chunk
                 .iter()
                 .map(|case| {
+                    let cwd = cwd.clone();
                     s.spawn(move || {
                         let verdicts = models.iter().filter_map(|m| {
                             let judge = Judge {
-                                key: key.into(),
+                                key: key.map(String::from),
                                 model: m.to_string(),
+                                cwd: cwd.clone(),
                             };
                             // A missing verdict leaves the call disputed.
                             judge
@@ -400,19 +445,18 @@ fn today() -> String {
 }
 
 fn calibrate_judges(dir: &Path, models: &[String], key: Option<&str>) -> Result<()> {
-    let key = key.context("the judges need OPENROUTER_API_KEY")?;
     let labelled = calibrate::cases();
     let cases: Vec<Case> = labelled.iter().map(|l| l.case.clone()).collect();
-    let models: Vec<&str> = if models.is_empty() {
-        JUDGES.to_vec()
-    } else {
-        models.iter().map(String::as_str).collect()
-    };
+    let models = judges(models);
+    ensure!(
+        key.is_some() || !needs_key(&models),
+        "the judges need OPENROUTER_API_KEY"
+    );
     println!("{} labelled replies", cases.len());
     let mut all: Vec<Vec<Verdict>> = vec![Vec::new(); cases.len()];
     let mut results = Vec::new();
     for model in &models {
-        let judged = match judge_all(&cases, &[model], key) {
+        let judged = match judge_all(dir, &cases, &[model], key) {
             Ok(j) => j,
             Err(e) => {
                 println!("{model}: {e:#}");
