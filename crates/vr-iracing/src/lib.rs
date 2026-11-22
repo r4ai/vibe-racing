@@ -13,11 +13,13 @@
 //! only [`shm`] touches the Win32 API.
 
 mod convert;
+mod ibt;
 mod layout;
 mod session_info;
 pub mod shm;
 mod source;
 
+pub use ibt::IbtSource;
 pub use layout::{Header, VarHeader, VarTable, VarType};
 pub use session_info::{SessionInfo, sanitize_yaml};
 pub use shm::SharedMemory;

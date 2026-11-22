@@ -60,6 +60,7 @@ mod stub {
     pub fn first_instance() -> bool {
         true
     }
+    pub fn leave_own_console() {}
 }
 
 #[cfg(windows)]
@@ -86,6 +87,19 @@ mod win32 {
     use super::{ResidentEvent, icon_rgba, startup_command};
 
     pub const SUPPORTED: bool = true;
+
+    /// Closes the console when this process is alone in it (started from the
+    /// Start menu or Explorer, not from a terminal).
+    pub fn leave_own_console() {
+        use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+        let mut pids = [0u32; 2];
+        // SAFETY: the buffer holds the given number of process ids.
+        let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
+        if attached == 1 {
+            // SAFETY: plain Win32 call; writes to the console then go nowhere.
+            unsafe { FreeConsole() };
+        }
+    }
     const SHOW: &str = "show";
     const QUIT: &str = "quit";
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";

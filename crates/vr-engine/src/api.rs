@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::RaceState;
+use crate::handling::{Behaviour, HandlingLap};
 use crate::report::*;
 use crate::state::{car_ref, is_multi_class};
 
@@ -40,6 +41,25 @@ pub struct EventsParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChannelsParams {
+    /// Only channels whose name, unit or description contains all of these
+    /// words (case is ignored).
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct InfoParams {
+    /// E.g. `"WeekendInfo/TrackNumTurns"` or `"DriverInfo/Drivers/0"`.
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HandlingParams {
+    /// Mean over the last N laps (default 3).
+    pub last: Option<usize>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("not found: {0}")]
@@ -62,6 +82,11 @@ pub trait RaceApi {
     fn laps(&self, p: &LapsParams) -> ApiResult<LapsReport>;
     fn events(&self, p: &EventsParams) -> ApiResult<EventsReport>;
     fn snapshot(&self) -> ApiResult<SnapshotReport>;
+    fn car(&self) -> ApiResult<CarReport>;
+    fn channels(&self, p: &ChannelsParams) -> ApiResult<ChannelsReport>;
+    fn info(&self, p: &InfoParams) -> ApiResult<InfoReport>;
+    fn setup(&self) -> ApiResult<SetupReport>;
+    fn handling(&self, p: &HandlingParams) -> ApiResult<HandlingReport>;
 }
 
 /// Thread-safe handle used by long-running collectors.
@@ -82,6 +107,7 @@ impl RaceApi for RaceState {
                 recent_events: self.event_log().last(5),
                 weather: None,
                 rain_trend: None,
+                car: None,
             });
         };
         let mut nearby = self.nearby(f, None);
@@ -97,6 +123,7 @@ impl RaceApi for RaceState {
             recent_events: self.event_log().last(5),
             weather: f.weather.clone(),
             rain_trend: self.rain_trend(),
+            car: f.player.as_ref().map(|p| p.car.clone()),
         })
     }
 
@@ -274,6 +301,97 @@ impl RaceApi for RaceState {
             frame: self.frame().cloned(),
         })
     }
+
+    fn car(&self) -> ApiResult<CarReport> {
+        let f = self.frame();
+        let p = f.and_then(|f| f.player.as_ref());
+        Ok(CarReport {
+            meta: self.meta(),
+            car_name: f.and_then(|f| f.player_car()?.car_name.clone()),
+            car: p.map(|p| p.car.clone()),
+            water_temp_c: p.and_then(|p| p.water_temp_c),
+            oil_temp_c: p.and_then(|p| p.oil_temp_c),
+            incidents: p.and_then(|p| p.incidents),
+            adjustments: self.adjustments().to_vec(),
+        })
+    }
+
+    fn channels(&self, p: &ChannelsParams) -> ApiResult<ChannelsReport> {
+        let all = self.extras().map_or(&[][..], |e| &e.channels);
+        let words: Vec<String> = p
+            .filter
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        Ok(ChannelsReport {
+            meta: self.meta(),
+            total: all.len(),
+            channels: all
+                .iter()
+                .filter(|c| {
+                    let text = format!("{} {} {}", c.name, c.unit, c.description).to_lowercase();
+                    words.iter().all(|w| text.contains(w))
+                })
+                .cloned()
+                .collect(),
+        })
+    }
+
+    fn info(&self, p: &InfoParams) -> ApiResult<InfoReport> {
+        let path = p.path.clone().unwrap_or_default();
+        let mut value = self.extras().and_then(|e| e.info.as_ref());
+        for key in path.split('/').filter(|k| !k.is_empty()) {
+            let Some(v) = value else { break };
+            let next = match v {
+                serde_json::Value::Array(a) => key.parse::<usize>().ok().and_then(|i| a.get(i)),
+                v => v.get(key),
+            };
+            value = Some(next.ok_or_else(|| ApiError::NotFound(format!("info {path}")))?);
+        }
+        Ok(InfoReport {
+            meta: self.meta(),
+            value: value.cloned(),
+            path,
+        })
+    }
+
+    fn setup(&self) -> ApiResult<SetupReport> {
+        let f = self.frame();
+        Ok(SetupReport {
+            meta: self.meta(),
+            car_name: f.and_then(|f| f.player_car()?.car_name.clone()),
+            setup: self.setup_now().cloned(),
+            controls: self.controls(),
+            adjustments: self.adjustments().to_vec(),
+        })
+    }
+
+    fn handling(&self, p: &HandlingParams) -> ApiResult<HandlingReport> {
+        let n = p.last.unwrap_or(3).max(1);
+        let tracker = self.handling_tracker();
+        let mut laps: Vec<HandlingLap> = tracker.laps().rev().take(n).cloned().collect();
+        laps.reverse();
+        let each: Vec<Behaviour> = laps.iter().map(|l| l.behaviour).collect();
+        let mean = Behaviour::mean(&each);
+        let car = self.frame().and_then(|f| f.player.as_ref()).map(|p| &p.car);
+        let advice = car.map(|car| {
+            let b = mean.unwrap_or_default();
+            crate::advice::advise(&b, laps.len(), car, self.setup_now())
+        });
+        Ok(HandlingReport {
+            meta: self.meta(),
+            ready: tracker.ready(),
+            laps_sampled: laps.len(),
+            mean,
+            laps,
+            zones: tracker.zones(5),
+            controls: self.controls(),
+            adjustments: self.adjustments().to_vec(),
+            advice: advice.unwrap_or_default(),
+        })
+    }
 }
 
 macro_rules! delegate_locked {
@@ -295,4 +413,9 @@ delegate_locked! {
     laps(p: &LapsParams) -> LapsReport;
     events(p: &EventsParams) -> EventsReport;
     snapshot() -> SnapshotReport;
+    car() -> CarReport;
+    channels(p: &ChannelsParams) -> ChannelsReport;
+    info(p: &InfoParams) -> InfoReport;
+    setup() -> SetupReport;
+    handling(p: &HandlingParams) -> HandlingReport;
 }

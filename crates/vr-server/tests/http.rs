@@ -63,10 +63,15 @@ struct Server {
 
 impl Server {
     fn start(state: SharedState) -> Self {
+        Self::start_with(state, None)
+    }
+
+    fn start_with(state: SharedState, sessions: Option<SessionStore>) -> Self {
         let (tx, _) = broadcast::channel(64);
         let app = AppState {
             state,
             events: tx.clone(),
+            sessions,
         };
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
@@ -249,6 +254,23 @@ fn http_endpoints_serve_race_api() {
     let evs = v["events"].as_array().unwrap();
     assert_eq!(evs.len(), 2);
     assert!(evs.iter().all(|e| e["seq"].as_u64().unwrap() > 3));
+    let (_, v) = s.get("/v1/car");
+    assert_eq!(v["car"]["controls"][0]["id"], "brake_bias");
+    let (_, v) = s.get("/v1/setup");
+    assert_eq!(v["setup"]["name"], "baseline");
+    let (_, v) = s.get("/v1/handling?last=2");
+    assert_eq!(v["laps_sampled"], 2);
+    let (_, v) = s.get("/v1/channels?filter=session%20TIME");
+    assert_eq!(v["channels"][0]["name"], "SessionTime");
+    let (_, v) = s.get("/v1/channels?filter=nope");
+    assert_eq!(
+        (v["total"].clone(), v["channels"].clone()),
+        (1.into(), serde_json::json!([]))
+    );
+    let (_, v) = s.get("/v1/info?path=WeekendInfo/TrackName");
+    assert_eq!(v["value"], "demo");
+    let (code, _) = s.get("/v1/info?path=Nope");
+    assert_eq!(code, 404);
     let (_, v) = s.get("/v1/snapshot");
     assert_eq!(v["frame"]["game"], "synthetic");
 
@@ -272,6 +294,38 @@ fn http_endpoints_serve_race_api() {
     let (code, v) = s.get("/v1/laps?car=999");
     assert_eq!(code, 404);
     assert!(v["error"].as_str().unwrap().contains("#999"));
+}
+
+#[test]
+fn past_sessions_have_a_page() {
+    let (state, _) = collected(None);
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let id = store
+        .save(SessionRecord::of(&state.read().unwrap()).unwrap())
+        .unwrap();
+    let s = Server::start_with(state.clone(), Some(store));
+    let (code, v) = s.get("/v1/sessions");
+    assert_eq!(code, 200);
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["id"], id);
+    assert_eq!(v[0]["laps_completed"], 3);
+    let (_, v) = s.get(&format!("/v1/sessions/{id}"));
+    assert_eq!(v["laps"].as_array().unwrap().len(), 3);
+    assert_eq!(s.get("/v1/sessions/nope").0, 404);
+    let mut page = ureq::get(format!("{}/", s.url)).call().unwrap();
+    assert!(
+        page.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let html = page.body_mut().read_to_string().unwrap();
+    assert!(html.contains("過去のセッション"));
+    assert!(!html.contains("innerHTML"), "names are shown as text only");
+
+    let none = Server::start(state);
+    assert_eq!(none.get("/v1/sessions").0, 404);
 }
 
 #[test]

@@ -87,6 +87,8 @@ cargo test --workspace
 | 解析（物語）    | `crates/vr-engine/tests/engine.rs`          | 合成レース 1 本を通した周回・燃費・ギャップ・イベント            |
 | 解析（境界値）  | `crates/vr-engine/tests/scenarios.rs`       | 手組みのフレームによる練習走行・マルチクラス・時間制レース・閾値 |
 | テキスト整形    | `crates/vr-engine/src/render.rs`            | 構築したレポートに対する期待文字列                               |
+| 車・挙動        | `crates/vr-engine/tests/car.rs`             | 手組みのフレームによる挙動・警告・車内設定・セッション記録       |
+| セッション保存  | `crates/vr-server/tests/sessions.rs`        | 保存・検索・結合、無応答のゲームの開き直し                       |
 | 記録・再生      | `crates/vr-replay/tests/replay.rs`          | 往復、間引き、ペーシング、壊れた入力                             |
 | サーバー        | `crates/vr-server/tests/http.rs`            | コレクター・HTTP 全エンドポイント・SSE・discovery                |
 | CLI             | `crates/vr-cli/tests/cli.rs`                | 実バイナリを起動。`vr serve` 子プロセス経由も含む                |

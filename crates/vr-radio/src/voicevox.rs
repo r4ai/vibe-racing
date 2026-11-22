@@ -1,11 +1,14 @@
 //! VOICEVOX engine client (`audio_query` → `synthesis`).
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::child::{Retry, Supervised};
 use crate::http;
 
 pub trait Synth: Send + Sync + 'static {
@@ -16,6 +19,9 @@ pub trait Synth: Send + Sync + 'static {
     fn warm_up(&self, _speaker: u32) -> Result<()> {
         Ok(())
     }
+
+    /// Speaking rate from the next sentence on (1.0 = engine default).
+    fn set_speed(&self, _speed: f64) {}
 }
 
 /// One selectable voice: a character and one of its styles.
@@ -48,8 +54,8 @@ struct Style {
 
 pub struct Voicevox {
     base_url: String,
-    /// Multiplies the speaking rate (1.0 = engine default).
-    pub speed: f64,
+    /// Multiplies the speaking rate (1.0 = engine default); bits of an `f64`.
+    speed: AtomicU64,
     agent: ureq::Agent,
 }
 
@@ -57,7 +63,7 @@ impl Voicevox {
     pub fn new(base_url: impl Into<String>, speed: f64) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            speed,
+            speed: AtomicU64::new(speed.to_bits()),
             agent: http::agent(Duration::from_secs(20)),
         }
     }
@@ -88,6 +94,10 @@ impl Voicevox {
 }
 
 impl Synth for Voicevox {
+    fn set_speed(&self, speed: f64) {
+        self.speed.store(speed.to_bits(), Ordering::Relaxed);
+    }
+
     /// The engine loads a voice's model on its first use (about a second on
     /// a CPU); `skip_reinit` makes it a no-op for a loaded one.
     fn warm_up(&self, speaker: u32) -> Result<()> {
@@ -113,7 +123,7 @@ impl Synth for Voicevox {
             .with_context(|| self.unreachable())?;
         let mut resp = http::check(resp, "VOICEVOX audio_query")?;
         let mut query: Value = resp.body_mut().read_json()?;
-        query["speedScale"] = self.speed.into();
+        query["speedScale"] = f64::from_bits(self.speed.load(Ordering::Relaxed)).into();
         // Shorter silences at both ends: every sentence is a separate clip.
         query["prePhonemeLength"] = 0.05.into();
         query["postPhonemeLength"] = 0.05.into();
@@ -130,6 +140,57 @@ impl Synth for Voicevox {
             .limit(64 << 20)
             .read_to_vec()?)
     }
+}
+
+/// The host and port of a VOICEVOX on this machine.
+fn local(url: &str) -> Option<(&str, u16)> {
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split('/').next()?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse().ok()?),
+        None => (authority, 80),
+    };
+    matches!(host, "127.0.0.1" | "localhost").then_some((host, port))
+}
+
+/// Where the installers put the engine.
+fn installed() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(local) = dirs::data_local_dir() {
+        dirs.push(local.join("Programs"));
+    }
+    if let Some(p) = std::env::var_os("ProgramFiles") {
+        dirs.push(p.into());
+    }
+    dirs.into_iter()
+        .map(|d| d.join("VOICEVOX").join("vv-engine").join("run.exe"))
+        .collect()
+}
+
+/// The command that starts the engine at `url`: `given` or, when there is
+/// none, the first of `candidates` that exists. `None`: not to be started.
+fn engine_command(url: &str, given: Option<&str>, candidates: &[PathBuf]) -> Option<String> {
+    let (host, port) = local(url)?;
+    let command = match given {
+        Some(c) => c.trim().to_string(),
+        None => {
+            let exe = candidates.iter().find(|c| c.is_file())?;
+            format!("\"{}\"", exe.display())
+        }
+    };
+    (!command.is_empty()).then(|| format!("{command} --host {host} --port {port}"))
+}
+
+/// Starts the engine and keeps it running until the returned value is dropped.
+pub fn start_engine(url: &str, given: Option<&str>) -> Option<Supervised> {
+    let command = engine_command(url, given, &installed())?;
+    tracing::info!("starting VOICEVOX: {command}");
+    let retry = Retry {
+        initial: Duration::ZERO,
+        first: Duration::from_secs(15),
+        max: Duration::from_secs(300),
+    };
+    Supervised::spawn(&command, std::env::temp_dir(), retry, None)
 }
 
 #[cfg(test)]
@@ -154,9 +215,13 @@ mod tests {
         });
         let v = Voicevox::new(format!("{}/", server.url), 1.25);
         assert_eq!(v.synthesize("前 0.6", 3).unwrap(), b"RIFFwav");
+        v.set_speed(1.5);
+        v.synthesize("後", 3).unwrap();
 
         let reqs = server.requests.lock().unwrap();
-        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs.len(), 4);
+        let faster: Value = serde_json::from_slice(&reqs[3].body).unwrap();
+        assert_eq!(faster["speedScale"], 1.5);
         assert_eq!(reqs[0].method, "POST");
         assert_eq!(
             reqs[0].target,
@@ -168,6 +233,45 @@ mod tests {
         assert_eq!(sent["prePhonemeLength"], 0.05);
         assert_eq!(sent["postPhonemeLength"], 0.05);
         assert_eq!(sent["accent_phrases"], Value::Array(vec![]));
+    }
+
+    #[test]
+    fn only_a_local_engine_is_started() {
+        assert_eq!(local("http://127.0.0.1:50021"), Some(("127.0.0.1", 50021)));
+        assert_eq!(local("http://localhost:5/"), Some(("localhost", 5)));
+        assert_eq!(local("http://localhost"), Some(("localhost", 80)));
+        for url in [
+            "http://192.168.0.2:50021",
+            "https://127.0.0.1:50021",
+            "http://127.0.0.1:x",
+            "127.0.0.1:50021",
+        ] {
+            assert_eq!(local(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn the_installed_engine_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("run.exe");
+        let missing = dir.path().join("none.exe");
+        let url = "http://127.0.0.1:50021";
+        let candidates = [missing.clone(), exe.clone()];
+        assert_eq!(engine_command(url, None, &candidates), None);
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(
+            engine_command(url, None, &candidates),
+            Some(format!(
+                "\"{}\" --host 127.0.0.1 --port 50021",
+                exe.display()
+            ))
+        );
+        assert_eq!(
+            engine_command(url, Some("my-engine --x"), &candidates).as_deref(),
+            Some("my-engine --x --host 127.0.0.1 --port 50021")
+        );
+        assert_eq!(engine_command(url, Some(" "), &candidates), None);
+        assert_eq!(engine_command("http://nas:50021", None, &candidates), None);
     }
 
     #[test]

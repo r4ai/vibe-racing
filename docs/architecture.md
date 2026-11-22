@@ -11,6 +11,8 @@
 - **正規化フレーム**: `Frame`（SI 単位、未対応項目は `None`）
 - **テレメトリソース**: `Frame` を返す `TelemetrySource`。ライブ・記録再生・合成レースが実装
 - **レース状態**: `RaceState` が周回・燃費・ギャップ推移・イベントを蓄積
+- **付随データ**: `Extras`。毎フレームには重い値（ゲームの全変数・セッション情報・セットアップ）を約 1 秒ごとに取得
+- **セッション記録**: `SessionRecord`。セッションの結果・周回・イベント・挙動を 1 ファイルに保存
 - **問い合わせ API**: `RaceApi`。レスポンス型は JSON の互換契約
 
 ### 設計目標
@@ -22,14 +24,16 @@
 
 ### 用語
 
-| 用語               | 定義                                                                     |
-| ------------------ | ------------------------------------------------------------------------ |
-| 常駐コレクター     | `vr serve` 内でソースを読み続けるスレッド                                |
-| ワンショット       | サーバー無しで共有メモリを 1 回だけ読む動作。履歴なし                    |
-| クリーンラップ     | ピットレーン通過も黄旗も無い周。平均ペース・燃費の母集団                 |
-| ギャップ推移       | 自車のライン通過ごとに記録した他車との差の変化量（秒/周）                |
-| 近傍車             | 自車の ±2 位以内（マルチクラスではクラス内）。他車のピットイベントの対象 |
-| discovery ファイル | `vr serve` が書く `server.json`。CLI はここから URL を取得               |
+| 用語               | 定義                                                                        |
+| ------------------ | --------------------------------------------------------------------------- |
+| 常駐コレクター     | `vr serve` 内でソースを読み続けるスレッド                                   |
+| ワンショット       | サーバー無しで共有メモリを 1 回だけ読む動作。履歴なし                       |
+| クリーンラップ     | ピットレーン通過も黄旗も無い周。平均ペース・燃費の母集団                    |
+| ギャップ推移       | 自車のライン通過ごとに記録した他車との差の変化量（秒/周）                   |
+| 近傍車             | 自車の ±2 位以内（マルチクラスではクラス内）。他車のピットイベントの対象    |
+| 挙動の傾向         | 入力と車の動きから推定した、アンダー・オーバー・空転・ロックの時間（秒/周） |
+| 車内設定           | 走行中に変えられる項目（`Control`）。BB・TC など                            |
+| discovery ファイル | `vr serve` が書く `server.json`。CLI はここから URL を取得                  |
 
 ## 階層構造と実行時アーキテクチャ
 
@@ -106,11 +110,13 @@ flowchart LR
 | -------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------ |
 | ゲーム → `vr`  | iRacing 共有メモリ `Local\IRSDKMemMapFileName`（読取専用）<br/>と新データ通知イベント | iRacing                                          |
 | CLI → サーバー | HTTP/JSON、`127.0.0.1` 限定、既定ポート 47800                                         | `vr-server`                                      |
+| 過去の画面     | `GET /`（ブラウザ）と `/v1/sessions`。読み取り専用                                    | `vr-server`                                      |
 | イベント配信   | SSE `/v1/events/stream`（event 名 `race`）                                            | `vr-server`                                      |
 | サーバー発見   | `%LOCALAPPDATA%\vibe-racing\server.json`<br/>（`VR_DISCOVERY` で上書き）              | 書いた `vr serve`。終了時に自 PID のものだけ削除 |
 | 記録           | 正規化 `Frame` の NDJSON（既定 10 Hz に間引き）                                       | 利用者                                           |
+| セッション     | `%LOCALAPPDATA%\vibe-racing\sessions\<id>.json`<br/>（`VR_SESSIONS` で上書き）        | `vr serve` が 30 秒ごと・終了時・切断時に保存    |
 
-`RaceState` はメモリ上のみ。`vr serve` の停止で履歴は消える。
+`RaceState` はメモリ上のみ。`vr serve` の停止で、走行中の平均や推移は消える。保存済みのセッションは残り、再起動後の同じセッションと結合する。
 
 ## コードマップと依存関係
 
@@ -139,27 +145,31 @@ flowchart BT
 
 ### 構成要素の対応
 
-| 層     | パス                                                                  | 責務                                                                  | 変更頻度 |
-| ------ | --------------------------------------------------------------------- | --------------------------------------------------------------------- | -------- |
-| 共通型 | [`crates/vr-core`](../crates/vr-core)                                 | `Frame`・`TelemetrySource`・`Capabilities`                            | 低       |
-| 入力   | [`crates/vr-iracing`](../crates/vr-iracing)                           | ヘッダ・変数表の解析、YAML サニタイズ、`Frame` 変換、Win32 マッピング | 中       |
-| 入力   | [`crates/vr-replay`](../crates/vr-replay)                             | NDJSON 記録・再生、ペーシング、合成レース                             | 低       |
-| 解析   | [`crates/vr-engine/src/state.rs`](../crates/vr-engine/src/state.rs)   | 周回確定、燃費・ギャップ・近傍車、イベント検出                        | 高       |
-| 解析   | [`crates/vr-engine/src/api.rs`](../crates/vr-engine/src/api.rs)       | `RaceApi` と引数型、`SharedState` への委譲                            | 中       |
-| 解析   | [`crates/vr-engine/src/report.rs`](../crates/vr-engine/src/report.rs) | レスポンス型（JSON 契約）                                             | 低       |
-| 解析   | [`crates/vr-engine/src/render.rs`](../crates/vr-engine/src/render.rs) | エージェント向けテキスト整形                                          | 中       |
-| 配信   | [`crates/vr-server`](../crates/vr-server)                             | コレクター、HTTP・SSE、discovery                                      | 低       |
-| CLI    | [`crates/vr-cli`](../crates/vr-cli)                                   | コマンド定義、ソース登録、バックエンド選択、`doctor`、スキル同梱      | 中       |
-| スキル | [`skills/race-engineer`](../skills/race-engineer)                     | エージェントの手順と返答規範（`vr` バイナリに埋め込み）               | 中       |
-| 評価   | [`crates/vr-eval`](../crates/vr-eval)                                 | 音声無線の端から端までの評価                                          | 中       |
-| 音声   | [`crates/vr-radio`](../crates/vr-radio)                               | 録音・文字起こし・ACP クライアント・VOICEVOX 読み上げ・画面           | 中       |
+| 層     | パス                                                                      | 責務                                                                  | 変更頻度 |
+| ------ | ------------------------------------------------------------------------- | --------------------------------------------------------------------- | -------- |
+| 共通型 | [`crates/vr-core`](../crates/vr-core)                                     | `Frame`・`TelemetrySource`・`Capabilities`                            | 低       |
+| 入力   | [`crates/vr-iracing`](../crates/vr-iracing)                               | ヘッダ・変数表の解析、YAML サニタイズ、`Frame` 変換、Win32 マッピング | 中       |
+| 入力   | [`crates/vr-replay`](../crates/vr-replay)                                 | NDJSON 記録・再生、ペーシング、合成レース                             | 低       |
+| 解析   | [`crates/vr-engine/src/state.rs`](../crates/vr-engine/src/state.rs)       | 周回確定、燃費・ギャップ・近傍車、イベント検出                        | 高       |
+| 解析   | [`crates/vr-engine/src/api.rs`](../crates/vr-engine/src/api.rs)           | `RaceApi` と引数型、`SharedState` への委譲                            | 中       |
+| 解析   | [`crates/vr-engine/src/report.rs`](../crates/vr-engine/src/report.rs)     | レスポンス型（JSON 契約）                                             | 低       |
+| 解析   | [`crates/vr-engine/src/render.rs`](../crates/vr-engine/src/render.rs)     | エージェント向けテキスト整形                                          | 中       |
+| 解析   | [`crates/vr-engine/src/handling.rs`](../crates/vr-engine/src/handling.rs) | 挙動の傾向の推定                                                      | 中       |
+| 解析   | [`crates/vr-engine/src/advice.rs`](../crates/vr-engine/src/advice.rs)     | 傾向からの変更案（経験則）                                            | 中       |
+| 解析   | [`crates/vr-engine/src/archive.rs`](../crates/vr-engine/src/archive.rs)   | `SessionRecord` の作成と結合                                          | 低       |
+| 配信   | [`crates/vr-server`](../crates/vr-server)                                 | コレクター、HTTP・SSE、discovery、セッションの保存                    | 低       |
+| CLI    | [`crates/vr-cli`](../crates/vr-cli)                                       | コマンド定義、ソース登録、バックエンド選択、`doctor`、スキル同梱      | 中       |
+| スキル | [`skills/race-engineer`](../skills/race-engineer)                         | エージェントの手順と返答規範（`vr` バイナリに埋め込み）               | 中       |
+| 評価   | [`crates/vr-eval`](../crates/vr-eval)                                     | 音声無線の端から端までの評価                                          | 中       |
+| 音声   | [`crates/vr-radio`](../crates/vr-radio)                                   | 録音・文字起こし・ACP クライアント・VOICEVOX 読み上げ・画面           | 中       |
 
 ## 設計上の不変条件
 
-- **ゲーム非依存の境界**: ゲーム固有の値（iRacing のビットフィールド、kg/h、`-1` や `604800` の番兵値）はアダプタ内で正規化
+- **ゲーム非依存の境界**: ゲーム固有の値（iRacing のビットフィールド、kg/h、`-1` や `604800` の番兵値）はアダプタ内で正規化。`Extras` の `channels`・`info` だけはゲームの名前のまま通し、解析には使わない
 - **問い合わせ面の一本化**: フロントエンドは `RaceApi` 経由でのみ状態を読む（`HttpClient` と `RaceState` が実装）
 - **JSON 互換**: `report.rs` の型は HTTP と `-f json` の契約。フィールドの削除・意味変更は禁止
 - **推定の明示**: 推定値には根拠（`FuelBasis`・`GapMode`・`history`・`age_ms`）を付け、欠損は 0 で埋めず `None`
+- **収集を止めない**: 収集スレッドは、コンソールやパイプへの書き込みを待たない（ログは専用スレッドが書き、溢れた行は捨てる）
 - **共有メモリの整合性**: バッファ複製後に tick を再確認し、変化していれば破棄
 - **ローカル限定**: HTTP は `127.0.0.1` のみ
 - **スキルの正本**: `skills/race-engineer/`。配布は `vr skill install` のみ
@@ -232,9 +242,10 @@ sequenceDiagram
 ### 障害と再接続
 
 - ライブソースの切断: `connected=false` にして 2 秒後に再接続
+- ライブソースの無応答: 3 秒新しいデータが無ければ開き直す
 - 有限ソース（再生・合成）: 終端で停止し、最終状態を提供し続ける
 - 回復不能なエラー（`Unsupported` 等）: コレクター停止
-- セッション番号の変化: 周回・フラッグ・順位・自己ベストの履歴を破棄
+- セッションの切替（番号・`uid` の変化、5 秒を超える時刻の逆行）: 記録を保存して履歴を破棄。iRacing は再スタートで番号を変えない
 - 停止時の SSE 接続待ち: 1 秒で打ち切り
 
 ### セッション YAML
@@ -243,11 +254,23 @@ iRacing はドライバー名等を引用符なしで出力するため、`: ` �
 自由記述キーの値を単引用符で囲み、汎用 `Value` から必要なフィールドだけを読む。
 解析に失敗した更新は無視し、直前の情報を使う。
 
+### 挙動の推定と変更案
+
+ゲームはアンダー・オーバーを出さないため、ドライバーの操作と車の動きから推定する。
+
+- **アンダー**: 限界付近（その速度で出た横 G の 6 割以上）で、0.25 秒に舵を 0.06 rad 以上足してもヨーレートが増えない時間
+- **オーバー**: ヨーと逆に舵を当てている時間
+- **空転・後輪ロック**: ギアごとのエンジン回転と車速の比が、基準から 6 % 以上ずれた時間
+- 進入（制動中）・脱出（アクセル 3 割以上）・中間に分け、周回の 20 区間に集計
+- 基準はそのセッションの走行から取り、2 周未満では提案しない
+
+変更案は経験則で、その車にある項目だけを、根拠の数字と副作用を付けて 1 段階ずつ示す。採否は無線の会話でエージェントが決める。
+
 ### 性能
 
 - 書込ロックはフレームごとに短時間、問い合わせは読込ロックのみ
 - 記録は既定 10 Hz に間引き（1 フレーム数 KB〜十数 KB）
-- 保持上限: イベント 1000 件、周回記録は車ごとに 200 周
+- 保持上限: イベント 1000 件、周回記録は車ごとに 200 周、挙動は 100 周、車内設定の変更は 200 件
 
 ## 関連文書
 

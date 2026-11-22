@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use vr_core::{Capabilities, Poll, SourceError, TelemetrySource};
+use vr_core::{Capabilities, Extras, Poll, SourceError, TelemetrySource};
 
 use crate::convert::build_frame;
 use crate::layout::{HEADER_LEN, Header, VAR_HEADER_LEN, VarTable};
@@ -15,6 +15,7 @@ pub struct IRacingSource<M: SharedMemory> {
     session_info: SessionInfo,
     session_info_update: Option<i32>,
     last_tick: Option<i32>,
+    last_data: Vec<u8>,
 }
 
 impl<M: SharedMemory> IRacingSource<M> {
@@ -26,6 +27,7 @@ impl<M: SharedMemory> IRacingSource<M> {
             session_info: SessionInfo::default(),
             session_info_update: None,
             last_tick: None,
+            last_data: Vec::new(),
         }
     }
 
@@ -84,6 +86,14 @@ impl<M: SharedMemory> TelemetrySource for IRacingSource<M> {
         Capabilities::ALL
     }
 
+    fn extras(&mut self) -> Option<Extras> {
+        (!self.last_data.is_empty()).then(|| Extras {
+            channels: self.vars.view(&self.last_data).channels(),
+            info: self.session_info.raw.clone(),
+            setup: self.session_info.setup.clone(),
+        })
+    }
+
     fn poll(&mut self, timeout: Duration) -> Result<Poll, SourceError> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -110,6 +120,7 @@ impl<M: SharedMemory> TelemetrySource for IRacingSource<M> {
                         buf.tick_count as u64,
                         now_ms(),
                     );
+                    self.last_data = data;
                     return Ok(Poll::Frame(Box::new(frame)));
                 }
                 continue;
@@ -186,6 +197,7 @@ mod tests {
         let mut src = IRacingSource::new(mem.clone());
 
         assert_eq!(src.game(), "iracing");
+        assert_eq!(src.extras(), None, "nothing was read yet");
         assert_eq!(src.capabilities(), Capabilities::ALL);
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -216,6 +228,21 @@ mod tests {
             (p.fuel_use_lph.unwrap() - 100.0).abs() < 1e-6,
             "75 kg/h / 0.75 kg/L"
         );
+
+        let extras = src.extras().unwrap();
+        assert_eq!(extras.channels.len(), vars().len());
+        let value = |n: &str| {
+            let c = extras.channels.iter().find(|c| c.name == n);
+            c.unwrap().value.clone()
+        };
+        assert_eq!(value("FuelLevel"), 30.5);
+        assert_eq!(value("IsOnTrack"), true);
+        assert_eq!(value("SessionFlags"), 0x24);
+        assert_eq!(value("CarIdxPosition")[2], 1);
+        assert_eq!(value("CarIdxPosition").as_array().unwrap().len(), 64);
+        assert!(extras.channels.is_sorted_by_key(|c| &c.name));
+        assert_eq!(extras.info.unwrap()["DriverInfo"]["DriverCarIdx"], 1);
+        assert_eq!(extras.setup, None);
 
         // Same tick -> idle after waiting out the timeout; new tick -> frame.
         let t0 = Instant::now();

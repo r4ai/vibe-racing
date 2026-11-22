@@ -15,4 +15,10 @@
   - `black` ペナルティ（ピットへ） / `meatball (repair)` 修理のため要ピット / `disqualify` 失格
   - `debris` 路面に破片 / `one lap to green` 次の周でリスタート
 - **incident (x)**: iRacing のインシデントポイント。`2x` など。
+- **BB / brake bias**: 制動力の前寄りの割合。数値が大きいほど前。
+- **TC / ABS**: 空転・ロックの介入。数値と強さの向きは車種による。
+- **OTS / P2P**: オーバーテイクシステム（push-to-pass）。レース中は残り（単位はゲームによる）。
+- **compound**: タイヤの種類。
+- **fast repair**: 一瞬で直す修理の権利。
+- **tow**: 自走できずピットまで運ばれること。
 - **class position**: マルチクラスでのクラス内順位。`vr` はマルチクラスでは前後の車をクラス内で選ぶ。

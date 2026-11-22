@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use serde_json::Value;
+use vr_core::Channel;
+
 pub const HEADER_LEN: usize = 112;
 pub const VAR_HEADER_LEN: usize = 144;
 pub const MAX_BUFS: usize = 4;
@@ -119,6 +122,7 @@ pub struct VarHeader {
     pub offset: usize,
     pub count: usize,
     pub name: String,
+    pub description: String,
     pub unit: String,
 }
 
@@ -147,6 +151,7 @@ impl VarTable {
                     offset: i32_at(h, 4).max(0) as usize,
                     count: i32_at(h, 8).max(0) as usize,
                     name,
+                    description: cstr(&h[48..112]),
                     unit: cstr(&h[112..144]),
                 },
             );
@@ -160,6 +165,13 @@ impl VarTable {
 
     pub fn is_empty(&self) -> bool {
         self.vars.is_empty()
+    }
+
+    /// All variables, by name.
+    pub fn sorted(&self) -> Vec<&VarHeader> {
+        let mut v: Vec<&VarHeader> = self.vars.values().collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
     }
 
     pub fn get(&self, name: &str) -> Option<&VarHeader> {
@@ -180,6 +192,55 @@ pub struct VarView<'a> {
 }
 
 impl VarView<'_> {
+    /// Names of all variables, sorted.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.table.sorted().into_iter().map(|v| v.name.as_str())
+    }
+
+    pub fn has(&self, name: &str) -> bool {
+        self.table.get(name).is_some()
+    }
+
+    /// Every variable with its value, for what is not normalized.
+    pub fn channels(&self) -> Vec<Channel> {
+        self.table
+            .sorted()
+            .into_iter()
+            .filter_map(|v| {
+                let values: Option<Vec<Value>> =
+                    (0..v.count.max(1)).map(|i| self.json_at(v, i)).collect();
+                let mut values = values?;
+                let value = match (v.ty, v.count) {
+                    // An array of characters is text.
+                    (VarType::Char, n) if n > 1 => {
+                        let b = self.data.get(v.offset..v.offset + n)?;
+                        Value::from(cstr(b))
+                    }
+                    (_, 0 | 1) => values.pop()?,
+                    _ => Value::from(values),
+                };
+                Some(Channel {
+                    name: v.name.clone(),
+                    unit: v.unit.clone(),
+                    description: v.description.clone(),
+                    value,
+                })
+            })
+            .collect()
+    }
+
+    fn json_at(&self, v: &VarHeader, idx: usize) -> Option<Value> {
+        let x = self.f64_at(&v.name, idx)?;
+        Some(match v.ty {
+            VarType::Bool => Value::from(x != 0.0),
+            VarType::Char | VarType::Int => Value::from(x as i64),
+            // The bits, not the sign.
+            VarType::BitField => Value::from(x as i32 as u32),
+            // Five significant digits after the point are plenty.
+            VarType::Float | VarType::Double => Value::from((x * 1e5).round() / 1e5),
+        })
+    }
+
     pub fn f64_at(&self, name: &str, idx: usize) -> Option<f64> {
         let v = self.table.get(name)?;
         if idx >= v.count.max(1) {

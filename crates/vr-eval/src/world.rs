@@ -147,6 +147,7 @@ impl World {
         let app = AppState {
             state: state.clone(),
             events,
+            sessions: None,
         };
         let (shutdown, rx) = tokio::sync::oneshot::channel::<()>();
         let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();

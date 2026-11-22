@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>過去のセッション</title>
+    <style>
+      :root {
+        --bg: #fafafa;
+        --panel: #fff;
+        --line: #e4e4e7;
+        --text: #18181b;
+        --dim: #71717a;
+        --accent: #2563eb;
+        --warn: #b45309;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #09090b;
+          --panel: #18181b;
+          --line: #27272a;
+          --text: #fafafa;
+          --dim: #a1a1aa;
+          --accent: #60a5fa;
+          --warn: #fbbf24;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          14px/1.6 system-ui,
+          "Noto Sans JP",
+          sans-serif;
+        display: grid;
+        grid-template-columns: 340px 1fr;
+        height: 100vh;
+      }
+      aside {
+        border-right: 1px solid var(--line);
+        overflow: auto;
+      }
+      aside header {
+        position: sticky;
+        top: 0;
+        background: var(--bg);
+        padding: 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0 0 8px;
+      }
+      h2 {
+        font-size: 20px;
+        margin: 0;
+      }
+      h3 {
+        font-size: 14px;
+        margin: 24px 0 8px;
+      }
+      input {
+        width: 100%;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: inherit;
+        font: inherit;
+      }
+      aside button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 10px 16px;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        background: none;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
+      aside button:hover,
+      aside button[aria-current="true"] {
+        background: var(--panel);
+      }
+      aside button[aria-current="true"] {
+        box-shadow: inset 3px 0 var(--accent);
+      }
+      .dim {
+        color: var(--dim);
+        font-size: 12px;
+      }
+      main {
+        overflow: auto;
+        padding: 24px;
+      }
+      .facts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 28px;
+        margin-top: 12px;
+      }
+      .facts b {
+        display: block;
+        font-size: 18px;
+        font-variant-numeric: tabular-nums;
+      }
+      table {
+        border-collapse: collapse;
+        font-variant-numeric: tabular-nums;
+      }
+      th {
+        text-align: left;
+        font-weight: 500;
+        color: var(--dim);
+        font-size: 12px;
+      }
+      td,
+      th {
+        padding: 3px 16px 3px 0;
+        border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      tr.me td {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      svg {
+        width: 100%;
+        max-width: 760px;
+        height: 180px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      svg text {
+        fill: var(--dim);
+        font-size: 11px;
+      }
+      @media (max-width: 720px) {
+        body {
+          grid-template-columns: 1fr;
+          height: auto;
+        }
+        aside {
+          border-right: 0;
+          max-height: 40vh;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <header>
+        <h1>過去のセッション</h1>
+        <input
+          id="filter"
+          type="search"
+          placeholder="コース・車・種別で絞り込み"
+          aria-label="絞り込み"
+        />
+      </header>
+      <div id="list"></div>
+    </aside>
+    <main id="main"><p class="dim">左から選んでください。</p></main>
+    <script>
+      "use strict";
+      const KIND = {
+        practice: "練習",
+        qualify: "予選",
+        warmup: "ウォームアップ",
+        race: "レース",
+        other: "その他",
+      };
+      const $ = (id) => document.getElementById(id);
+      // Text only: names come from other drivers.
+      const el = (tag, props, ...children) => {
+        const e = Object.assign(document.createElement(tag), props || {});
+        e.append(...children.filter((c) => c !== null && c !== undefined));
+        return e;
+      };
+      const lap = (s) => {
+        if (!(s > 0)) return "--";
+        const ms = Math.round(s * 1000),
+          m = Math.floor(ms / 60000);
+        const rest = ((ms - m * 60000) / 1000).toFixed(3);
+        return m ? m + ":" + rest.padStart(6, "0") : rest;
+      };
+      const time = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+      const pos = (r) =>
+        r.player?.car.position ? "P" + r.player.car.position + " / " + r.player.cars_total : "--";
+      let sessions = [],
+        current = null;
+
+      function drawList() {
+        const words = $("filter").value.toLowerCase().split(/\s+/).filter(Boolean);
+        const rows = sessions.filter((r) => {
+          const text = [r.track, r.car, KIND[r.kind], r.kind, r.note].join(" ").toLowerCase();
+          return words.every((w) => text.includes(w));
+        });
+        $("list").replaceChildren(
+          ...rows.map((r) => {
+            const b = el(
+              "button",
+              { type: "button" },
+              el("div", null, (KIND[r.kind] || r.kind) + " · " + (r.track || "--")),
+              el(
+                "div",
+                { className: "dim" },
+                new Date(r.started_ms).toLocaleString() +
+                  " · " +
+                  pos(r) +
+                  " · " +
+                  r.laps_completed +
+                  " 周 · " +
+                  lap(r.best_lap_s),
+              ),
+              r.note ? el("div", { className: "dim" }, "📝 " + r.note) : null,
+            );
+            b.setAttribute("aria-current", r.id === current);
+            b.onclick = () => {
+              location.hash = r.id;
+            };
+            return b;
+          }),
+        );
+        if (!rows.length)
+          $("list").append(
+            el("p", { className: "dim", style: "padding: 16px" }, "セッションがありません。"),
+          );
+      }
+
+      function chart(laps) {
+        const pts = laps.filter((l) => l.time_s > 0);
+        if (pts.length < 2) return null;
+        const NS = "http://www.w3.org/2000/svg";
+        const s = (tag, attrs, text) => {
+          const e = document.createElementNS(NS, tag);
+          for (const k in attrs) e.setAttribute(k, attrs[k]);
+          if (text !== undefined) e.textContent = text;
+          return e;
+        };
+        const W = 760,
+          H = 180,
+          L = 64,
+          R = 16,
+          T = 16,
+          B = 26;
+        const ts = pts.map((l) => l.time_s),
+          lo = Math.min(...ts),
+          hi = Math.max(...ts, lo + 0.5);
+        const x = (n) =>
+          L + ((W - L - R) * (n - pts[0].lap)) / Math.max(1, pts[pts.length - 1].lap - pts[0].lap);
+        const y = (t) => T + ((H - T - B) * (hi - t)) / (hi - lo);
+        const svg = s("svg", {
+          viewBox: `0 0 ${W} ${H}`,
+          role: "img",
+          "aria-label": "ラップタイムの推移",
+        });
+        svg.append(
+          s("text", { x: 8, y: y(hi) + 4 }, lap(hi)),
+          s("text", { x: 8, y: y(lo) + 4 }, lap(lo)),
+        );
+        svg.append(
+          s("polyline", {
+            points: pts.map((l) => x(l.lap) + "," + y(l.time_s)).join(" "),
+            fill: "none",
+            stroke: "var(--accent)",
+            "stroke-width": 2,
+          }),
+        );
+        for (const l of pts) {
+          const c = s("circle", {
+            cx: x(l.lap),
+            cy: y(l.time_s),
+            r: 4,
+            fill: l.pit || l.caution ? "var(--warn)" : "var(--accent)",
+          });
+          c.append(
+            s(
+              "title",
+              {},
+              l.lap +
+                " 周目 " +
+                lap(l.time_s) +
+                (l.pit ? " ピット" : "") +
+                (l.caution ? " 黄旗" : ""),
+            ),
+          );
+          svg.append(c, s("text", { x: x(l.lap), y: H - 8, "text-anchor": "middle" }, l.lap));
+        }
+        return svg;
+      }
+
+      function table(head, rows) {
+        return el(
+          "div",
+          { className: "scroll" },
+          el(
+            "table",
+            null,
+            el("tr", null, ...head.map((h) => el("th", null, h))),
+            ...rows.map((r) =>
+              el(
+                "tr",
+                { className: r.me ? "me" : "" },
+                ...r.cells.map((c) => el("td", null, c ?? "--")),
+              ),
+            ),
+          ),
+        );
+      }
+
+      async function show(id) {
+        current = id;
+        drawList();
+        const res = await fetch("/v1/sessions/" + encodeURIComponent(id));
+        if (!res.ok) {
+          $("main").replaceChildren(el("p", null, "見つかりません。"));
+          return;
+        }
+        const r = await res.json();
+        if (current !== id) return;
+        const fact = (label, value) =>
+          el("div", null, el("span", { className: "dim" }, label), el("b", null, value));
+        const out = [
+          el("h2", null, (KIND[r.kind] || r.kind) + " · " + (r.track || "--")),
+          el(
+            "div",
+            { className: "dim" },
+            new Date(r.started_ms).toLocaleString() + " · " + (r.car || "--") + " · " + r.id,
+          ),
+          r.note ? el("p", null, "📝 " + r.note) : null,
+        ];
+        const best = r.laps.map((l) => l.time_s).filter((t) => t > 0);
+        const clean = r.laps
+          .filter((l) => l.time_s > 0 && !l.pit && !l.caution)
+          .map((l) => l.time_s);
+        const fuel = r.laps
+          .filter((l) => l.fuel_used_l > 0 && !l.pit && !l.caution)
+          .map((l) => l.fuel_used_l);
+        const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+        out.push(
+          el(
+            "div",
+            { className: "facts" },
+            fact("順位", pos(r)),
+            fact("周回", String(r.laps_completed)),
+            fact("ベスト", lap(best.length ? Math.min(...best) : r.player?.best_lap_s)),
+            fact("平均", lap(mean(clean))),
+            fact("燃費", fuel.length ? mean(fuel).toFixed(2) + " L/周" : "--"),
+            fact("インシデント", (r.player?.incidents ?? 0) + "x"),
+            fact("時間", time(r.duration_s)),
+          ),
+        );
+        if (r.laps.length) {
+          out.push(
+            el("h3", null, "ラップ"),
+            chart(r.laps),
+            table(
+              ["周", "タイム", "燃料", "備考"],
+              r.laps.map((l) => ({
+                cells: [
+                  String(l.lap),
+                  lap(l.time_s),
+                  l.fuel_used_l ? l.fuel_used_l.toFixed(2) + " L" : null,
+                  [l.pit && "ピット", l.caution && "黄旗"].filter(Boolean).join("・") || "",
+                ],
+              })),
+            ),
+          );
+        }
+        if (r.standings.length)
+          out.push(
+            el("h3", null, "結果"),
+            table(
+              ["順位", "車番", "ドライバー", "周回", "ベスト"],
+              r.standings.map((s) => ({
+                me: s.is_player,
+                cells: [
+                  s.car.position ? "P" + s.car.position : null,
+                  "#" + s.car.number,
+                  s.car.driver,
+                  String(s.laps_completed ?? 0),
+                  lap(s.best_lap_s),
+                ],
+              })),
+            ),
+          );
+        if (r.handling.length)
+          out.push(
+            el("h3", null, "挙動の傾向（秒/周）"),
+            table(
+              ["周", "アンダー", "オーバー", "空転", "後輪ロック", "ABS"],
+              r.handling.map((h) => {
+                const b = h.behaviour,
+                  sum = (p) => (p.entry + p.mid + p.exit).toFixed(1);
+                return {
+                  cells: [
+                    String(h.lap),
+                    sum(b.understeer),
+                    sum(b.oversteer),
+                    b.wheelspin_s.toFixed(1),
+                    b.rear_lock_s.toFixed(1),
+                    b.abs_s.toFixed(1),
+                  ],
+                };
+              }),
+            ),
+          );
+        if (r.adjustments.length)
+          out.push(
+            el("h3", null, "車内設定の変更"),
+            table(
+              ["時刻", "周", "項目", "変更"],
+              r.adjustments.map((a) => ({
+                cells: [
+                  time(a.session_time_s),
+                  a.lap === null ? null : String(a.lap),
+                  a.control,
+                  a.from.toFixed(1) + " → " + a.to.toFixed(1),
+                ],
+              })),
+            ),
+          );
+        if (r.events.length)
+          out.push(
+            el("h3", null, "イベント"),
+            table(
+              ["時刻", "内容"],
+              r.events.map((e) => ({ cells: [time(e.session_time_s), e.text] })),
+            ),
+          );
+        if (r.setup)
+          out.push(
+            el("h3", null, "セットアップ " + (r.setup.name || "")),
+            table(
+              ["項目", "値"],
+              r.setup.items.map((i) => ({ cells: [i.path, i.value] })),
+            ),
+          );
+        $("main").replaceChildren(...out.filter(Boolean));
+        $("main").scrollTop = 0;
+      }
+
+      $("filter").oninput = drawList;
+      window.onhashchange = () => show(decodeURIComponent(location.hash.slice(1)));
+      fetch("/v1/sessions")
+        .then((r) => r.json())
+        .then((list) => {
+          sessions = list;
+          drawList();
+          const id = decodeURIComponent(location.hash.slice(1)) || list[0]?.id;
+          if (id) show(id);
+        });
+    </script>
+  </body>
+</html>

@@ -116,6 +116,21 @@ impl RaceApi for HttpClient {
     fn snapshot(&self) -> ApiResult<SnapshotReport> {
         self.get("/v1/snapshot", &())
     }
+    fn car(&self) -> ApiResult<CarReport> {
+        self.get("/v1/car", &())
+    }
+    fn channels(&self, p: &ChannelsParams) -> ApiResult<ChannelsReport> {
+        self.get("/v1/channels", p)
+    }
+    fn info(&self, p: &InfoParams) -> ApiResult<InfoReport> {
+        self.get("/v1/info", p)
+    }
+    fn setup(&self) -> ApiResult<SetupReport> {
+        self.get("/v1/setup", &())
+    }
+    fn handling(&self, p: &HandlingParams) -> ApiResult<HandlingReport> {
+        self.get("/v1/handling", p)
+    }
 }
 
 pub enum Backend {
@@ -133,11 +148,16 @@ impl Backend {
 }
 
 /// Where a running server is, in priority order: `--server`, `VR_SERVER`,
-/// the discovery file written by `vr serve`.
+/// the discovery file written by `vr serve`, the default port (unless the
+/// discovery file was moved, e.g. by tests).
 pub fn server_url(flag: Option<&str>) -> Option<String> {
     flag.map(str::to_string)
         .or_else(|| std::env::var("VR_SERVER").ok().filter(|s| !s.is_empty()))
         .or_else(|| vr_server::read_discovery().map(|i| i.url))
+        .or_else(|| {
+            let moved = std::env::var_os("VR_DISCOVERY").is_some_and(|p| !p.is_empty());
+            (!moved).then(|| format!("http://127.0.0.1:{}", vr_server::DEFAULT_PORT))
+        })
 }
 
 pub fn find_server(flag: Option<&str>) -> Option<HttpClient> {
@@ -198,6 +218,9 @@ pub fn load_local(src: &SourceArgs) -> anyhow::Result<RaceState> {
                 let stop = src.until.is_some_and(|u| f.session.time_s >= u);
                 st.ingest(*f);
                 if live || stop {
+                    if let Some(e) = source.extras() {
+                        st.set_extras(e);
+                    }
                     break;
                 }
             }
@@ -217,6 +240,9 @@ pub fn load_local(src: &SourceArgs) -> anyhow::Result<RaceState> {
                     .into());
                 }
                 st.set_connected(false);
+                if let Some(e) = source.extras() {
+                    st.set_extras(e);
+                }
                 break;
             }
         }

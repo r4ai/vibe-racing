@@ -9,11 +9,16 @@ use shadcn_iced::prelude::*;
 use shadcn_iced::trace::{self, trace, trace_line};
 use shadcn_iced::typography::muted_text;
 
-use super::{AgentChoice, AgentStatus, App, Capture, Message, Phase, SCROLLER, TurnView, latency};
+use super::{
+    AgentChoice, AgentStatus, App, Capture, Message, Phase, Readiness, SCROLLER, TurnView,
+    VoiceState, latency,
+};
 use crate::agent::ToolState;
 use crate::chrome;
+use crate::directive::{MAX_VOLUME, SPEED};
 use crate::engine::Outcome;
 use crate::stt::{self, SttBackend};
+use crate::watch::Group;
 
 const CONSOLE_WIDTH: f32 = 288.0;
 const LOG_PADDING: f32 = 24.0;
@@ -211,6 +216,20 @@ impl App {
             keys = keys.push(muted(wheel.to_string(), 12.0));
         }
 
+        let volume = row![
+            icon_button(if self.muted {
+                lucide::VOLUME_X
+            } else {
+                lucide::VOLUME_2
+            })
+            .variant(button::Variant::Ghost)
+            .size(button::Size::IconSm)
+            .on_press(Message::Muted(!self.muted)),
+            self.volume_slider(),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
         let mut info = column![].spacing(6);
         let has_info = self.voice.is_some() || self.turns.iter().any(|t| t.audio_ms.is_some());
         if let Some(v) = &self.voice {
@@ -229,8 +248,11 @@ impl App {
             state,
             Space::new().height(Length::FillPortion(1)),
             column![ptt, stop, container(keys).center_x(Length::Fill)].spacing(8),
+            volume,
+            separator(),
+            self.readiness_list(),
         ]
-        .spacing(20);
+        .spacing(16);
         if has_info {
             panel = panel.push(separator()).push(info);
         }
@@ -243,6 +265,58 @@ impl App {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// Percent, with its number.
+    fn volume_slider(&self) -> Element<'_, Message> {
+        row![
+            slider(
+                0.0..=f32::from(MAX_VOLUME),
+                f32::from(self.config.volume),
+                |v| Message::Volume(v.round() as u8)
+            )
+            .step(5.0)
+            .on_release(Message::SaveSettings)
+            .width(Length::Fill),
+            muted(format!("{}%", self.config.volume), 13.0).width(42),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// What can be used, two by two.
+    fn readiness_list(&self) -> Element<'_, Message> {
+        let item = |(label, state): (&'static str, Readiness)| {
+            let (color, note): (fn(&Theme) -> Color, &str) = match state {
+                Readiness::Ready => (|_| Color::from_rgb8(0x22, 0xc5, 0x5e), ""),
+                Readiness::Starting => (|_| Color::from_rgb8(0xf5, 0x9e, 0x0b), "起動中"),
+                Readiness::Failed => (|t| palette(t).destructive, "使えません"),
+                Readiness::Off => (|t| palette(t).muted_foreground, "オフ"),
+            };
+            let dot = container(Space::new().width(6).height(6)).style(move |t: &Theme| {
+                container::Style {
+                    background: Some(Background::Color(color(t))),
+                    border: Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            });
+            row![dot, text(label).size(12), muted(note, 11.0)]
+                .spacing(6)
+                .align_y(Alignment::Center)
+        };
+        let [agent, voice, telemetry, microphone] = self.readiness().map(item);
+        // Wide enough for the longest label with its note.
+        let left = 136;
+        column![
+            row![agent.width(left), voice],
+            row![telemetry.width(left), microphone],
+        ]
+        .spacing(6)
+        .into()
     }
 
     /// A ring that grows with the voice while recording.
@@ -366,10 +440,10 @@ impl App {
 
     pub(super) fn settings(&self) -> Element<'_, Message> {
         let voice: Element<'_, Message> = if self.voices.is_empty() {
-            muted_text(format!(
-                "VOICEVOX に接続できません（{}）",
-                self.config.voicevox_url
-            ))
+            muted_text(match self.voice_state {
+                VoiceState::Starting => "VOICEVOX を起動中…".to_string(),
+                _ => format!("VOICEVOX に接続できません（{}）", self.config.voicevox_url),
+            })
             .into()
         } else {
             column![
@@ -391,7 +465,11 @@ impl App {
             switch(!self.muted)
                 .label("回答を読み上げる")
                 .on_toggle(|on| Message::Muted(!on)),
+            field("音量", self.volume_slider()),
+            field("話速", self.speed_slider()),
             field("話者", voice),
+            separator(),
+            self.proactive_settings(),
             separator(),
             field("エージェント", self.agent_settings()),
             field("文字起こし", self.stt_settings()),
@@ -410,6 +488,54 @@ impl App {
             ))
             .style(shadcn_iced::scroll_area::style)
             .into()
+    }
+
+    fn speed_slider(&self) -> Element<'_, Message> {
+        row![
+            slider(
+                f32::from(*SPEED.start())..=f32::from(*SPEED.end()),
+                f32::from(self.config.speed_percent()),
+                |v| Message::Speed(v.round() as u16)
+            )
+            .step(5.0)
+            .on_release(Message::SaveSettings)
+            .width(Length::Fill),
+            muted(format!("{:.2}", self.config.speed), 13.0).width(42),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// What the engineer calls about without being asked.
+    fn proactive_settings(&self) -> Element<'_, Message> {
+        let p = self.settings.proactive;
+        let mut col = column![
+            switch(p.enabled)
+                .label("出来事を自動で連絡する")
+                .on_toggle(Message::Proactive)
+        ]
+        .spacing(10);
+        if p.enabled {
+            let cell = |g: Group| {
+                container(
+                    switch(p.get(g))
+                        .size(shadcn_iced::switch::Size::Sm)
+                        .label(g.label())
+                        .on_toggle(move |on| Message::ProactiveGroup(g, on)),
+                )
+                .width(Length::Fill)
+            };
+            for pair in Group::ALL.chunks(2) {
+                let mut line = row![cell(pair[0])].spacing(8);
+                line = match pair.get(1) {
+                    Some(g) => line.push(cell(*g)),
+                    None => line.push(space::horizontal()),
+                };
+                col = col.push(line);
+            }
+        }
+        col.into()
     }
 
     fn agent_settings(&self) -> Element<'_, Message> {
@@ -604,6 +730,15 @@ fn fact<'a>(label: &'static str, value: String) -> Element<'a, Message> {
 /// One exchange: the question, the tool calls, the answer and its timing.
 pub(super) fn turn_view(t: &TurnView) -> Element<'_, Message> {
     let question: Element<'_, Message> = match t.heard_label() {
+        Some(q) if t.call => row![
+            badge("自動連絡")
+                .icon(lucide::BELL_RING)
+                .variant(shadcn_iced::badge::Variant::Secondary),
+            muted(q, 14.0),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
         Some(q) => row![
             icon(lucide::MIC).size(14).style(|t: &Theme| text::Style {
                 color: Some(palette(t).muted_foreground)

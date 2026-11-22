@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Frame;
+use crate::{Extras, Frame};
 
 /// What a game adapter is able to provide. Consumers use this to tell the
 /// user "not available in this game" rather than guessing.
@@ -56,6 +56,11 @@ pub trait TelemetrySource: Send {
     fn capabilities(&self) -> Capabilities;
     /// Wait up to `timeout` for the next sample.
     fn poll(&mut self, timeout: Duration) -> Result<Poll, SourceError>;
+    /// What is too big or too slow for every frame, as of the last sample.
+    /// Called about once a second.
+    fn extras(&mut self) -> Option<Extras> {
+        None
+    }
     /// Whether reopening after `Disconnected` makes sense (true for live games,
     /// false for finite replays).
     fn reconnectable(&self) -> bool {

@@ -61,6 +61,25 @@ pub enum EventKind {
         added: i32,
         total: i32,
     },
+    /// The fuel lasts for about this many more laps, and not to the finish.
+    FuelLow {
+        laps: f64,
+    },
+    /// The track got wetter or drier.
+    WeatherChanged {
+        from: String,
+        to: String,
+    },
+    /// The car needs repairs, or runs too hot or short of pressure.
+    Damage {
+        warning: vr_core::Warning,
+    },
+    /// The driver changed an in-car setting.
+    Adjustment {
+        control: String,
+        from: f64,
+        to: f64,
+    },
 }
 
 #[derive(Debug, Clone)]

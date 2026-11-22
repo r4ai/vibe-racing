@@ -17,20 +17,32 @@
 
 ## コマンド
 
-| コマンド                                                         | 内容                                                                                |
-| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `vr serve [--port 47800] [--record out.ndjson] [--record-hz 10]` | 常駐コレクターと `127.0.0.1` の HTTP API。ゲーム再起動時は自動再接続                |
-| `vr brief`                                                       | 無線回答用サマリ（セッション、自車、前後、近くの車、燃料、直近イベント 5 件）       |
-| `vr standings [--top N] [--around N] [--overall]`                | 順位表。マルチクラスでは既定でクラス内                                              |
-| `vr gap [--car N] [--window 秒]`                                 | 前後・指定車との差、コース上の近くの車（`rel_s` 正 = 前）                           |
-| `vr fuel`                                                        | 燃料残、1 周燃費、残り周回、ゴールまでの必要量                                      |
-| `vr laps [--car N] [--last 10]`                                  | ラップ履歴。`pit` はピットレーン通過、`caution` は黄旗中（どちらも平均から除外）    |
-| `vr events [--since SEQ] [--limit 30]`                           | フラッグ、順位変動、ピット、インシデント、ラップ、自己ベスト。`last_seq` で差分取得 |
-| `vr watch`                                                       | イベントのストリーム（サーバーがあれば SSE）                                        |
-| `vr snapshot`                                                    | 正規化テレメトリ 1 フレーム全量（JSON）                                             |
-| `vr record --out x.ndjson [--hz 10]`                             | 記録のみ                                                                            |
-| `vr doctor`                                                      | ゲーム接続・サーバー・スキル導入の診断                                              |
-| `vr skill install [--target claude\|codex\|all] [--project]`     | スキルを Claude Code / Codex に導入                                                 |
+| コマンド                                                             | 内容                                                                                                                                                 |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vr serve [--port 47800] [--record out.ndjson] [--record-hz 10]`     | 常駐コレクターと `127.0.0.1` の HTTP API。ゲーム再起動時は自動再接続。`--if-needed` は起動済みなら何もしない、`--no-sessions` はセッションを残さない |
+| `vr brief`                                                           | 無線回答用サマリ（セッション、自車、前後、近くの車、燃料、直近イベント 5 件）                                                                        |
+| `vr standings [--top N] [--around N] [--overall]`                    | 順位表。マルチクラスでは既定でクラス内                                                                                                               |
+| `vr gap [--car N] [--window 秒]`                                     | 前後・指定車との差、コース上の近くの車（`rel_s` 正 = 前）                                                                                            |
+| `vr fuel`                                                            | 燃料残、1 周燃費、残り周回、ゴールまでの必要量                                                                                                       |
+| `vr laps [--car N] [--last 10]`                                      | ラップ履歴。`pit` はピットレーン通過、`caution` は黄旗中（どちらも平均から除外）                                                                     |
+| `vr events [--since SEQ] [--limit 30]`                               | フラッグ、順位変動、ピット、インシデント、ラップ、自己ベスト、燃料不足、損傷、路面の変化、車内設定の変更。`last_seq` で差分取得                      |
+| `vr car`                                                             | 自車の詳細。エンジン、タイヤ、ピット作業、損傷、OTS・DRS、車内設定と変更履歴                                                                         |
+| `vr setup`                                                           | ガレージのセットアップ全項目、走行中に変えられる設定                                                                                                 |
+| `vr handling [--last 3]`                                             | アンダー・オーバー・空転・ロックの傾向（秒/周）、場所、変更案                                                                                        |
+| `vr channels [語...]`                                                | ゲームが出す全変数（名前・値・単位・説明）。語は名前・単位・説明の部分一致（AND）                                                                    |
+| `vr info [パス]`                                                     | ゲーム自身のセッション情報。例 `WeekendInfo/TrackNumTurns`、`DriverInfo/Drivers/0`                                                                   |
+| `vr sessions list [--limit N] [--track 語] [--car 語] [--kind 種別]` | 過去のセッション（新しい順）                                                                                                                         |
+| `vr sessions show\|setup <指定>`                                     | 結果・ラップ・イベント／セットアップ。指定は ID、ID の先頭、`last`、番号（1 が最新）                                                                 |
+| `vr sessions compare <A> <B>`                                        | ラップ・燃費・セットアップの差                                                                                                                       |
+| `vr sessions note <指定> <文>`                                       | メモ（空で削除）                                                                                                                                     |
+| `vr sessions export <指定> --out x.json`                             | JSON に書き出し                                                                                                                                      |
+| `vr sessions import <x.ibt>...`                                      | iRacing の記録ファイルを取り込み（自車のデータだけ）                                                                                                 |
+| `vr sessions delete <指定> --yes`                                    | 削除。ドライバーに頼まれても無線からは実行しない                                                                                                     |
+| `vr watch`                                                           | イベントのストリーム（サーバーがあれば SSE）                                                                                                         |
+| `vr snapshot`                                                        | 正規化テレメトリ 1 フレーム全量（JSON）                                                                                                              |
+| `vr record --out x.ndjson [--hz 10]`                                 | 記録のみ                                                                                                                                             |
+| `vr doctor`                                                          | ゲーム接続・サーバー・スキル導入の診断                                                                                                               |
+| `vr skill install [--target claude\|codex\|all] [--project]`         | スキルを Claude Code / Codex に導入                                                                                                                  |
 
 終了コード: `0` 成功、`3` ゲーム未接続・データ無し、`4` 対象（車番など）無し、`1` その他。
 
@@ -46,8 +58,15 @@
 - `nearby[]`: `car`, `rel_s`（正 = 前）, `same_class`, `lap_diff`（正 = 相手が周回で前）
 - `fuel`: `fuel_l`, `capacity_l`, `per_lap_l`, `basis`（`history|instant|none`）, `laps_sampled`, `laps_of_fuel`, `laps_to_finish`, `to_finish_l`（正 = 不足、負 = 余り）, `add_with_margin_l`, `last_lap_on_fuel`
 - `recent_events[]`: `seq`, `session_time_s`, `type`, `text`
+- `car`: 自車の詳細（`vr car` の `car` と同じ）
+
+`car`: `car{tyres{lf,rf,lr,rr}{cold_kpa,hot_kpa,temp_c[外,中,内],tread[外,中,内]},tyre_compound,warnings[],pit{...},controls[]{id,value},p2p_count,p2p_active,drs_active,battery_pct,...}`, `water_temp_c`, `oil_temp_c`, `adjustments[]`。
+
+`handling`: `ready`, `laps_sampled`, `mean{understeer{entry,mid,exit},oversteer{...},wheelspin_s,rear_lock_s,abs_s,max_slip_deg}`, `laps[]`, `zones[]`, `controls[]`, `adjustments[]`, `advice[]{place(in_car|pit|garage),target,current,change,reason,risk}`。
+
+`setup`: `setup{name,modified,passed_tech,items[]{path,value}}`, `controls[]`, `adjustments[]`。
 
 ## HTTP API（`vr serve`）
 
-`GET /v1/health`, `/v1/brief`, `/v1/standings?top=&around=&class_only=`, `/v1/gaps?car=&window_s=`, `/v1/fuel`, `/v1/laps?car=&last=`, `/v1/events?since=&limit=`, `/v1/events/stream`（SSE、event 名 `race`）, `/v1/snapshot`。
+`GET /v1/health`, `/v1/brief`, `/v1/standings?top=&around=&class_only=`, `/v1/gaps?car=&window_s=`, `/v1/fuel`, `/v1/laps?car=&last=`, `/v1/events?since=&limit=`, `/v1/events/stream`（SSE、event 名 `race`）, `/v1/snapshot`, `/v1/car`, `/v1/setup`, `/v1/handling?last=`, `/v1/channels?filter=`, `/v1/info?path=`。
 レスポンスは `-f json` と同じ。

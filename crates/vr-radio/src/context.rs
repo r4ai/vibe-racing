@@ -7,11 +7,11 @@
 //! the prompt. The agent still runs whatever else it needs.
 
 use std::io::Read;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use crate::config::resolve_program;
+use crate::child;
 
 /// Data later than this is not worth waiting for: the agent looks it up.
 const TIMEOUT: Duration = Duration::from_millis(1500);
@@ -47,32 +47,9 @@ impl ContextSource for Commands {
 }
 
 /// `$ command` and its output; `None` when it fails or prints nothing.
-fn run(command: &str, cwd: &PathBuf, timeout: Duration) -> Option<String> {
-    let mut words = command.split_whitespace();
-    let program = words.next()?;
-    let path = std::env::var("PATH").ok();
-    let resolved = cfg!(windows)
-        .then(|| {
-            resolve_program(
-                program,
-                path.as_deref(),
-                std::env::var("PATHEXT").ok().as_deref(),
-            )
-        })
-        .flatten()
-        .unwrap_or_else(|| program.into());
-    let mut cmd = Command::new(resolved);
-    cmd.args(words)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+fn run(command: &str, cwd: &Path, timeout: Duration) -> Option<String> {
+    let mut cmd = child::command(command, cwd)?;
+    cmd.stdout(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {

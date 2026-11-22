@@ -290,6 +290,9 @@ impl Brief {
         {
             let _ = writeln!(out, "{w}");
         }
+        if let Some(l) = self.car.as_ref().and_then(crate::render_car::car_line) {
+            let _ = writeln!(out, "{l}");
+        }
         if !self.recent_events.is_empty() {
             out.push_str("recent events:\n");
             for e in &self.recent_events {
@@ -530,6 +533,7 @@ mod tests {
             recent_events: Vec::new(),
             weather: None,
             rain_trend: None,
+            car: None,
         }
     }
 
@@ -542,6 +546,7 @@ mod tests {
                     track_temp_c: track,
                     wetness: wetness.map(String::from),
                     precipitation: rain,
+                    ..Default::default()
                 },
                 None,
             )

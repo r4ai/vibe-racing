@@ -2,6 +2,8 @@
 
 mod client;
 mod doctor;
+mod logging;
+mod sessions;
 mod skill;
 mod sources;
 
@@ -69,6 +71,12 @@ enum Cmd {
         /// Recording rate (frames per second of session time).
         #[arg(long, default_value_t = 10.0)]
         record_hz: f64,
+        /// Do nothing if a server already answers.
+        #[arg(long)]
+        if_needed: bool,
+        /// Do not keep sessions (`vr sessions`).
+        #[arg(long)]
+        no_sessions: bool,
     },
     /// Everything a race engineer needs in one call: position, gaps, pace, fuel, flags, events.
     Brief,
@@ -116,6 +124,31 @@ enum Cmd {
     Watch,
     /// Full normalized telemetry frame plus metadata (large; prefer `brief`).
     Snapshot,
+    /// Your car: tyres, damage, engine, pit service, push-to-pass, in-car settings.
+    Car,
+    /// Every value the game publishes, under its own name.
+    Channels {
+        /// Words the name, unit or description must contain.
+        filter: Vec<String>,
+    },
+    /// The game's own description of the session (weekend, drivers, results).
+    Info {
+        /// E.g. `WeekendInfo` or `DriverInfo/Drivers/0` (default: all of it).
+        path: Option<String>,
+    },
+    /// The garage setup and what can be adjusted while driving.
+    Setup,
+    /// How the car behaves (under/oversteer, wheelspin, locking) and what to adjust.
+    Handling {
+        /// Mean over the last N laps.
+        #[arg(long, default_value_t = 3)]
+        last: usize,
+    },
+    /// Past sessions: list, show, compare, annotate, import.
+    Sessions {
+        #[command(subcommand)]
+        cmd: sessions::SessionsCmd,
+    },
     /// Record normalized telemetry to NDJSON without serving.
     Record {
         #[arg(long)]
@@ -157,7 +190,7 @@ fn init_logging(verbose: bool) {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(logging::Lines::to(std::io::stderr()))
         .try_init();
 }
 
@@ -184,6 +217,11 @@ render! {
     FuelReport => |r| r.fuel.is_some(),
     LapsReport => |r| r.car.is_some(),
     EventsReport => |_| true,
+    CarReport => |r| r.car.is_some(),
+    ChannelsReport => |r| r.total > 0,
+    InfoReport => |r| r.value.is_some(),
+    SetupReport => |r| r.setup.is_some() || !r.controls.is_empty(),
+    HandlingReport => |r| r.meta.session_time_s.is_some(),
 }
 
 impl Render for SnapshotReport {
@@ -217,11 +255,22 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             port,
             record,
             record_hz,
-        } => serve(&cli.src, port, record.map(|p| (p, record_hz))),
+            if_needed,
+            no_sessions,
+        } => {
+            if if_needed && let Some(c) = client::find_server(server) {
+                eprintln!("already served by {}", c.base());
+                return Ok(ExitCode::SUCCESS);
+            }
+            // Demo races are not the driver's.
+            let keep = !no_sessions && cli.src.game() == sources::Game::Iracing;
+            serve(&cli.src, port, record.map(|p| (p, record_hz)), keep)
+        }
         Cmd::Record { out, hz } => record(&cli.src, out, hz),
         Cmd::Watch => watch(&cli.src, server, fmt),
         Cmd::Doctor => doctor::run(server, fmt),
         Cmd::Skill { cmd } => skill::run(cmd),
+        Cmd::Sessions { cmd } => sessions::run(cmd, fmt),
         cmd => {
             let backend = client::resolve(&cli.src, server)?;
             let api = backend.api();
@@ -262,13 +311,30 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     }),
                 ),
                 Cmd::Snapshot => emit(fmt, api.snapshot()),
+                Cmd::Car => emit(fmt, api.car()),
+                Cmd::Channels { filter } => emit(
+                    fmt,
+                    api.channels(&ChannelsParams {
+                        filter: Some(filter.join(" ")),
+                    }),
+                ),
+                Cmd::Info { path } => emit(fmt, api.info(&InfoParams { path })),
+                Cmd::Setup => emit(fmt, api.setup()),
+                Cmd::Handling { last } => {
+                    emit(fmt, api.handling(&HandlingParams { last: Some(last) }))
+                }
                 _ => unreachable!(),
             }
         }
     }
 }
 
-fn serve(src: &SourceArgs, port: u16, record: Option<(PathBuf, f64)>) -> anyhow::Result<ExitCode> {
+fn serve(
+    src: &SourceArgs,
+    port: u16,
+    record: Option<(PathBuf, f64)>,
+    keep: bool,
+) -> anyhow::Result<ExitCode> {
     let factory = src.factory(1.0)?;
     let state: SharedState = Arc::new(RwLock::new(RaceState::new(
         src.game_id(),
@@ -277,8 +343,10 @@ fn serve(src: &SourceArgs, port: u16, record: Option<(PathBuf, f64)>) -> anyhow:
     )));
     let (tx, _) = tokio::sync::broadcast::channel(256);
     let stop = Arc::new(AtomicBool::new(false));
+    let store = vr_server::SessionStore::new(vr_server::sessions_dir());
     let cfg = vr_server::CollectorConfig {
         record,
+        sessions: keep.then(|| store.clone()),
         ..Default::default()
     };
     let collector =
@@ -290,7 +358,11 @@ fn serve(src: &SourceArgs, port: u16, record: Option<(PathBuf, f64)>) -> anyhow:
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let game = src.game_id().to_string();
     let pid = std::process::id();
-    let app = vr_server::AppState { state, events: tx };
+    let app = vr_server::AppState {
+        state,
+        events: tx,
+        sessions: Some(store),
+    };
     let result = rt.block_on(vr_server::serve(
         app,
         addr,
@@ -306,7 +378,10 @@ fn serve(src: &SourceArgs, port: u16, record: Option<(PathBuf, f64)>) -> anyhow:
                 started_ms: now_ms(),
             };
             match vr_server::write_discovery(&info) {
-                Ok(p) => tracing::info!("serving on {url} (discovery: {})", p.display()),
+                Ok(p) => tracing::info!(
+                    "serving on {url} (past sessions: {url}/, discovery: {})",
+                    p.display()
+                ),
                 Err(e) => tracing::warn!("serving on {url}; could not write discovery file: {e}"),
             }
         },

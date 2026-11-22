@@ -9,7 +9,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::directive::MAX_VOLUME;
 use crate::stt::SttBackend;
+use crate::watch::Proactive;
 use crate::wheel::Binding;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19,6 +21,12 @@ pub struct Settings {
     pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<u32>,
+    /// Percent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume: Option<u8>,
+    /// Speech rate (1.0 = the engine's own).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stt: Option<SttBackend>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,6 +38,8 @@ pub struct Settings {
     pub wheel: Option<Binding>,
     /// Closing the window keeps the radio running in the tray.
     pub close_to_tray: bool,
+    /// Which events the engineer calls about by itself.
+    pub proactive: Proactive,
 }
 
 /// `settings.json` in the user's configuration directory.
@@ -70,6 +80,10 @@ impl Settings {
         }
         set(&mut config.agent, &self.agent, explicit("agent"));
         set(&mut config.speaker, &self.speaker, explicit("speaker"));
+        // A file edited by hand must not deafen the driver.
+        let volume = self.volume.map(|v| v.min(MAX_VOLUME));
+        set(&mut config.volume, &volume, explicit("volume"));
+        set(&mut config.speed, &self.speed, explicit("speed"));
         set(&mut config.stt, &self.stt, explicit("stt"));
         set(
             &mut config.stt_model,
@@ -91,6 +105,8 @@ mod tests {
         Settings {
             agent: Some("codex".into()),
             speaker: Some(8),
+            volume: Some(60),
+            speed: Some(1.5),
             stt: Some(SttBackend::Windows),
             stt_model: Some("m".into()),
             hotkey: Some("F13".into()),
@@ -100,6 +116,11 @@ mod tests {
                 button: 40,
             }),
             close_to_tray: true,
+            proactive: Proactive {
+                lap: true,
+                flag: false,
+                ..Default::default()
+            },
         }
     }
 
@@ -127,6 +148,10 @@ mod tests {
         // Unknown and missing fields are fine.
         std::fs::write(&path, r#"{"speaker":2,"future":1}"#).unwrap();
         assert_eq!(Settings::load(&path).unwrap().speaker, Some(2));
+        assert_eq!(
+            Settings::load(&path).unwrap().proactive,
+            Proactive::default()
+        );
     }
 
     #[test]
@@ -141,15 +166,35 @@ mod tests {
                 c.stt == before.stt,
                 c.stt_model == before.stt_model,
                 c.hotkey == before.hotkey,
+                c.volume == before.volume,
+                c.speed == before.speed,
             ]
         };
-        assert_eq!(applied(""), [false; 5]);
-        assert_eq!(applied("agent"), [true, false, false, false, false]);
-        assert_eq!(applied("speaker"), [false, true, false, false, false]);
-        assert_eq!(applied("stt"), [false, false, true, false, false]);
-        assert_eq!(applied("stt_model"), [false, false, false, true, false]);
-        assert_eq!(applied("stt_url"), [false, false, false, true, false]);
-        assert_eq!(applied("hotkey"), [false, false, false, false, true]);
+        assert_eq!(applied(""), [false; 7]);
+        assert_eq!(
+            applied("agent"),
+            [true, false, false, false, false, false, false]
+        );
+        assert_eq!(
+            applied("speaker"),
+            [false, true, false, false, false, false, false]
+        );
+        assert_eq!(
+            applied("stt"),
+            [false, false, true, false, false, false, false]
+        );
+        assert_eq!(
+            applied("stt_model"),
+            [false, false, false, true, false, false, false]
+        );
+        assert_eq!(
+            applied("stt_url"),
+            [false, false, false, true, false, false, false]
+        );
+        assert_eq!(
+            applied("hotkey"),
+            [false, false, false, false, true, false, false]
+        );
 
         let mut c = Config::parse_from(["vr-radio"]);
         full().apply(&mut c, |_| false);
@@ -157,8 +202,16 @@ mod tests {
         assert_eq!(c.speaker, 8);
         assert_eq!(c.stt, SttBackend::Windows);
         assert_eq!(c.hotkey, "F13");
+        assert_eq!((c.volume, c.speed), (60, 1.5));
         Settings::default().apply(&mut c, |_| false);
         assert_eq!(c.agent, "codex");
+        assert_eq!(c.volume, 60);
+        let loud = Settings {
+            volume: Some(255),
+            ..Default::default()
+        };
+        loud.apply(&mut c, |_| false);
+        assert_eq!(c.volume, MAX_VOLUME);
     }
 
     #[test]

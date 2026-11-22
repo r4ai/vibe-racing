@@ -26,6 +26,7 @@ fn car(idx: usize, pos: u32, laps: i32, pct: f64) -> CarState {
         best_lap_s: Some(99.0),
         gap_to_leader_s: None,
         est_lap_s: Some(100.0),
+        extra: Default::default(),
     }
 }
 
@@ -48,6 +49,9 @@ fn frame(kind: SessionKind, t: f64, cars: Vec<CarState>, player: usize) -> Frame
                 config: None,
                 length_m: None,
             }),
+            uid: None,
+            time_total_s: None,
+            time_of_day_s: None,
         },
         player_car_idx: Some(player),
         player: Some(PlayerTelemetry {
@@ -421,7 +425,7 @@ fn session_change_resets_history_and_logs_events() {
 }
 
 #[test]
-fn lap_counter_going_backwards_resets_car() {
+fn lap_counter_going_backwards_keeps_the_laps() {
     let mut me = car(0, 1, 1, 0.9);
     let mut st = state();
     st.ingest(frame(SessionKind::Race, 1.0, vec![me.clone()], 0));
@@ -430,8 +434,16 @@ fn lap_counter_going_backwards_resets_car() {
     st.ingest(frame(SessionKind::Race, 2.0, vec![me.clone()], 0));
     assert_eq!(st.laps(&LapsParams::default()).unwrap().laps.len(), 1);
     me.laps_completed = Some(0);
-    st.ingest(frame(SessionKind::Race, 3.0, vec![me], 0));
-    assert!(st.laps(&LapsParams::default()).unwrap().laps.is_empty());
+    st.ingest(frame(SessionKind::Race, 3.0, vec![me.clone()], 0));
+    st.ingest(frame(SessionKind::Race, 4.0, vec![me.clone()], 0));
+    assert_eq!(st.laps(&LapsParams::default()).unwrap().laps.len(), 1);
+    // Counted from there on.
+    me.laps_completed = Some(1);
+    me.last_lap_s = Some(90.0);
+    st.ingest(frame(SessionKind::Race, 5.0, vec![me], 0));
+    let laps = st.laps(&LapsParams::default()).unwrap().laps;
+    assert_eq!(laps.len(), 2);
+    assert_eq!((laps[1].lap, laps[1].time_s), (1, Some(90.0)));
 }
 
 #[test]

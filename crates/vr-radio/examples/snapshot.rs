@@ -77,6 +77,16 @@ fn main() {
     let mut settings_open = App::sample();
     let _ = settings_open.update(Message::Settings(true));
     render("settings", &settings_open, &theme, None);
+
+    // Right after the start: nothing can be used yet.
+    let mut starting = App::new();
+    starting.handle(Event::Telemetry(false));
+    starting.handle(Event::Microphone(false));
+    starting.handle(Event::Speakers(true));
+    let _ = starting.update(Message::Settings(true));
+    render("settings-starting", &starting, &theme, None);
+    let _ = starting.update(Message::Settings(false));
+    render("starting", &starting, &theme, None);
     render(
         "settings-select",
         &settings_open,

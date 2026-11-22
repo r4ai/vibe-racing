@@ -2,9 +2,13 @@
 //! and the JSON output of the CLI, so keep changes backwards compatible.
 
 use serde::{Deserialize, Serialize};
-use vr_core::{Capabilities, Flag, Frame, SessionKind, SessionPhase};
+use vr_core::{
+    Capabilities, CarTelemetry, Channel, Control, Flag, Frame, SessionKind, SessionPhase, Setup,
+};
 
 use crate::Event;
+use crate::advice::Advice;
+use crate::handling::{Behaviour, HandlingLap, Zone};
 
 /// How the data behind a response was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +158,9 @@ pub struct Brief {
     /// Whether the rain grows over the last two minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rain_trend: Option<RainTrend>,
+    /// The player's car (absent in older reports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub car: Option<CarTelemetry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -245,6 +252,75 @@ pub struct EventsReport {
     /// Pass this as `since` to get only newer events next time.
     pub last_seq: u64,
     pub events: Vec<Event>,
+}
+
+/// A change of an in-car setting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Adjustment {
+    pub session_time_s: f64,
+    pub lap: Option<i32>,
+    pub control: String,
+    pub from: f64,
+    pub to: f64,
+}
+
+/// The player's car: engine, tyres, damage, pit service, settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CarReport {
+    pub meta: Meta,
+    pub car_name: Option<String>,
+    pub car: Option<CarTelemetry>,
+    pub water_temp_c: Option<f64>,
+    pub oil_temp_c: Option<f64>,
+    pub incidents: Option<i32>,
+    /// In-car changes of this session, oldest first.
+    pub adjustments: Vec<Adjustment>,
+}
+
+/// Values under the game's own names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelsReport {
+    pub meta: Meta,
+    /// How many there are in all.
+    pub total: usize,
+    pub channels: Vec<Channel>,
+}
+
+/// The game's own description of the session, or a part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfoReport {
+    pub meta: Meta,
+    pub path: String,
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupReport {
+    pub meta: Meta,
+    pub car_name: Option<String>,
+    pub setup: Option<Setup>,
+    /// What can be changed while driving, as it is now.
+    pub controls: Vec<Control>,
+    pub adjustments: Vec<Adjustment>,
+}
+
+/// How the car behaves and what could be changed. Tendencies, not
+/// measurements.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandlingReport {
+    pub meta: Meta,
+    /// Enough driving to judge the balance.
+    pub ready: bool,
+    /// Laps the mean is taken over.
+    pub laps_sampled: usize,
+    /// Seconds per lap.
+    pub mean: Option<Behaviour>,
+    pub laps: Vec<HandlingLap>,
+    /// Where on the track, worst first.
+    pub zones: Vec<Zone>,
+    pub controls: Vec<Control>,
+    pub adjustments: Vec<Adjustment>,
+    pub advice: Vec<Advice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

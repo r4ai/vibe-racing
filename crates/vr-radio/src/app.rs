@@ -12,15 +12,18 @@ use iced::{Subscription, Task, window};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::agent::{AgentLink, ToolState, Turn};
-use crate::audio::{Mic, NoMic, Output, Recorder, Speakers};
+use crate::audio::{LateMic, LateSpeakers, Output, Recorder};
+use crate::child::{Retry, Supervised};
 use crate::config::{self, Config};
 use crate::context::{Commands, ContextSource};
+use crate::directive::Setting;
 use crate::engine::{self, Command, Deps, Event, Outcome};
 use crate::hotkey::{self, Captured};
 use crate::resident::{self, ResidentEvent};
 use crate::settings::Settings;
 use crate::stt::{self, SttBackend};
-use crate::voicevox::{Synth, Voice, Voicevox};
+use crate::voicevox::{self, Synth, Voice, Voicevox};
+use crate::watch::{Follow, Group, Timing};
 use crate::wheel::{self, ButtonEvent};
 
 /// Settings for the engine subscription (`Subscription::run` takes a `fn`).
@@ -48,6 +51,15 @@ pub enum Message {
     /// A character was picked: use its first style.
     Character(String),
     Muted(bool),
+    /// Percent.
+    Volume(u8),
+    /// Speech rate in percent.
+    Speed(u16),
+    /// A slider was let go.
+    SaveSettings,
+    /// Whether the engineer calls by itself.
+    Proactive(bool),
+    ProactiveGroup(Group, bool),
     Scrolled(bool),
     ScrollToEnd,
     Settings(bool),
@@ -182,9 +194,29 @@ enum AgentStatus {
     Closed(String),
 }
 
+/// Whether a part of the radio can be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    Ready,
+    Starting,
+    Failed,
+    Off,
+}
+
+/// The voices of VOICEVOX.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum VoiceState {
+    #[default]
+    Starting,
+    Ready,
+    Failed,
+}
+
 #[derive(Debug, Default)]
 struct TurnView {
     id: Turn,
+    /// The engineer called by itself: `heard` is what it is about.
+    call: bool,
     heard: Option<String>,
     reply: String,
     tools: Vec<(String, String, ToolState)>,
@@ -224,6 +256,10 @@ pub struct App {
     tray: bool,
     starts_with_windows: bool,
     has_stt_key: bool,
+    voice_state: VoiceState,
+    microphone: Option<bool>,
+    speakers: Option<bool>,
+    telemetry: Option<bool>,
 }
 
 impl App {
@@ -243,6 +279,10 @@ impl App {
             tray: false,
             starts_with_windows: false,
             has_stt_key: config.stt().api_key.is_some(),
+            voice_state: VoiceState::Starting,
+            microphone: None,
+            speakers: None,
+            telemetry: None,
             config,
             settings,
             settings_path,
@@ -304,6 +344,10 @@ impl App {
             )
             .collect();
         app.voice = app.voices.first().cloned();
+        app.voice_state = VoiceState::Ready;
+        app.microphone = Some(true);
+        app.speakers = Some(true);
+        app.telemetry = Some(true);
         for e in [
             Event::TurnStarted { turn: 1 },
             Event::Transcript {
@@ -327,6 +371,19 @@ impl App {
                 turn: 1,
                 outcome: Outcome::Answered,
                 ms: 3200,
+            },
+            Event::CallStarted {
+                turn: 3,
+                about: "yellow flag".into(),
+            },
+            Event::Chunk {
+                turn: 3,
+                text: "第 2 セクター、ローカルイエロー。前の車に気をつけて。".into(),
+            },
+            Event::TurnDone {
+                turn: 3,
+                outcome: Outcome::Answered,
+                ms: 1900,
             },
             Event::TurnStarted { turn: 2 },
             Event::Transcript {
@@ -364,6 +421,75 @@ impl App {
             Some(t) if t.done.is_none() => Phase::Answering,
             _ => Phase::Idle,
         }
+    }
+
+    /// What can be used, in the order of the list in the window.
+    fn readiness(&self) -> [(&'static str, Readiness); 4] {
+        let device = |d: Option<bool>| match d {
+            Some(true) => Readiness::Ready,
+            Some(false) => Readiness::Failed,
+            None => Readiness::Starting,
+        };
+        let agent = match self.agent {
+            AgentStatus::Starting => Readiness::Starting,
+            AgentStatus::Ready(_) => Readiness::Ready,
+            AgentStatus::Closed(_) => Readiness::Failed,
+        };
+        let voice = match (self.voice_state, device(self.speakers)) {
+            (VoiceState::Failed, _) | (_, Readiness::Failed) => Readiness::Failed,
+            (VoiceState::Ready, Readiness::Ready) => Readiness::Ready,
+            _ => Readiness::Starting,
+        };
+        let telemetry = match self.telemetry {
+            _ if self.config.watch.trim().is_empty() => Readiness::Off,
+            Some(true) => Readiness::Ready,
+            _ => Readiness::Starting,
+        };
+        [
+            ("エージェント", agent),
+            ("音声", voice),
+            ("テレメトリ", telemetry),
+            ("マイク", device(self.microphone)),
+        ]
+    }
+
+    fn set_voice(&mut self, v: Voice) {
+        self.send(Command::SetSpeaker(v.id));
+        self.settings.speaker = Some(v.id);
+        self.config.speaker = v.id;
+        self.voice = Some(v);
+        self.save();
+    }
+
+    /// Follows a setting the driver had changed by voice.
+    fn changed(&mut self, s: Setting) {
+        if let Some(t) = self.turns.last_mut() {
+            t.tools
+                .push((format!("setting:{s}"), s.to_string(), ToolState::Done));
+        }
+        match s {
+            Setting::Volume(v) => {
+                self.config.volume = v;
+                self.settings.volume = Some(v);
+            }
+            Setting::Speed(v) => self.speed(v),
+            // Not kept: the radio must not start silent.
+            Setting::Muted(m) => self.muted = m,
+            Setting::Speaker(name) => {
+                match find_voice(&self.voices, self.voice.as_ref(), &name).cloned() {
+                    Some(v) => self.set_voice(v),
+                    None => self.error(format!("話者が見つかりません: {name}")),
+                }
+            }
+            Setting::Proactive(on) => self.settings.proactive.enabled = on,
+            Setting::Event(group, on) => self.settings.proactive.set(group, on),
+        }
+        self.save();
+    }
+
+    fn speed(&mut self, percent: u16) {
+        self.config.speed = f64::from(percent) / 100.0;
+        self.settings.speed = Some(self.config.speed);
     }
 
     fn hotkey(&self) -> Option<&str> {
@@ -486,8 +612,14 @@ impl App {
                 let id = self.config.speaker;
                 self.voice = voices.iter().find(|v| v.id == id).cloned();
                 self.voices = voices;
+                self.voice_state = VoiceState::Ready;
+                // It was not there yet to be warmed up.
+                self.send(Command::SetSpeaker(id));
             }
-            Message::Voices(Err(e)) => self.errors.push(e),
+            Message::Voices(Err(e)) => {
+                self.voice_state = VoiceState::Failed;
+                self.error(e);
+            }
             Message::Hotkey(down) => self.ptt(down),
             Message::TogglePtt => self.send(if self.recording {
                 Command::PttUp
@@ -506,20 +638,37 @@ impl App {
                 }
             }
             Message::Speaker(v) => {
-                self.send(Command::SetSpeaker(v.id));
+                let id = v.id;
+                self.set_voice(v);
                 // Hear it at once, but not over an answer.
                 if self.phase() == Phase::Idle || self.previewing {
                     self.previewing = true;
-                    self.send(Command::Preview(v.id));
+                    self.send(Command::Preview(id));
                 }
-                self.settings.speaker = Some(v.id);
-                self.config.speaker = v.id;
-                self.voice = Some(v);
-                self.save();
             }
             Message::Muted(m) => {
                 self.muted = m;
                 self.send(Command::SetMuted(m));
+            }
+            Message::Volume(v) => {
+                self.config.volume = v;
+                self.settings.volume = Some(v);
+                self.send(Command::SetVolume(v));
+            }
+            Message::Speed(v) => {
+                self.speed(v);
+                self.send(Command::SetSpeed(v));
+            }
+            Message::SaveSettings => self.save(),
+            Message::Proactive(on) => {
+                self.settings.proactive.enabled = on;
+                self.send(Command::SetProactive(self.settings.proactive));
+                self.save();
+            }
+            Message::ProactiveGroup(group, on) => {
+                self.settings.proactive.set(group, on);
+                self.send(Command::SetProactive(self.settings.proactive));
+                self.save();
             }
             Message::Settings(open) => {
                 self.settings_open = open;
@@ -624,6 +773,20 @@ impl App {
     fn apply(&mut self, event: Event) {
         match event {
             Event::AgentReady { name } => self.agent = AgentStatus::Ready(name),
+            Event::AgentStarting => self.agent = AgentStatus::Starting,
+            Event::Microphone(ok) => self.microphone = Some(ok),
+            Event::Speakers(ok) => self.speakers = Some(ok),
+            Event::Telemetry(ok) => self.telemetry = Some(ok),
+            Event::Setting(s) => self.changed(s),
+            Event::CallStarted { turn, about } => {
+                self.previewing = false;
+                self.turns.push(TurnView {
+                    id: turn,
+                    call: true,
+                    heard: Some(about),
+                    ..Default::default()
+                });
+            }
             Event::AgentClosed { error } => {
                 self.agent =
                     AgentStatus::Closed(error.unwrap_or_else(|| "connection closed".into()))
@@ -728,6 +891,7 @@ fn latency(t: &TurnView) -> String {
         Some((Outcome::Answered, ms)) => parts.push(format!("完了 {:.1}s", *ms as f64 / 1000.0)),
         Some((Outcome::Cancelled, _)) => parts.push("中断".into()),
         Some((Outcome::NoSpeech, _)) => parts.push("聞き取れず".into()),
+        Some((Outcome::Silent, _)) => {}
         Some((Outcome::Failed(e), _)) => parts.push(format!("失敗: {e}")),
         None => {}
     }
@@ -755,6 +919,28 @@ impl TurnView {
     fn thinking(&self) -> bool {
         self.reply.is_empty() && self.done.is_none()
     }
+}
+
+/// A voice by its character, its style or both: `ずんだもん`, `あまあま`,
+/// `四国めたん ノーマル`. A style alone is one of the current character.
+fn find_voice<'a>(voices: &'a [Voice], current: Option<&Voice>, name: &str) -> Option<&'a Voice> {
+    let plain = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && !"（）()・".contains(*c))
+            .collect()
+    };
+    let name = plain(name);
+    let of = |f: &dyn Fn(&Voice) -> bool| voices.iter().find(|v| f(v));
+    if name.is_empty() {
+        return None;
+    }
+    of(&|v| plain(&v.to_string()) == name)
+        .or_else(|| {
+            of(&|v| current.is_some_and(|c| c.speaker == v.speaker) && plain(&v.style) == name)
+        })
+        .or_else(|| of(&|v| plain(&v.speaker) == name && v.style == "ノーマル"))
+        .or_else(|| of(&|v| plain(&v.speaker) == name))
+        .or_else(|| of(&|v| plain(&v.style) == name))
 }
 
 pub fn subscription(app: &App) -> Subscription<Message> {
@@ -828,12 +1014,18 @@ pub fn deps(
         synth,
         output,
         agent: connect(cfg, &cfg.agent),
+        agent_command: cfg.agent.clone(),
         connect: Box::new(move |command| connect(&connect_cfg, command)),
         context: context(cfg),
         prompt_template: cfg.prompt.clone(),
         speaker: cfg.speaker,
+        volume: cfg.volume,
+        speed: cfg.speed_percent(),
         early_stt: cfg.early_stt,
         language: Some(cfg.language.clone()).filter(|l| !l.is_empty()),
+        watch: None,
+        proactive: SETTINGS.get().map(|(s, _)| s.proactive).unwrap_or_default(),
+        timing: Timing::default(),
     }
 }
 
@@ -844,35 +1036,69 @@ pub async fn start_engine(
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
     ev_tx: UnboundedSender<Event>,
 ) -> Result<Vec<Voice>, String> {
-    let recorder: Arc<dyn Recorder> = match Mic::open() {
-        Ok(mic) => {
-            tracing::info!("microphone: {}", mic.device);
-            Arc::new(mic)
+    let tx = ev_tx.clone();
+    let recorder: Arc<dyn Recorder> = Arc::new(LateMic::open(move |opened| {
+        let _ = tx.send(Event::Microphone(opened.is_ok()));
+        if let Err(e) = opened {
+            let _ = tx.send(Event::Error(format!("{e:#}")));
         }
-        Err(e) => {
-            let _ = ev_tx.send(Event::Error(format!("{e:#}")));
-            Arc::new(NoMic)
+    }));
+    let tx = ev_tx.clone();
+    let output: Arc<dyn Output> = Arc::new(LateSpeakers::open(move |opened| {
+        let _ = tx.send(Event::Speakers(opened.is_ok()));
+        if let Err(e) = opened {
+            let _ = tx.send(Event::Error(format!("{e:#}")));
         }
-    };
-    let output: Arc<dyn Output> = match Speakers::open() {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            let _ = ev_tx.send(Event::Error(format!("{e:#}")));
-            Arc::new(Silent)
-        }
-    };
+    }));
     let voicevox = Arc::new(Voicevox::new(cfg.voicevox_url.clone(), cfg.speed));
     let vv = voicevox.clone();
     let voices = tokio::task::spawn_blocking(move || vv.voices().map_err(|e| format!("{e:#}")))
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
 
-    tokio::spawn(engine::run(
-        deps(cfg, recorder, output, voicevox),
-        cmd_rx,
-        ev_tx,
-    ));
+    let mut deps = deps(cfg, recorder, output, voicevox);
+    deps.watch = Follow::start(&cfg.watch, cfg.agent_cwd());
+    tokio::spawn(engine::run(deps, cmd_rx, ev_tx));
     voices
+}
+
+/// How long VOICEVOX may take to start before that is an error, and how often
+/// it is asked until then and later.
+#[derive(Debug, Clone, Copy)]
+struct Patience {
+    wait: Duration,
+    poll: Duration,
+    slow: Duration,
+}
+
+const PATIENCE: Patience = Patience {
+    wait: Duration::from_secs(60),
+    poll: Duration::from_secs(2),
+    slow: Duration::from_secs(10),
+};
+
+/// Asks for the voices until there are some. Their absence is told once,
+/// when it takes too long. Blocking.
+fn wait_for_voices(
+    ask: impl Fn() -> Result<Vec<Voice>, String>,
+    patience: Patience,
+    tell: impl Fn(Result<Vec<Voice>, String>) -> bool,
+) {
+    let started = std::time::Instant::now();
+    let mut told = false;
+    loop {
+        std::thread::sleep(if told { patience.slow } else { patience.poll });
+        match ask() {
+            Err(_) if told || started.elapsed() < patience.wait => {}
+            answer => {
+                told = true;
+                let found = answer.is_ok();
+                if !tell(answer) || found {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 fn engine_stream() -> impl Stream<Item = Message> {
@@ -884,25 +1110,41 @@ fn engine_stream() -> impl Stream<Item = Message> {
         let (cmd_tx, cmd_rx) = unbounded_channel();
         let (ev_tx, mut ev_rx) = unbounded_channel();
         let _ = out.send(Message::EngineReady(cmd_tx)).await;
+        let cwd = cfg.agent_cwd();
+        let _serve =
+            Supervised::spawn(&cfg.serve, cwd, Retry::every(Duration::from_secs(15)), None);
         let voices = start_engine(&cfg, cmd_rx, ev_tx).await;
-        let _ = out.send(Message::Voices(voices)).await;
-        while let Some(ev) = ev_rx.recv().await {
-            if out.send(Message::Engine(ev)).await.is_err() {
+        let (voice_tx, mut voice_rx) = unbounded_channel();
+        let mut _voicevox = None;
+        if let Err(e) = &voices {
+            tracing::info!("{e}");
+            _voicevox = voicevox::start_engine(&cfg.voicevox_url, cfg.voicevox.as_deref());
+            let vv = Voicevox::new(cfg.voicevox_url.clone(), cfg.speed);
+            let _ = std::thread::Builder::new()
+                .name("vr-radio-voices".into())
+                .spawn(move || {
+                    wait_for_voices(
+                        || vv.voices().map_err(|e| format!("{e:#}")),
+                        PATIENCE,
+                        |v| voice_tx.send(v).is_ok(),
+                    )
+                });
+        } else {
+            let _ = voice_tx.send(voices);
+        }
+        loop {
+            let message = tokio::select! {
+                Some(v) = voice_rx.recv() => Message::Voices(v),
+                ev = ev_rx.recv() => match ev {
+                    Some(ev) => Message::Engine(ev),
+                    None => break,
+                },
+            };
+            if out.send(message).await.is_err() {
                 break;
             }
         }
     })
-}
-
-/// Output used when no audio device could be opened.
-struct Silent;
-
-impl Output for Silent {
-    fn play(&self, _: Vec<u8>) {}
-    fn stop(&self) {}
-    fn is_idle(&self) -> bool {
-        true
-    }
 }
 
 fn hotkey_stream() -> impl Stream<Item = Message> {
@@ -1172,7 +1414,9 @@ mod tests {
         let ids: Vec<u32> = app.voices.iter().map(|v| v.id).collect();
         assert_eq!(ids, vec![1, 2, 3, 4, 10, 11]);
         assert_eq!(app.voice.as_ref().map(|v| v.id), Some(1));
-        assert_eq!(app.turns.len(), 2);
+        assert_eq!(app.turns.len(), 3);
+        assert!(app.turns[1].call);
+        assert!(app.readiness().iter().all(|(_, r)| *r == Readiness::Ready));
         assert_eq!(app.phase(), Phase::Researching);
         app.handle(Event::Recording(true));
         assert_eq!(app.phase(), Phase::Recording);
@@ -1460,6 +1704,205 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(Command::Preview(10)));
         app.apply(Event::Speaking(false));
         assert!(!app.previewing);
+    }
+
+    #[test]
+    fn volume_and_speed_are_set_and_remembered() {
+        let (mut app, mut rx, _dir) = wired();
+        let _ = app.update(Message::Volume(60));
+        assert_eq!(rx.try_recv(), Ok(Command::SetVolume(60)));
+        assert_eq!(app.config.volume, 60);
+        // While the slider moves nothing is written.
+        assert_eq!(saved(&app).volume, None);
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(saved(&app).volume, Some(60));
+        let _ = app.update(Message::Speed(130));
+        assert_eq!(rx.try_recv(), Ok(Command::SetSpeed(130)));
+        assert_eq!(app.config.speed, 1.3);
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(saved(&app).speed, Some(1.3));
+    }
+
+    #[test]
+    fn calls_are_switched_and_remembered() {
+        let (mut app, mut rx, _dir) = wired();
+        let _ = app.update(Message::Proactive(false));
+        let mut want = crate::watch::Proactive {
+            enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(rx.try_recv(), Ok(Command::SetProactive(want)));
+        let _ = app.update(Message::ProactiveGroup(Group::Lap, true));
+        want.lap = true;
+        assert_eq!(rx.try_recv(), Ok(Command::SetProactive(want)));
+        assert_eq!(saved(&app).proactive, want);
+    }
+
+    /// Settings changed by voice are in effect already: the engine is not
+    /// told again, except of the voice, which only the window can look up.
+    #[test]
+    fn settings_changed_by_voice_are_followed() {
+        let (mut app, mut rx, _dir) = wired();
+        let v = |id, speaker: &str, style: &str| Voice {
+            id,
+            speaker: speaker.into(),
+            style: style.into(),
+        };
+        let voices = vec![
+            v(3, "ずんだもん", "ノーマル"),
+            v(1, "ずんだもん", "あまあま"),
+            v(7, "四国めたん", "ツンツン"),
+            v(2, "四国めたん", "ノーマル"),
+        ];
+        let _ = app.update(Message::Voices(Ok(voices)));
+        assert_eq!(rx.try_recv(), Ok(Command::SetSpeaker(3)));
+        app.apply(Event::TurnStarted { turn: 1 });
+        for s in [
+            Setting::Volume(40),
+            Setting::Speed(150),
+            Setting::Muted(true),
+            Setting::Proactive(false),
+            Setting::Event(Group::Fuel, false),
+        ] {
+            app.apply(Event::Setting(s));
+        }
+        assert!(rx.try_recv().is_err());
+        assert!(app.muted);
+        assert_eq!((app.config.volume, app.config.speed), (40, 1.5));
+        let s = saved(&app);
+        assert_eq!((s.volume, s.speed), (Some(40), Some(1.5)));
+        assert!(!s.proactive.enabled && !s.proactive.fuel && s.proactive.flag);
+        let shown: Vec<&str> = app.turns[0].tools.iter().map(|t| t.1.as_str()).collect();
+        assert_eq!(
+            shown,
+            [
+                "音量 40%",
+                "話速 1.50",
+                "読み上げ オフ",
+                "自動連絡 オフ",
+                "自動連絡（燃料）オフ"
+            ]
+        );
+        for (name, id) in [
+            ("四国めたん", 2),
+            ("ツンツン", 7),
+            ("ずんだもん（あまあま）", 1),
+            ("ずんだもん ノーマル", 3),
+            ("あまあま", 1),
+        ] {
+            app.apply(Event::Setting(Setting::Speaker(name.into())));
+            assert_eq!(rx.try_recv(), Ok(Command::SetSpeaker(id)), "{name}");
+            assert_eq!(saved(&app).speaker, Some(id));
+        }
+        for name in ["だれか", " "] {
+            app.apply(Event::Setting(Setting::Speaker(name.into())));
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(app.errors[0], "話者が見つかりません: だれか");
+    }
+
+    #[test]
+    fn a_call_is_shown_with_what_it_is_about() {
+        let mut app = App::new();
+        app.apply(Event::CallStarted {
+            turn: 4,
+            about: "yellow flag".into(),
+        });
+        app.apply(Event::Chunk {
+            turn: 4,
+            text: "イエロー。".into(),
+        });
+        let t = &app.turns[0];
+        assert!(t.call && t.asked());
+        assert_eq!(
+            (t.heard.as_deref(), t.reply.as_str()),
+            (Some("yellow flag"), "イエロー。")
+        );
+        // A call that says nothing leaves no trace.
+        app.apply(Event::TurnDone {
+            turn: 5,
+            outcome: Outcome::Silent,
+            ms: 1,
+        });
+        assert_eq!(app.turns.len(), 1);
+        let _ = app.view();
+    }
+
+    #[test]
+    fn readiness_says_what_is_still_starting() {
+        use Readiness::{Failed, Off, Ready, Starting};
+        let mut app = App::new();
+        let states = |app: &App| app.readiness().map(|(_, r)| r);
+        assert_eq!(
+            app.readiness().map(|(l, _)| l),
+            ["エージェント", "音声", "テレメトリ", "マイク"]
+        );
+        assert_eq!(states(&app), [Starting; 4]);
+        app.apply(Event::AgentReady { name: "A".into() });
+        app.apply(Event::Microphone(true));
+        app.apply(Event::Telemetry(true));
+        app.apply(Event::Speakers(true));
+        assert_eq!(states(&app), [Ready, Starting, Ready, Ready]);
+        let _ = app.update(Message::Voices(Ok(vec![])));
+        assert_eq!(states(&app), [Ready; 4]);
+        app.apply(Event::Speakers(false));
+        app.apply(Event::Microphone(false));
+        app.apply(Event::Telemetry(false));
+        app.apply(Event::AgentClosed { error: None });
+        assert_eq!(states(&app), [Failed, Failed, Starting, Failed]);
+        app.apply(Event::AgentStarting);
+        app.apply(Event::Speakers(true));
+        let _ = app.update(Message::Voices(Err("down".into())));
+        app.config.watch = " ".into();
+        assert_eq!(states(&app), [Starting, Failed, Off, Failed]);
+        let _ = app.view();
+    }
+
+    #[test]
+    fn voices_are_awaited_and_their_absence_is_told_once() {
+        use std::cell::{Cell, RefCell};
+        let patience = Patience {
+            wait: Duration::from_millis(50),
+            poll: Duration::from_millis(1),
+            slow: Duration::from_millis(1),
+        };
+        let tries = Cell::new(0);
+        let late = Cell::new(0);
+        let told = RefCell::new(Vec::new());
+        let started = std::time::Instant::now();
+        wait_for_voices(
+            || {
+                tries.set(tries.get() + 1);
+                if late.get() == 0 {
+                    return Err("down".into());
+                }
+                // Told: five more tries, then it is there.
+                late.set(late.get() + 1);
+                if late.get() == 6 {
+                    Ok(vec![])
+                } else {
+                    Err("down".into())
+                }
+            },
+            patience,
+            |v| {
+                late.set(late.get().max(1));
+                told.borrow_mut().push(v);
+                true
+            },
+        );
+        assert_eq!(*told.borrow(), [Err("down".to_string()), Ok(vec![])]);
+        assert!(started.elapsed() >= patience.wait && tries.get() > 6);
+        assert_eq!((PATIENCE.wait.as_secs(), PATIENCE.poll.as_secs()), (60, 2));
+        // Nobody listens any more.
+        wait_for_voices(
+            || Err("x".into()),
+            Patience {
+                wait: Duration::ZERO,
+                ..patience
+            },
+            |_| false,
+        );
     }
 
     #[test]

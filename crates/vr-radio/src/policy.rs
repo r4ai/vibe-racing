@@ -15,22 +15,56 @@ pub enum Permissions {
     None,
 }
 
-/// `true` if `command` only runs the telemetry CLI.
+/// Global options of `vr` that take a value.
+const VALUE_OPTIONS: [&str; 7] = [
+    "-f", "--format", "--server", "--game", "--file", "--speed", "--until",
+];
+
+/// Whether these arguments of `vr` only ask. Starting a server, recording,
+/// changing the installed skill and deleting a session are not for the agent
+/// to decide.
+fn only_asks(args: &[&str]) -> bool {
+    // Quotes and escapes could spell any of them.
+    if args.iter().any(|a| a.contains(['"', '\'', '^', '`'])) {
+        return false;
+    }
+    let mut words = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if VALUE_OPTIONS.contains(a) {
+            it.next();
+        } else if !a.starts_with('-') {
+            words.push(*a);
+        }
+    }
+    !matches!(
+        words.as_slice(),
+        ["serve" | "record" | "skill", ..] | ["sessions", "delete", ..]
+    )
+}
+
+/// `true` if `command` only asks the telemetry CLI.
 pub fn is_vr_command(command: &str) -> bool {
     let c = command.trim();
     // Chained commands could hide anything after the first one.
     if c.contains(['&', '|', ';', '>', '<', '`', '\n']) || c.contains("$(") {
         return false;
     }
-    let first = c.split_whitespace().next().unwrap_or_default();
+    for cargo in ["cargo run -q -p vr-cli -- ", "cargo run -p vr-cli -- "] {
+        if let Some(args) = c.strip_prefix(cargo) {
+            return only_asks(&args.split_whitespace().collect::<Vec<_>>());
+        }
+    }
+    let words: Vec<&str> = c.split_whitespace().collect();
+    let Some((first, args)) = words.split_first() else {
+        return false;
+    };
     let program = first
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or_default()
         .trim_end_matches(".exe");
-    program == "vr"
-        || c.starts_with("cargo run -q -p vr-cli -- ")
-        || c.starts_with("cargo run -p vr-cli -- ")
+    program == "vr" && only_asks(args)
 }
 
 /// The shell command of an execute tool call, from its input or its title.
@@ -106,6 +140,39 @@ mod tests {
         assert!(!is_vr_command("rm vr"));
         assert!(!is_vr_command("cargo run -p other -- vr"));
         assert!(!is_vr_command(""));
+    }
+
+    #[test]
+    fn vr_commands_that_do_more_than_ask() {
+        for c in [
+            "vr serve",
+            "vr -f json serve --port 1",
+            "vr --server http://x serve",
+            "vr record --out x",
+            "vr skill install",
+            "vr sessions delete 3",
+            "vr sessions -f json delete 3",
+            "vr \"serve\"",
+            "vr sessions 'delete' 3",
+            "vr sessions de^lete 3",
+            "cargo run -q -p vr-cli -- serve",
+            "cargo run -p vr-cli -- sessions delete 3",
+        ] {
+            assert!(!is_vr_command(c), "{c}");
+        }
+        for c in [
+            "vr",
+            "vr -f json brief",
+            "vr --format json gap --car 23",
+            "vr sessions",
+            "vr sessions show 3",
+            "vr sessions import x.ibt",
+            "vr setup",
+            "vr doctor",
+            "cargo run -p vr-cli -- sessions",
+        ] {
+            assert!(is_vr_command(c), "{c}");
+        }
     }
 
     #[test]

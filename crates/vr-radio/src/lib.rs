@@ -4,9 +4,11 @@
 pub mod agent;
 pub mod app;
 pub mod audio;
+pub mod child;
 pub mod chrome;
 pub mod config;
 pub mod context;
+pub mod directive;
 pub mod early;
 pub mod engine;
 pub mod fonts;
@@ -20,5 +22,6 @@ pub mod stt;
 pub mod text;
 pub mod vad;
 pub mod voicevox;
+pub mod watch;
 pub mod wav;
 pub mod wheel;

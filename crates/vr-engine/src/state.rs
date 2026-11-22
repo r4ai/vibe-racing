@@ -1,10 +1,14 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use vr_core::{Capabilities, CarState, Flag, Frame, SessionKind, SessionPhase};
+use vr_core::{
+    Capabilities, CarState, Control, Extras, Flag, Frame, SessionKind, SessionPhase, Setup, Warning,
+};
 
+use crate::archive::SessionRecord;
+use crate::handling::HandlingTracker;
 use crate::report::*;
 use crate::util::{mean, now_ms, positive, wrap_half};
-use crate::{EventKind, EventLog};
+use crate::{Event, EventKind, EventLog};
 
 const MAX_LAPS_PER_CAR: usize = 200;
 const MAX_GAP_SAMPLES: usize = 20;
@@ -14,6 +18,19 @@ const TREND_LAPS_WINDOW: usize = 3;
 /// How long to wait for the game to publish a lap time after the line crossing.
 const PENDING_LAP_TIMEOUT_S: f64 = 3.0;
 const NEARBY_WINDOW_S: f64 = 3.0;
+/// Slower than this, the instant fuel consumption is not that of a lap.
+const MIN_INSTANT_SPEED_MPS: f64 = 15.0;
+/// A setting counts as changed once it rests for this long.
+const ADJUSTMENT_REST_S: f64 = 1.5;
+const MAX_ADJUSTMENTS: usize = 200;
+/// Remaining laps of fuel at which to warn (when it does not reach the end).
+const FUEL_WARN_LAPS: [u32; 3] = [5, 3, 1];
+/// How often the fuel is checked, in session time.
+const FUEL_CHECK_S: f64 = 1.0;
+/// The game shows no laps for a moment while a car is towed.
+const LAP_DROP_S: f64 = 1.0;
+/// Session time going back by more than this is a restart.
+const RESTART_S: f64 = 5.0;
 
 #[derive(Debug, Clone)]
 struct PendingLap {
@@ -36,6 +53,8 @@ struct CarTracker {
     caution_this_lap: bool,
     fuel_at_lap_start: Option<f64>,
     prev_on_pit_road: Option<bool>,
+    /// Since when fewer laps are shown than before.
+    dropped_since: Option<f64>,
     /// Gap samples taken when the player crosses the line:
     /// (player lap, seconds this car is ahead of the player).
     gap_samples: VecDeque<(i32, f64)>,
@@ -85,6 +104,22 @@ pub struct RaceState {
     best_lap_s: Option<f64>,
     /// Rain over the last minutes: session time and precipitation (0..1).
     rain: VecDeque<(f64, f64)>,
+    session_uid: Option<i64>,
+    /// Sequence number of the last event before this session.
+    session_start_seq: u64,
+    extras: Option<Extras>,
+    handling: HandlingTracker,
+    adjustments: Vec<Adjustment>,
+    /// In-car settings as of the last resting value.
+    controls: BTreeMap<String, f64>,
+    /// Settings being turned: value and since when.
+    turning: BTreeMap<String, (f64, f64)>,
+    damage: BTreeSet<Warning>,
+    wetness: Option<String>,
+    fuel_warned: Option<u32>,
+    fuel_checked_s: Option<f64>,
+    /// Sessions that ended and were not taken away yet.
+    finished: Vec<SessionRecord>,
 }
 
 /// How far back the rain trend looks, in seconds of session time.
@@ -111,7 +146,57 @@ impl RaceState {
             prev_incidents: None,
             best_lap_s: None,
             rain: VecDeque::new(),
+            session_uid: None,
+            session_start_seq: 0,
+            extras: None,
+            handling: HandlingTracker::default(),
+            adjustments: Vec::new(),
+            controls: BTreeMap::new(),
+            turning: BTreeMap::new(),
+            damage: BTreeSet::new(),
+            wetness: None,
+            fuel_warned: None,
+            fuel_checked_s: None,
+            finished: Vec::new(),
         }
+    }
+
+    pub fn set_extras(&mut self, extras: Extras) {
+        self.extras = Some(extras);
+    }
+
+    pub fn extras(&self) -> Option<&Extras> {
+        self.extras.as_ref()
+    }
+
+    pub fn setup_now(&self) -> Option<&Setup> {
+        self.extras.as_ref()?.setup.as_ref()
+    }
+
+    pub fn adjustments(&self) -> &[Adjustment] {
+        &self.adjustments
+    }
+
+    pub(crate) fn controls(&self) -> Vec<Control> {
+        self.frame
+            .as_ref()
+            .and_then(|f| f.player.as_ref())
+            .map(|p| p.car.controls.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn handling_tracker(&self) -> &HandlingTracker {
+        &self.handling
+    }
+
+    /// Events of the session in progress.
+    pub(crate) fn session_events(&self) -> Vec<Event> {
+        self.events.since(self.session_start_seq, usize::MAX)
+    }
+
+    /// Sessions that ended since the last call.
+    pub fn take_finished(&mut self) -> Vec<SessionRecord> {
+        std::mem::take(&mut self.finished)
     }
 
     /// Rain per minute over the last two minutes; `None` until there are
@@ -193,11 +278,20 @@ impl RaceState {
         let t = frame.session.time_s;
         let ts = frame.timestamp_ms;
 
-        if self.session_num != Some(frame.session.session_num) {
+        // A restart keeps the session number.
+        let restarted = self.session_uid != frame.session.uid
+            || self
+                .frame
+                .as_ref()
+                .is_some_and(|f| t < f.session.time_s - RESTART_S);
+        if self.session_num != Some(frame.session.session_num) || restarted {
             if self.session_num.is_some() {
+                let ended = SessionRecord::of(self);
+                self.finished.extend(ended);
                 self.reset_session();
             }
             self.session_num = Some(frame.session.session_num);
+            self.session_uid = frame.session.uid;
             self.events.push(
                 t,
                 ts,
@@ -213,10 +307,139 @@ impl RaceState {
         self.track_laps(&frame);
         self.detect_player_events(&frame);
         self.track_rain(&frame);
+        self.handling.ingest(&frame);
+        self.detect_car_events(&frame);
 
         self.frame = Some(frame);
         self.ingested_at_ms = Some(now_ms);
         self.frames_ingested += 1;
+        self.warn_fuel();
+    }
+
+    /// Settings, damage, weather: what the driver should hear about.
+    fn detect_car_events(&mut self, frame: &Frame) {
+        let t = frame.session.time_s;
+        let ts = frame.timestamp_ms;
+        let wet = frame.weather.as_ref().and_then(|w| w.wetness.clone());
+        if let (Some(from), Some(to)) = (&self.wetness, &wet)
+            && from != to
+        {
+            let (from, to) = (from.clone(), to.clone());
+            let text = format!("track now {to} (was {from})");
+            self.events
+                .push(t, ts, EventKind::WeatherChanged { from, to }, text);
+        }
+        if wet.is_some() {
+            self.wetness = wet;
+        }
+        let Some(p) = &frame.player else { return };
+        let lap = frame.player_car().and_then(|c| c.lap);
+        for c in &p.car.controls {
+            self.track_control(c, t, ts, lap);
+        }
+
+        // With the engine off, pressures are low without any damage.
+        let stalled = p.car.warnings.contains(&Warning::Stalled);
+        let damage: BTreeSet<Warning> = p
+            .car
+            .warnings
+            .iter()
+            .copied()
+            .filter(|w| w.is_damage() && (!stalled || *w == Warning::Damage))
+            .collect();
+        for w in damage.difference(&self.damage) {
+            self.events.push(
+                t,
+                ts,
+                EventKind::Damage { warning: *w },
+                format!("car warning: {}", warning_label(*w)),
+            );
+        }
+        self.damage = damage;
+    }
+
+    /// Settings are turned through several steps: only where they come to
+    /// rest counts.
+    fn track_control(&mut self, c: &Control, t: f64, ts: i64, lap: Option<i32>) {
+        let Some(was) = self.controls.get(&c.id).copied() else {
+            self.controls.insert(c.id.clone(), c.value);
+            return;
+        };
+        if was == c.value {
+            self.turning.remove(&c.id);
+            return;
+        }
+        let resting = self.turning.entry(c.id.clone()).or_insert((c.value, t));
+        if resting.0 != c.value {
+            *resting = (c.value, t);
+        }
+        if t - resting.1 < ADJUSTMENT_REST_S {
+            return;
+        }
+        self.turning.remove(&c.id);
+        self.controls.insert(c.id.clone(), c.value);
+        if self.adjustments.len() == MAX_ADJUSTMENTS {
+            self.adjustments.remove(0);
+        }
+        self.adjustments.push(Adjustment {
+            session_time_s: t,
+            lap,
+            control: c.id.clone(),
+            from: was,
+            to: c.value,
+        });
+        let fmt = crate::advice::fmt_value;
+        self.events.push(
+            t,
+            ts,
+            EventKind::Adjustment {
+                control: c.id.clone(),
+                from: was,
+                to: c.value,
+            },
+            format!("{} {} -> {}", c.id, fmt(was), fmt(c.value)),
+        );
+    }
+
+    fn warn_fuel(&mut self) {
+        let Some(f) = &self.frame else { return };
+        let t = f.session.time_s;
+        if f.session.kind != SessionKind::Race
+            || !f.player.as_ref().is_some_and(|p| p.on_track)
+            || self
+                .fuel_checked_s
+                .is_some_and(|last| (0.0..FUEL_CHECK_S).contains(&(t - last)))
+        {
+            return;
+        }
+        let Some(fuel) = self.fuel_info(f) else {
+            return;
+        };
+        let ts = f.timestamp_ms;
+        self.fuel_checked_s = Some(t);
+        let (Some(laps), FuelBasis::History) = (fuel.laps_of_fuel, fuel.basis) else {
+            return;
+        };
+        let short = fuel.to_finish_l.is_some_and(|l| l > 0.0);
+        // The lowest threshold reached.
+        let reached = FUEL_WARN_LAPS
+            .into_iter()
+            .filter(|n| short && laps < f64::from(*n) + 0.5)
+            .min();
+        match (reached, self.fuel_warned) {
+            (Some(n), warned) if warned.is_none_or(|w| n < w) => {
+                self.fuel_warned = Some(n);
+                self.events.push(
+                    t,
+                    ts,
+                    EventKind::FuelLow { laps },
+                    format!("fuel for {laps:.1} more laps, short of the finish"),
+                );
+            }
+            // Refuelled, or the race got shorter.
+            (None, Some(_)) => self.fuel_warned = None,
+            _ => {}
+        }
     }
 
     fn reset_session(&mut self) {
@@ -227,6 +450,15 @@ impl RaceState {
         self.prev_incidents = None;
         self.best_lap_s = None;
         self.rain.clear();
+        self.session_start_seq = self.events.last_seq();
+        self.handling = HandlingTracker::default();
+        self.adjustments.clear();
+        self.controls.clear();
+        self.turning.clear();
+        self.damage.clear();
+        self.wetness = None;
+        self.fuel_warned = None;
+        self.fuel_checked_s = None;
     }
 
     fn detect_session_events(&mut self, frame: &Frame) {
@@ -329,7 +561,15 @@ impl RaceState {
             tr.caution_this_lap |= caution;
 
             // Line crossing.
-            if let Some(done) = car.laps_completed {
+            let done = car.laps_completed.filter(|done| {
+                if tr.last_completed.is_none_or(|prev| *done >= prev) {
+                    tr.dropped_since = None;
+                    return true;
+                }
+                // Believed once it lasts.
+                t - *tr.dropped_since.get_or_insert(t) >= LAP_DROP_S
+            });
+            if let Some(done) = done {
                 match tr.last_completed {
                     Some(prev) if done > prev => {
                         let fuel_used_l = if is_player {
@@ -357,8 +597,13 @@ impl RaceState {
                         }
                     }
                     Some(prev) if done < prev => {
-                        // Session reset / tow: drop history for this car.
-                        *tr = CarTracker::default();
+                        // Back to the pits: the laps driven so far stay.
+                        tr.dropped_since = None;
+                        tr.pending = None;
+                        tr.pit_this_lap = car.on_pit_road;
+                        tr.caution_this_lap = caution;
+                        tr.gap_samples.clear();
+                        tr.fuel_at_lap_start = player_fuel.filter(|_| is_player);
                     }
                     None if is_player => tr.fuel_at_lap_start = player_fuel,
                     _ => {}
@@ -751,7 +996,14 @@ impl RaceState {
 
         let (per_lap, basis) = match mean(&samples) {
             Some(m) => (Some(m), FuelBasis::History),
-            None => match (positive(p.fuel_use_lph), reference) {
+            // In the pits or crawling, the instant value says nothing.
+            None => match (
+                positive(p.fuel_use_lph).filter(|_| {
+                    !car.is_some_and(|c| c.on_pit_road)
+                        && p.speed_mps.is_none_or(|v| v >= MIN_INSTANT_SPEED_MPS)
+                }),
+                reference,
+            ) {
                 (Some(lph), Some(lap)) => (Some(lph * lap / 3600.0), FuelBasis::Instant),
                 _ => (None, FuelBasis::None),
             },
@@ -845,6 +1097,19 @@ pub(crate) fn flag_label(f: Flag) -> &'static str {
         Flag::Disqualify => "disqualify",
         Flag::Debris => "debris",
         Flag::OneLapToGreen => "one lap to green",
+    }
+}
+
+pub(crate) fn warning_label(w: Warning) -> &'static str {
+    match w {
+        Warning::WaterTemp => "water temperature",
+        Warning::FuelPressure => "fuel pressure",
+        Warning::OilPressure => "oil pressure",
+        Warning::OilTemp => "oil temperature",
+        Warning::Stalled => "engine stalled",
+        Warning::PitLimiter => "pit limiter",
+        Warning::RevLimiter => "rev limiter",
+        Warning::Damage => "repairs needed",
     }
 }
 

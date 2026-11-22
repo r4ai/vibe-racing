@@ -1,8 +1,8 @@
 //! iRacing variables → normalized [`vr_core::Frame`].
 
 use vr_core::{
-    CarState, Flag, Frame, PlayerTelemetry, SessionKind, SessionPhase, SessionState, TrackInfo,
-    TrackSurface, Weather,
+    CarExtra, CarState, CarTelemetry, Control, Flag, Frame, PitState, PlayerTelemetry, SessionKind,
+    SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather,
 };
 
 use crate::layout::VarView;
@@ -96,6 +96,233 @@ fn sane_laps(v: Option<i32>) -> Option<i32> {
     v.filter(|l| (0..10_000).contains(l))
 }
 
+/// Bits of irsdk_EngineWarnings.
+fn warnings(bits: u32) -> Vec<Warning> {
+    let table = [
+        (0x001, Warning::WaterTemp),
+        (0x002, Warning::FuelPressure),
+        (0x004, Warning::OilPressure),
+        (0x008, Warning::Stalled),
+        (0x010, Warning::PitLimiter),
+        (0x020, Warning::RevLimiter),
+        (0x040, Warning::OilTemp),
+        // Mandatory or optional repairs needed.
+        (0x180, Warning::Damage),
+    ];
+    table
+        .iter()
+        .filter(|(m, _)| bits & m != 0)
+        .map(|(_, w)| *w)
+        .collect()
+}
+
+/// irsdk_PitSvFlags.
+fn pit_request(bits: u32) -> Vec<String> {
+    [
+        (0x01, "lf tyre"),
+        (0x02, "rf tyre"),
+        (0x04, "lr tyre"),
+        (0x08, "rr tyre"),
+        (0x10, "fuel"),
+        (0x20, "windshield tearoff"),
+        (0x40, "fast repair"),
+    ]
+    .iter()
+    .filter(|(m, _)| bits & m != 0)
+    .map(|(_, s)| s.to_string())
+    .collect()
+}
+
+/// irsdk_PitSvStatus.
+fn pit_status(v: Option<i32>) -> Option<String> {
+    Some(
+        match v? {
+            1 => "in progress",
+            2 => "complete",
+            100 => "too far left",
+            101 => "too far right",
+            102 => "too far forward",
+            103 => "too far back",
+            104 => "bad angle",
+            105 => "cannot be repaired",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+/// irsdk_CarLeftRight; `None` when nobody is alongside.
+fn alongside(v: Option<i32>) -> Option<String> {
+    Some(
+        match v? {
+            2 => "left",
+            3 => "right",
+            4 => "left and right",
+            5 => "two on the left",
+            6 => "two on the right",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+fn skies(v: Option<i32>) -> Option<String> {
+    Some(
+        match v? {
+            0 => "clear",
+            1 => "partly cloudy",
+            2 => "mostly cloudy",
+            3 => "overcast",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+/// 255 stands for "unlimited".
+fn limited(v: Option<i32>) -> Option<i32> {
+    v.filter(|n| (0..255).contains(n))
+}
+
+/// `"BrakeBias"` → `"brake_bias"`, `"ABS"` → `"abs"`.
+fn snake_case(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    for (i, ch) in c.iter().enumerate() {
+        if ch.is_ascii_uppercase() {
+            let after_lower = i > 0 && !c[i - 1].is_ascii_uppercase();
+            let starts_word =
+                i > 0 && c.get(i + 1).is_some_and(char::is_ascii_lowercase) && c[i - 1] != '_';
+            if (after_lower || starts_word) && c[i - 1] != '_' {
+                out.push('_');
+            }
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
+/// In-car switches that do not change how the car drives.
+const NOT_CONTROLS: &[&str] = &[
+    "dcStarter",
+    "dcTearOffVisor",
+    "dcDashPage",
+    "dcDashPage2",
+    "dcPitSpeedLimiterToggle",
+    "dcHeadlightFlash",
+    "dcToggleWindshieldWipers",
+    "dcTriggerWindshieldWipers",
+    "dcPushToPass",
+    "dcDRSToggle",
+];
+
+fn controls(v: &VarView<'_>) -> Vec<Control> {
+    v.names()
+        .filter(|n| n.starts_with("dc") && !NOT_CONTROLS.contains(n))
+        .filter_map(|n| {
+            Some(Control {
+                id: snake_case(&n[2..]),
+                // Four decimals: 57.2519, not 57.25186538696289.
+                value: (v.f64(n)? * 1e4).round() / 1e4,
+            })
+        })
+        .collect()
+}
+
+/// `corner` is `"LF"`...; iRacing numbers the tread from the left edge.
+fn tyre(v: &VarView<'_>, corner: &str) -> Tyre {
+    let across = |what: &str| {
+        let [l, m, r] = ["L", "M", "R"].map(|edge| v.f64(&format!("{corner}{what}{edge}")));
+        if corner.starts_with('L') {
+            [l, m, r]
+        } else {
+            [r, m, l]
+        }
+    };
+    Tyre {
+        cold_kpa: v.f64(&format!("{corner}coldPressure")),
+        hot_kpa: v.f64(&format!("{corner}pressure")),
+        temp_c: across("tempC"),
+        tread: across("wear"),
+        distance_m: v.f64(&format!("{corner}odometer")),
+    }
+}
+
+fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
+    let delta = |name: &str| {
+        v.bool(&format!("{name}_OK"))
+            .unwrap_or(false)
+            .then(|| v.f64(name))
+            .flatten()
+    };
+    CarTelemetry {
+        clutch: v.f64("Clutch"),
+        steering_rad: v.f64("SteeringWheelAngle"),
+        yaw_rate_rps: v.f64("YawRate"),
+        lat_accel_mps2: v.f64("LatAccel"),
+        long_accel_mps2: v.f64("LongAccel"),
+        velocity_x_mps: v.f64("VelocityX"),
+        velocity_y_mps: v.f64("VelocityY"),
+        abs_active: v.bool("BrakeABSactive"),
+        oil_press_bar: v.f64("OilPress"),
+        fuel_press_bar: v.f64("FuelPress"),
+        oil_level_l: v.f64("OilLevel"),
+        water_level_l: v.f64("WaterLevel"),
+        voltage: v.f64("Voltage"),
+        warnings: warnings(v.u32("EngineWarnings").unwrap_or(0)),
+        shift_rpm: v.f64("PlayerCarSLShiftRPM").filter(|r| *r > 0.0),
+        tyres: Tyres {
+            lf: tyre(v, "LF"),
+            rf: tyre(v, "RF"),
+            lr: tyre(v, "LR"),
+            rr: tyre(v, "RR"),
+        },
+        tyre_compound: compound(si, v.i32("PlayerTireCompound"), true),
+        tyre_sets_used: v.i32("TireSetsUsed"),
+        tyre_sets_available: limited(v.i32("TireSetsAvailable")),
+        pit: PitState {
+            open: v.bool("PitsOpen"),
+            in_stall: v.bool("PlayerCarInPitStall"),
+            service_active: v.bool("PitstopActive"),
+            status: pit_status(v.i32("PlayerCarPitSvStatus")),
+            speed_limit_mps: si.pit_speed_limit_mps,
+            repair_left_s: v.f64("PitRepairLeft"),
+            optional_repair_left_s: v.f64("PitOptRepairLeft"),
+            tow_s: v.f64("PlayerCarTowTime"),
+            fast_repairs_used: v.i32("FastRepairUsed"),
+            fast_repairs_available: limited(v.i32("FastRepairAvailable")),
+            requested: pit_request(v.u32("PitSvFlags").unwrap_or(0)),
+            requested_fuel_l: v.f64("PitSvFuel"),
+        },
+        controls: controls(v),
+        p2p_count: v.i32("P2P_Count"),
+        p2p_active: v.bool("P2P_Status"),
+        // irsdk: 3 is "active".
+        drs_active: v.i32("DRS_Status").map(|s| s == 3),
+        battery_pct: v.f64("EnergyERSBatteryPct"),
+        weight_penalty_kg: v.f64("PlayerCarWeightPenalty"),
+        power_adjust_pct: v.f64("PlayerCarPowerAdjust"),
+        delta_to_session_best_s: delta("LapDeltaToSessionBestLap"),
+        delta_to_optimal_s: delta("LapDeltaToOptimalLap"),
+        alongside: alongside(v.i32("CarLeftRight")),
+        team_incidents: v.i32("PlayerCarTeamIncidentCount"),
+    }
+}
+
+/// The name of a compound; names are known for the player's car model only.
+fn compound(si: &SessionInfo, index: Option<i32>, same_car: bool) -> Option<String> {
+    let i = usize::try_from(index?).ok()?;
+    match si.tyre_compounds.get(i) {
+        Some(name) if same_car && !name.is_empty() => Some(name.clone()),
+        _ => Some(format!("compound {i}")),
+    }
+}
+
+/// Flags for one car, not for everybody.
+fn personal_flags(bits: u32) -> Vec<Flag> {
+    flags(bits & (BLACK | REPAIR | DISQUALIFY | BLUE))
+}
+
 pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i64) -> Frame {
     let session_num = v.i32("SessionNum").unwrap_or(0);
     let def = si.session(session_num);
@@ -105,18 +332,37 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
         .map(|i| i as usize)
         .or(si.player_car_idx);
 
+    let player_car_name = si
+        .drivers
+        .iter()
+        .find(|d| Some(d.car_idx) == player_idx)
+        .and_then(|d| d.car_name.clone());
     let mut cars = Vec::new();
     for d in &si.drivers {
         if d.is_pace_car || d.is_spectator || d.car_idx >= MAX_CARS {
             continue;
         }
         let i = d.car_idx;
-        let pos = v
-            .i32_at("CarIdxPosition", i)
+        let is_player = Some(i) == player_idx;
+        // Recordings on disk (.ibt) have the player's own variables only.
+        let own_i32 = |array: &str, own: &str| {
+            if is_player && !v.has(array) {
+                v.i32(own)
+            } else {
+                v.i32_at(array, i)
+            }
+        };
+        let own_f64 = |array: &str, own: &str| {
+            if is_player && !v.has(array) {
+                v.f64(own)
+            } else {
+                v.f64_at(array, i)
+            }
+        };
+        let pos = own_i32("CarIdxPosition", "PlayerCarPosition")
             .filter(|p| *p > 0)
             .map(|p| p as u32);
-        let cpos = v
-            .i32_at("CarIdxClassPosition", i)
+        let cpos = own_i32("CarIdxClassPosition", "PlayerCarClassPosition")
             .filter(|p| *p > 0)
             .map(|p| p as u32);
         cars.push(CarState {
@@ -128,18 +374,17 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
             class_name: d.class_name.clone(),
             class_id: v.i32_at("CarIdxClass", i).filter(|c| *c > 0).or(d.class_id),
             rating: d.irating,
-            is_player: Some(i) == player_idx,
+            is_player,
             position: pos,
             class_position: cpos,
-            lap: v.i32_at("CarIdxLap", i).filter(|l| *l >= 0),
-            laps_completed: v.i32_at("CarIdxLapCompleted", i).filter(|l| *l >= 0),
-            lap_dist_pct: v
-                .f64_at("CarIdxLapDistPct", i)
+            lap: own_i32("CarIdxLap", "Lap").filter(|l| *l >= 0),
+            laps_completed: own_i32("CarIdxLapCompleted", "LapCompleted").filter(|l| *l >= 0),
+            lap_dist_pct: own_f64("CarIdxLapDistPct", "LapDistPct")
                 .filter(|p| (0.0..=1.0).contains(p)),
-            on_pit_road: v.bool_at("CarIdxOnPitRoad", i).unwrap_or(false),
-            surface: surface(v.i32_at("CarIdxTrackSurface", i)),
-            last_lap_s: v.f64_at("CarIdxLastLapTime", i).filter(|t| *t > 0.0),
-            best_lap_s: v.f64_at("CarIdxBestLapTime", i).filter(|t| *t > 0.0),
+            on_pit_road: own_i32("CarIdxOnPitRoad", "OnPitRoad").is_some_and(|p| p != 0),
+            surface: surface(own_i32("CarIdxTrackSurface", "PlayerTrackSurface")),
+            last_lap_s: own_f64("CarIdxLastLapTime", "LapLastLapTime").filter(|t| *t > 0.0),
+            best_lap_s: own_f64("CarIdxBestLapTime", "LapBestLapTime").filter(|t| *t > 0.0),
             gap_to_leader_s: if kind == SessionKind::Race {
                 v.f64_at("CarIdxF2Time", i)
                     .filter(|t| *t >= 0.0 && pos.is_some())
@@ -147,6 +392,20 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
                 None
             },
             est_lap_s: d.est_lap_s,
+            extra: CarExtra {
+                tyre_compound: compound(
+                    si,
+                    v.i32_at("CarIdxTireCompound", i),
+                    d.car_name == player_car_name,
+                ),
+                best_lap_num: v.i32_at("CarIdxBestLapNum", i).filter(|l| *l > 0),
+                p2p_count: v.i32_at("CarIdxP2P_Count", i),
+                p2p_active: v.bool_at("CarIdxP2P_Status", i),
+                fast_repairs_used: v.i32_at("CarIdxFastRepairsUsed", i),
+                flags: personal_flags(v.i32_at("CarIdxSessionFlags", i).unwrap_or(0) as u32),
+                gear: v.i32_at("CarIdxGear", i),
+                rpm: v.f64_at("CarIdxRPM", i).filter(|r| *r >= 0.0),
+            },
         });
     }
 
@@ -174,6 +433,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
             .flatten(),
         water_temp_c: v.f64("WaterTemp"),
         oil_temp_c: v.f64("OilTemp"),
+        car: car_telemetry(v, si),
     };
 
     Frame {
@@ -194,6 +454,9 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
                 config: si.track_config.clone(),
                 length_m: si.track_length_m,
             }),
+            uid: v.i32("SessionUniqueID").map(i64::from),
+            time_total_s: sane_time(v.f64("SessionTimeTotal")),
+            time_of_day_s: v.f64("SessionTimeOfDay"),
         },
         player_car_idx: player_idx,
         player: Some(player),
@@ -203,6 +466,12 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
             track_temp_c: v.f64("TrackTempCrew").or_else(|| v.f64("TrackTemp")),
             wetness: wetness(v.i32("TrackWetness")),
             precipitation: v.f64("Precipitation"),
+            declared_wet: v.bool("WeatherDeclaredWet"),
+            humidity: v.f64("RelativeHumidity"),
+            wind_mps: v.f64("WindVel"),
+            wind_dir_deg: v.f64("WindDir").map(|r| r.to_degrees().rem_euclid(360.0)),
+            skies: skies(v.i32("Skies")),
+            fog: v.f64("FogLevel"),
         }),
     }
 }
@@ -266,6 +535,112 @@ mod tests {
         assert_eq!(sane_laps(Some(9_999)), Some(9_999));
         assert_eq!(sane_laps(Some(32_767)), None);
         assert_eq!(sane_laps(Some(-1)), None);
+    }
+
+    #[test]
+    fn bits_and_codes_of_the_car_map() {
+        assert_eq!(warnings(0), []);
+        // What iRacing showed for a damaged car with the engine off.
+        assert_eq!(
+            warnings(414),
+            [
+                Warning::FuelPressure,
+                Warning::OilPressure,
+                Warning::Stalled,
+                Warning::PitLimiter,
+                Warning::Damage
+            ]
+        );
+        assert_eq!(
+            warnings(0x01 | 0x20 | 0x40),
+            [Warning::WaterTemp, Warning::RevLimiter, Warning::OilTemp]
+        );
+        assert_eq!(warnings(0x80), [Warning::Damage]);
+        assert_eq!(warnings(0x100), [Warning::Damage]);
+        assert_eq!(warnings(0x200), []);
+        assert_eq!(
+            pit_request(79),
+            ["lf tyre", "rf tyre", "lr tyre", "rr tyre", "fast repair"]
+        );
+        assert_eq!(pit_request(0x30), ["fuel", "windshield tearoff"]);
+        let status = [
+            (1, "in progress"),
+            (2, "complete"),
+            (100, "too far left"),
+            (101, "too far right"),
+            (102, "too far forward"),
+            (103, "too far back"),
+            (104, "bad angle"),
+            (105, "cannot be repaired"),
+        ];
+        for (v, want) in status {
+            assert_eq!(pit_status(Some(v)).as_deref(), Some(want));
+        }
+        assert_eq!(pit_status(Some(0)), None);
+        assert_eq!(pit_status(None), None);
+        let near = [
+            "left",
+            "right",
+            "left and right",
+            "two on the left",
+            "two on the right",
+        ];
+        for (i, want) in near.iter().enumerate() {
+            assert_eq!(alongside(Some(i as i32 + 2)).as_deref(), Some(*want));
+        }
+        assert_eq!(alongside(Some(0)), None);
+        assert_eq!(alongside(Some(1)), None, "clear");
+        assert_eq!(alongside(None), None);
+        for (i, want) in ["clear", "partly cloudy", "mostly cloudy", "overcast"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(skies(Some(i as i32)).as_deref(), Some(*want));
+        }
+        assert_eq!(skies(Some(4)), None);
+        assert_eq!(limited(Some(0)), Some(0));
+        assert_eq!(limited(Some(254)), Some(254));
+        assert_eq!(limited(Some(255)), None, "unlimited");
+        assert_eq!(limited(Some(-1)), None);
+    }
+
+    #[test]
+    fn control_names_become_ids() {
+        for (name, id) in [
+            ("BrakeBias", "brake_bias"),
+            ("TractionControl", "traction_control"),
+            ("TractionControl2", "traction_control2"),
+            ("ABS", "abs"),
+            ("ThrottleShape", "throttle_shape"),
+            ("AntiRollFront", "anti_roll_front"),
+            ("MGUKDeployMode", "mguk_deploy_mode"),
+            ("Boost_Level", "boost_level"),
+        ] {
+            assert_eq!(snake_case(name), id);
+        }
+    }
+
+    #[test]
+    fn personal_flags_leave_out_those_for_everybody() {
+        assert_eq!(
+            personal_flags(GREEN | YELLOW | BLUE | BLACK | REPAIR | DISQUALIFY),
+            [Flag::Blue, Flag::Black, Flag::Repair, Flag::Disqualify]
+        );
+        assert_eq!(personal_flags(GREEN), []);
+    }
+
+    #[test]
+    fn compounds_have_names_for_the_same_car_only() {
+        let si = SessionInfo {
+            tyre_compounds: vec!["Hard".into(), String::new()],
+            ..Default::default()
+        };
+        assert_eq!(compound(&si, Some(0), true).as_deref(), Some("Hard"));
+        assert_eq!(compound(&si, Some(0), false).as_deref(), Some("compound 0"));
+        assert_eq!(compound(&si, Some(1), true).as_deref(), Some("compound 1"));
+        assert_eq!(compound(&si, Some(7), true).as_deref(), Some("compound 7"));
+        assert_eq!(compound(&si, Some(-1), true), None);
+        assert_eq!(compound(&si, None, true), None);
     }
 
     #[test]
@@ -380,6 +755,79 @@ DriverInfo:
         let (_, b) = h.latest_buf().unwrap();
         let data = &img.bytes[b.offset as usize..b.offset as usize + h.buf_len as usize];
         build_frame(&vt.view(data), &si, 7, 1234)
+    }
+
+    #[test]
+    fn the_car_in_detail() {
+        let one = |name, ty| Var { name, ty, count: 1 };
+        let vars = [
+            one("PlayerCarIdx", 2),
+            one("SessionUniqueID", 2),
+            one("LFtempCL", 4),
+            one("LFtempCR", 4),
+            one("RFtempCL", 4),
+            one("RFtempCR", 4),
+            one("RFwearM", 4),
+            one("LRcoldPressure", 4),
+            one("dcBrakeBias", 4),
+            one("dcTractionControl", 4),
+            one("dcDashPage", 4),
+            one("dcStarter", 1),
+            one("P2P_Count", 2),
+            one("DRS_Status", 2),
+            one("FastRepairAvailable", 2),
+            one("LapDeltaToOptimalLap", 4),
+            one("LapDeltaToSessionBestLap", 4),
+            one("LapDeltaToSessionBestLap_OK", 1),
+            one("WindDir", 4),
+            one("WeatherDeclaredWet", 1),
+        ];
+        let mut img = Image::new(&vars, YAML);
+        img.set_i32("PlayerCarIdx", 0, 1);
+        img.set_i32("SessionUniqueID", 0, 3);
+        img.set_f32("LFtempCL", 0, 88.5);
+        img.set_f32("LFtempCR", 0, 97.5);
+        img.set_f32("RFtempCL", 0, 99.5);
+        img.set_f32("RFtempCR", 0, 90.5);
+        img.set_f32("RFwearM", 0, 0.5);
+        img.set_f32("LRcoldPressure", 0, 131.0);
+        img.set_f32("dcBrakeBias", 0, 57.25);
+        img.set_f32("dcTractionControl", 0, 2.0);
+        img.set_f32("dcDashPage", 0, 1.0);
+        img.set_i32("P2P_Count", 0, 138);
+        img.set_i32("DRS_Status", 0, 3);
+        img.set_i32("FastRepairAvailable", 0, 255);
+        img.set_f32("LapDeltaToOptimalLap", 0, 1.0);
+        img.set_f32("LapDeltaToSessionBestLap", 0, -0.5);
+        img.set_bool("LapDeltaToSessionBestLap_OK", 0, true);
+        img.set_f32("WindDir", 0, -std::f32::consts::FRAC_PI_2);
+        img.set_bool("WeatherDeclaredWet", 0, true);
+        let f = build(&img);
+        assert_eq!(f.session.uid, Some(3));
+        let c = f.player.unwrap().car;
+        // Outer, middle, inner: the left edge is outside on the left only.
+        assert_eq!(c.tyres.lf.temp_c, [Some(88.5), None, Some(97.5)]);
+        assert_eq!(c.tyres.rf.temp_c, [Some(90.5), None, Some(99.5)]);
+        assert_eq!(c.tyres.rf.tread, [None, Some(0.5), None]);
+        assert_eq!(c.tyres.rf.min_tread(), Some(0.5));
+        assert_eq!(c.tyres.lf.mean_temp_c(), Some(93.0));
+        assert_eq!(c.tyres.lr.mean_temp_c(), None);
+        assert_eq!(c.tyres.lr.cold_kpa, Some(131.0));
+        let controls: Vec<(&str, f64)> = c
+            .controls
+            .iter()
+            .map(|c| (c.id.as_str(), c.value))
+            .collect();
+        assert_eq!(controls, [("brake_bias", 57.25), ("traction_control", 2.0)]);
+        assert_eq!(c.p2p_count, Some(138));
+        assert_eq!(c.drs_active, Some(true));
+        assert_eq!(c.pit.fast_repairs_available, None);
+        assert_eq!(c.delta_to_session_best_s, Some(-0.5));
+        assert_eq!(c.delta_to_optimal_s, None, "not marked valid");
+        let w = f.weather.unwrap();
+        assert_eq!(w.wind_dir_deg.map(f64::round), Some(270.0));
+        assert_eq!(w.declared_wet, Some(true));
+        assert_eq!(w.humidity, None);
     }
 
     #[test]

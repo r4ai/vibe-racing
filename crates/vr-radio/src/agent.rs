@@ -14,7 +14,7 @@ use agent_client_protocol::v1::schema::{
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOptionValue,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    TextContent, ToolCallStatus,
+    StopReason, TextContent, ToolCallStatus,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -31,7 +31,13 @@ const ASK_MODE: &str = "default";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCmd {
     /// Starts a turn. A turn still running is cancelled first.
-    Prompt { turn: Turn, text: String },
+    Prompt {
+        turn: Turn,
+        text: String,
+        /// The driver's words: they reach the agent even when a newer prompt
+        /// overtakes them.
+        keep: bool,
+    },
     /// Cancels the running turn, if any.
     Cancel,
 }
@@ -205,6 +211,38 @@ impl From<agent_client_protocol::v1::schema::Usage> for TokenUsage {
     }
 }
 
+/// A prompt that waits for the turn before it to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Prompt {
+    turn: Turn,
+    text: String,
+    keep: bool,
+}
+
+impl Prompt {
+    /// Takes the place of the one that waited, with its words if they count.
+    fn after(self, earlier: Option<Prompt>) -> Prompt {
+        match earlier {
+            Some(e) if e.keep => Prompt {
+                text: format!("{}\n\n{}", e.text, self.text),
+                keep: true,
+                ..self
+            },
+            _ => self,
+        }
+    }
+}
+
+/// The rules the agent has not read yet, then the question.
+fn with_primer(primer: Option<String>, text: String) -> String {
+    match primer {
+        Some(p) => format!(
+            "{p}\n\n（予定変更: 「了解」の返答は不要。読む作業は省き、次の無線にすぐ答えること）\n\n{text}"
+        ),
+        None => text,
+    }
+}
+
 /// Runs the session until `cmds` closes or the agent goes away.
 /// Always ends with [`AgentEvent::Closed`].
 pub async fn run(
@@ -302,8 +340,10 @@ async fn session(
                 (turn, Box::pin(async move { cx.send_request(req).block_task().await }))
             };
             // The primer is turn 0, which the pipeline never waits for.
-            let mut inflight = primer.map(|text| start(PRIMER, text));
-            let mut queued: Option<(Turn, String)> = None;
+            let mut inflight = primer.clone().map(|text| start(PRIMER, text));
+            // What the agent still has to be told before the next question.
+            let mut unread = primer;
+            let mut queued: Option<Prompt> = None;
             let forward = |turn: Option<Turn>, inbound: Inbound| {
                 let Some(turn) = turn else { return };
                 let event = match inbound {
@@ -319,15 +359,17 @@ async fn session(
                 tokio::select! {
                     cmd = cmds.recv() => match cmd {
                         None => break,
-                        Some(AgentCmd::Prompt { turn, text }) => {
+                        Some(AgentCmd::Prompt { turn, text, keep }) => {
+                            let prompt = Prompt { turn, text, keep };
                             if let Some((running, _)) = &inflight {
-                                // The question needs what the primer says.
-                                if *running != PRIMER {
+                                // The driver does not wait for the primer: it
+                                // comes along with the question. Others do.
+                                if keep || *running != PRIMER {
                                     cx.send_notification(CancelNotification::new(session_id.clone()))?;
                                 }
-                                queued = Some((turn, text));
+                                queued = Some(prompt.after(queued.take()));
                             } else {
-                                inflight = Some(start(turn, text));
+                                inflight = Some(start(turn, with_primer(unread.take(), prompt.text)));
                             }
                         }
                         Some(AgentCmd::Cancel) => {
@@ -349,6 +391,11 @@ async fn session(
                         while let Ok(inbound) = inbound_rx.try_recv() {
                             forward(Some(turn), inbound);
                         }
+                        if turn == PRIMER
+                            && matches!(&result, Ok(r) if r.stop_reason != StopReason::Cancelled)
+                        {
+                            unread = None;
+                        }
                         let _ = events.send(match result {
                             Ok(r) => AgentEvent::TurnEnd {
                                 turn,
@@ -357,8 +404,8 @@ async fn session(
                             },
                             Err(e) => AgentEvent::TurnFailed { turn, error: e.to_string() },
                         });
-                        if let Some((turn, text)) = queued.take() {
-                            inflight = Some(start(turn, text));
+                        if let Some(Prompt { turn, text, .. }) = queued.take() {
+                            inflight = Some(start(turn, with_primer(unread.take(), text)));
                         }
                     }
                 }
@@ -378,8 +425,8 @@ pub mod fake {
     use agent_client_protocol::v1::Responder;
     use agent_client_protocol::v1::schema::{
         AgentCapabilities, CancelNotification, ContentChunk, Cost, InitializeResponse,
-        NewSessionResponse, SessionId, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
-        ToolCallUpdateFields, ToolKind, Usage, UsageUpdate,
+        NewSessionResponse, SessionId, ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+        ToolKind, Usage, UsageUpdate,
     };
 
     use super::*;
@@ -527,6 +574,7 @@ mod tests {
             .send(AgentCmd::Prompt {
                 turn: 7,
                 text: "差は？".into(),
+                keep: true,
             })
             .unwrap();
         assert_eq!(
@@ -589,31 +637,117 @@ mod tests {
         assert_eq!(*prompts.lock().unwrap(), vec!["差は？".to_string()]);
     }
 
-    /// A question asked while the agent reads the rules waits for them
-    /// instead of throwing them away, and Cancel leaves them alone.
+    fn prompt(turn: Turn, text: &str, keep: bool) -> AgentCmd {
+        AgentCmd::Prompt {
+            turn,
+            text: text.into(),
+            keep,
+        }
+    }
+
+    /// The first `n` turns to end, and what the agent was asked by then.
+    async fn ends(link: &mut AgentLink, n: usize) -> Vec<(Turn, String)> {
+        let mut ends = Vec::new();
+        while ends.len() < n {
+            if let AgentEvent::TurnEnd { turn, stop, .. } = next(&mut link.rx).await {
+                ends.push((turn, stop));
+            }
+        }
+        ends
+    }
+
+    fn end(turn: Turn, stop: &str) -> (Turn, String) {
+        (turn, stop.to_string())
+    }
+
+    const OVERRIDE: &str =
+        "（予定変更: 「了解」の返答は不要。読む作業は省き、次の無線にすぐ答えること）";
+
+    /// The driver does not wait for the rules to be read: they come along
+    /// with the question, once.
     #[tokio::test]
-    async fn the_primer_comes_first_and_is_not_cancelled() {
+    async fn a_question_takes_the_place_of_the_primer() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let mut link = AgentLink::spawn(
+            fake::agent(&["了解。"], prompts.clone()),
+            config(Some("slow rules")),
+        );
+        // Cancel alone leaves the rules to be read.
+        link.tx.send(AgentCmd::Cancel).unwrap();
+        link.tx.send(prompt(1, "燃料", true)).unwrap();
+        assert_eq!(
+            ends(&mut link, 1).await,
+            [end(0, "Cancelled")],
+            "the primer makes way"
+        );
+        link.tx.send(AgentCmd::Cancel).unwrap();
+        assert_eq!(ends(&mut link, 1).await, [end(1, "Cancelled")]);
+        link.tx.send(prompt(2, "差は", true)).unwrap();
+        assert_eq!(ends(&mut link, 1).await, [end(2, "EndTurn")]);
+        assert_eq!(
+            *prompts.lock().unwrap(),
+            [
+                "slow rules".to_string(),
+                format!("slow rules\n\n{OVERRIDE}\n\n燃料"),
+                "差は".to_string()
+            ]
+        );
+    }
+
+    /// What is not from the driver waits for the rules.
+    #[tokio::test]
+    async fn other_prompts_wait_for_the_primer() {
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let mut link = AgentLink::spawn(
             fake::agent(&["了解。"], prompts.clone()),
             config(Some("rules")),
         );
-        link.tx.send(AgentCmd::Cancel).unwrap();
-        link.tx
-            .send(AgentCmd::Prompt {
-                turn: 1,
-                text: "燃料".into(),
-            })
-            .unwrap();
-        let mut ends = Vec::new();
-        while ends.len() < 2 {
-            if let AgentEvent::TurnEnd { turn, stop, .. } = next(&mut link.rx).await {
-                ends.push((turn, stop));
-            }
+        link.tx.send(prompt(1, "黄旗", false)).unwrap();
+        assert_eq!(
+            ends(&mut link, 2).await,
+            [end(0, "EndTurn"), end(1, "EndTurn")]
+        );
+        assert_eq!(*prompts.lock().unwrap(), ["rules", "黄旗"]);
+    }
+
+    /// Words that waited are sent with the newer ones, calls are not.
+    #[tokio::test]
+    async fn waiting_words_are_merged_in_order() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let mut link = AgentLink::spawn(fake::agent(&["了解。"], prompts.clone()), config(None));
+        assert!(matches!(next(&mut link.rx).await, AgentEvent::Ready { .. }));
+        for p in [
+            prompt(1, "slow", true),
+            prompt(2, "黄旗", false),
+            prompt(3, "一つ目", true),
+            prompt(4, "二つ目", true),
+        ] {
+            link.tx.send(p).unwrap();
         }
-        let end = |t| (t, "EndTurn".to_string());
-        assert_eq!(ends, [end(0), end(1)]);
-        assert_eq!(*prompts.lock().unwrap(), ["rules", "燃料"]);
+        assert_eq!(
+            ends(&mut link, 2).await,
+            [end(1, "Cancelled"), end(4, "EndTurn")]
+        );
+        assert_eq!(*prompts.lock().unwrap(), ["slow", "一つ目\n\n二つ目"]);
+    }
+
+    #[test]
+    fn merging_keeps_what_counts() {
+        let p = |turn, text: &str, keep| Prompt {
+            turn,
+            text: text.into(),
+            keep,
+        };
+        assert_eq!(p(2, "b", true).after(None), p(2, "b", true));
+        assert_eq!(
+            p(2, "b", false).after(Some(p(1, "a", true))),
+            p(2, "a\n\nb", true)
+        );
+        assert_eq!(
+            p(2, "b", true).after(Some(p(1, "a", false))),
+            p(2, "b", true)
+        );
+        assert_eq!(with_primer(None, "q".into()), "q");
     }
 
     #[tokio::test]
@@ -632,6 +766,7 @@ mod tests {
             .send(AgentCmd::Prompt {
                 turn: 1,
                 text: "slow".into(),
+                keep: true,
             })
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -639,6 +774,7 @@ mod tests {
             .send(AgentCmd::Prompt {
                 turn: 2,
                 text: "燃料".into(),
+                keep: true,
             })
             .unwrap();
         assert_eq!(
@@ -694,6 +830,7 @@ mod tests {
             .send(AgentCmd::Prompt {
                 turn: 3,
                 text: "q".into(),
+                keep: true,
             })
             .unwrap();
         assert!(matches!(

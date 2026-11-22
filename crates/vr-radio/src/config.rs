@@ -45,12 +45,22 @@ pub const DEFAULT_PRIMER: &str = "\
 - 判断（入るか・引っ張るか・守れるか・足りるか）を聞かれたら、結論と決め手の数字（燃料が何周分か、残り何周か、不足量、差と毎周の変化）を同じ答えで言う。2 文まで\n\
 - 追いつく・追いつかれる見通しは、gap の毎周の変化（closing / growing）で計算する。1 周だけのラップ差で計算しない。growing なら追いつかれない\n\
 - 動揺・怒り・焦りの無線には、最初に短く落ち着かせる一言、続けて事実と、次に集中すること一つ\n\
+- ラジオの設定（音量・読み上げ・話速・話者・自動連絡）を頼まれたら、返答の先頭に [[radio キー=値]] を書く。画面と音声には出ない。キーは volume（0〜150、+20 や -20 も可）、mute（on/off）、speed（0.5〜2.0、+0.1 も可）、speaker（キャラクター名やスタイル名）、proactive（on/off、自動連絡全体）、event.種類（on/off。種類は flag position lap pit incident fuel weather session adjustment）。頼まれていない設定は変えない。「うるさい」「聞こえない」は音量の依頼とみなす。現在値は無線に付く。例:「[[radio volume=-20]]音量下げた。」\n\
+- ときどき「出来事」がドライバーの無線の代わりに届く。そのときだけ、今知らせるべきことを 1 文で言う。不要なら - だけを返す\n\
 race-engineer スキルがあれば今読んで、データの読み方を把握しておくこと。コマンドはまだ実行しない。終わったら「了解」とだけ返す。";
 
 pub const DEFAULT_PROMPT: &str = "\
 無線:「{text}」\n\n\
 {context}\n\n\
+{radio}\n\n\
 結論と数字から、日本語 1〜2 文で即答。";
+
+/// Sent when something happened that the driver may have to know.
+pub const CALL_PROMPT: &str = "\
+出来事（ドライバーの無線ではない）: {text}\n\n\
+{context}\n\n\
+ドライバーが今知るべきことだけを、日本語の短い 1 文で言う。前に伝えたこと、本人に見えていること、\
+行動が変わらないことなら - だけを返す。ラジオの設定は変えない。コマンドは使わない。";
 
 /// Commands whose output goes with every question. Together they answer
 /// nearly everything a driver asks while driving.
@@ -149,6 +159,24 @@ pub struct Config {
     #[arg(long, env = "VR_RADIO_SPEED", default_value_t = 1.2)]
     pub speed: f64,
 
+    /// Loudness of the voice in percent (over 100: amplified).
+    #[arg(long, env = "VR_RADIO_VOLUME", default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=150))]
+    pub volume: u8,
+
+    /// Starts the VOICEVOX engine when it does not answer at a local
+    /// `VOICEVOX_URL`: its command, empty to leave it alone. Default: the
+    /// installed one.
+    #[arg(long, env = "VR_RADIO_VOICEVOX")]
+    pub voicevox: Option<String>,
+
+    /// Kept running with the window: collects the race. Empty: nothing.
+    #[arg(long, env = "VR_RADIO_SERVE", default_value = "vr serve --if-needed")]
+    pub serve: String,
+
+    /// Tells the race events the engineer calls about. Empty: no calls.
+    #[arg(long, env = "VR_RADIO_WATCH", default_value = "vr watch -f json")]
+    pub watch: String,
+
     /// Global push-to-talk key, held while speaking (e.g. F9, Ctrl+Shift+Space).
     /// Map a wheel button to it to talk without leaving the game.
     #[arg(long, env = "VR_RADIO_HOTKEY", default_value = "F9")]
@@ -198,6 +226,11 @@ impl Config {
             options: self.agent_options.clone(),
             primer: Some(self.primer.clone()).filter(|p| !p.trim().is_empty()),
         }
+    }
+
+    /// The speech rate in percent.
+    pub fn speed_percent(&self) -> u16 {
+        (self.speed * 100.0).round().clamp(0.0, 1000.0) as u16
     }
 
     /// The commands that fetch data for a question.
@@ -292,6 +325,13 @@ mod tests {
         assert_eq!(c.permissions, Permissions::Safe);
         assert_eq!(c.speaker, 3);
         assert_eq!(c.speed, 1.2);
+        assert_eq!(c.speed_percent(), 120);
+        assert_eq!(c.volume, 100);
+        assert_eq!(c.serve, "vr serve --if-needed");
+        assert_eq!(c.watch, "vr watch -f json");
+        assert_eq!(c.voicevox, None);
+        assert!(c.prompt.contains("{radio}") && c.primer.contains("[[radio volume=-20]]"));
+        assert!(CALL_PROMPT.contains("{text}") && CALL_PROMPT.contains("{context}"));
         assert_eq!(c.hotkey, "F9");
         assert!(c.prompt.contains("{text}") && c.prompt.contains("{context}"));
         assert_eq!(c.context_commands()[0], "vr brief");
@@ -318,7 +358,15 @@ mod tests {
             "",
             "--stt-api-key",
             "k",
+            "--serve",
+            "",
+            "--watch",
+            "",
+            "--voicevox",
+            "",
         ]);
+        assert_eq!((c.serve.as_str(), c.watch.as_str()), ("", ""));
+        assert_eq!(c.voicevox.as_deref(), Some(""));
         let stt = c.stt();
         assert_eq!(stt.language, None);
         assert_eq!(stt.prompt, None);
@@ -367,6 +415,14 @@ mod tests {
         for bad in ["model", "=x", "model="] {
             assert!(Config::try_parse_from(["vr-radio", "--agent-option", bad]).is_err());
         }
+    }
+
+    #[test]
+    fn volume_is_limited() {
+        let volume = |v| Config::try_parse_from(["vr-radio", "--volume", v]).map(|c| c.volume);
+        assert_eq!(volume("0").unwrap(), 0);
+        assert_eq!(volume("150").unwrap(), 150);
+        assert!(volume("151").is_err());
     }
 
     #[test]

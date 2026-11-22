@@ -315,6 +315,30 @@ fn serve_then_query_through_discovery() {
     assert!(json(&srv(&["fuel", "-f", "json"]))["fuel"].is_object());
     assert!(json(&srv(&["gap", "-f", "json"]))["nearby"].is_array());
     assert!(json(&srv(&["snapshot", "-f", "json"]))["frame"].is_object());
+    for (cmd, field) in [
+        ("car", "car"),
+        ("setup", "setup"),
+        ("handling", "mean"),
+        ("info", "value"),
+    ] {
+        assert!(json(&srv(&[cmd, "-f", "json"]))[field].is_object(), "{cmd}");
+    }
+    let c = json(&srv(&["channels", "session", "-f", "json"]));
+    assert_eq!(c["channels"][0]["name"], "SessionTime");
+    let o = srv(&["info", "Nope"]);
+    assert_eq!(o.status.code(), Some(4));
+
+    // A second server is not needed.
+    let o = run(&disc, &["serve", "--if-needed"]);
+    assert!(o.status.success());
+    assert!(stderr(&o).contains(&format!("already served by {url}")));
+    // Demo races are not kept.
+    assert_eq!(
+        stdout(&run(&disc, &["sessions", "list"])),
+        "no sessions
+"
+    );
+
     let o = srv(&["gap", "--car", "999"]);
     assert_eq!(o.status.code(), Some(4), "404 maps to not-found exit code");
 
@@ -377,6 +401,7 @@ fn skill_install_matches_repository_files() {
         "SKILL.md",
         "references/commands.md",
         "references/radio-style.md",
+        "references/setup.md",
         "references/glossary.md",
     ] {
         let installed = std::fs::read_to_string(target.join("race-engineer").join(rel)).unwrap();
@@ -429,4 +454,140 @@ fn skill_install_project_targets() {
         "{}",
         stdout(&o)
     );
+}
+
+#[test]
+fn car_setup_handling_channels_and_info() {
+    let (_d, disc) = tmp();
+    let get = |args: &[&str]| json(&run(&disc, &with_syn(&[args, &["-f", "json"]].concat())));
+    assert_eq!(get(&["car"])["car"]["controls"][0]["id"], "brake_bias");
+    assert_eq!(get(&["setup"])["setup"]["name"], "baseline");
+    assert_eq!(get(&["handling", "--last", "2"])["laps_sampled"], 2);
+    let v = get(&["channels", "session", "time"]);
+    assert_eq!(v["channels"][0]["name"], "SessionTime");
+    assert_eq!(get(&["info", "WeekendInfo"])["value"]["TrackName"], "demo");
+    let o = run(&disc, &with_syn(&["info", "Nope"]));
+    assert_eq!(o.status.code(), Some(4), "{}", stderr(&o));
+    let text = stdout(&run(&disc, &with_syn(&["car"])));
+    for want in [
+        "car: GT3 Demo",
+        "tyres:",
+        "pit: open",
+        "P2P/OTS: 200 left",
+        "settings in the car: brake_bias 54 | traction_control 3",
+    ] {
+        assert!(text.contains(want), "missing {want:?}:\n{text}");
+    }
+    let text = stdout(&run(&disc, &with_syn(&["setup"])));
+    assert!(text.contains("Chassis/Front:\n  ArbBlades: 3\n"), "{text}");
+}
+
+/// A kept session with the given id and lap times.
+fn keep(dir: &Path, id: &str, started_ms: i64, laps: &[f64], wing: &str) {
+    let laps: Vec<serde_json::Value> = laps
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            serde_json::json!({
+                "lap": i + 1, "time_s": t, "fuel_used_l": 2.5, "pit": false,
+                "caution": false, "position": 3, "session_time_s": 0.0
+            })
+        })
+        .collect();
+    let r = serde_json::json!({
+        "id": id, "game": "iracing", "started_ms": started_ms, "updated_ms": started_ms,
+        "duration_s": 600.0, "kind": "race", "track": "Spa", "car": "SF23", "player": null,
+        "laps_completed": laps.len(), "laps": laps, "standings": [], "events": [],
+        "fuel": null, "weather": null,
+        "setup": { "name": "a.sto", "modified": false, "passed_tech": true,
+                   "items": [{ "path": "Rear/Wing", "value": wing }] }
+    });
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(format!("{id}.json")), r.to_string()).unwrap();
+}
+
+#[test]
+fn sessions_can_be_managed() {
+    let (d, disc) = tmp();
+    // Next to the discovery file, so that tests never see the real ones.
+    let dir = d.path().join("sessions");
+    let o = run(&disc, &["sessions", "dir"]);
+    assert_eq!(Path::new(stdout(&o).trim()), dir);
+    assert_eq!(stdout(&run(&disc, &["sessions", "list"])), "no sessions\n");
+    keep(
+        &dir,
+        "20260101-000000-race-spa",
+        1_767_225_600_000,
+        &[120.0, 118.0],
+        "7",
+    );
+    keep(
+        &dir,
+        "20260102-000000-race-spa",
+        1_767_312_000_000,
+        &[119.5, 117.25],
+        "8",
+    );
+
+    let list = stdout(&run(&disc, &["sessions", "list"]));
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[0].starts_with("1. 20260102-000000-race-spa | 2026-01-02 00:00 UTC | race | Spa")
+    );
+    assert!(lines[0].contains("2 laps | best 1:57.250"), "{list}");
+    let one = |args: &[&str]| stdout(&run(&disc, &[&["sessions", "list"], args].concat()));
+    assert_eq!(one(&["--limit", "1"]).lines().count(), 1);
+    assert_eq!(one(&["--track", "SPA"]).lines().count(), 2);
+    assert_eq!(one(&["--track", "suzuka"]), "no sessions\n");
+    assert_eq!(one(&["--car", "sf"]).lines().count(), 2);
+    assert_eq!(one(&["--kind", "practice"]), "no sessions\n");
+
+    let show = stdout(&run(&disc, &["sessions", "show", "2"]));
+    assert!(
+        show.contains("car: SF23 | duration 10m00s | fuel 2.50L/lap"),
+        "{show}"
+    );
+    assert!(show.contains("  2: 1:58.000 | 2.50L"), "{show}");
+    let cmp = stdout(&run(&disc, &["sessions", "compare", "20260101", "last"]));
+    for want in [
+        "best: 1:58.000 / 1:57.250 (B -0.750s)",
+        "clean average: 1:59.000 / 1:58.375 (B -0.625s)",
+        "  1: 2:00.000 / 1:59.500 (-0.500s)",
+        "setup differences (A -> B):\n  Rear/Wing: 7 -> 8",
+    ] {
+        assert!(cmp.contains(want), "missing {want:?}:\n{cmp}");
+    }
+    let setup = stdout(&run(&disc, &["sessions", "setup", "last"]));
+    assert_eq!(setup, "a.sto\n  Rear/Wing: 8\n");
+
+    assert!(
+        run(&disc, &["sessions", "note", "last", "good"])
+            .status
+            .success()
+    );
+    assert!(one(&["--limit", "1"]).trim_end().ends_with("| note: good"));
+    let out = d.path().join("x.json");
+    let o = run(
+        &disc,
+        &["sessions", "export", "last", "--out", out.to_str().unwrap()],
+    );
+    assert!(o.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(v["note"], "good");
+
+    let o = run(&disc, &["sessions", "delete", "last"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("--yes"));
+    assert_eq!(one(&[]).lines().count(), 2, "nothing was deleted");
+    assert!(
+        run(&disc, &["sessions", "delete", "last", "--yes"])
+            .status
+            .success()
+    );
+    assert_eq!(one(&[]).lines().count(), 1);
+    let o = run(&disc, &["sessions", "show", "20270101"]);
+    assert_eq!(o.status.code(), Some(4));
+    let o = run(&disc, &["sessions", "import", "no-such.ibt"]);
+    assert_eq!(o.status.code(), Some(1));
 }

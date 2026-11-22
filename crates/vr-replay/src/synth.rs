@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use vr_core::{
-    Capabilities, CarState, Flag, Frame, PlayerTelemetry, Poll, SessionKind, SessionPhase,
-    SessionState, SourceError, TelemetrySource, TrackInfo, TrackSurface, Weather,
+    Capabilities, CarState, CarTelemetry, Channel, Control, Extras, Flag, Frame, PitState,
+    PlayerTelemetry, Poll, SessionKind, SessionPhase, SessionState, Setup, SetupItem, SourceError,
+    TelemetrySource, TrackInfo, TrackSurface, Tyre, Tyres, Weather,
 };
 
 use crate::Pacer;
@@ -329,6 +330,7 @@ impl SynthSource {
                     best_lap_s: c.best_lap,
                     gap_to_leader_s: Some((leader.progress() - c.progress()) * leader_lap_s),
                     est_lap_s: Some(90.0),
+                    extra: Default::default(),
                 }
             })
             .collect();
@@ -371,6 +373,9 @@ impl SynthSource {
                     config: Some("GP".into()),
                     length_m: Some(4500.0),
                 }),
+                uid: None,
+                time_total_s: None,
+                time_of_day_s: None,
             },
             player_car_idx: Some(self.cfg.player_idx),
             player: Some(PlayerTelemetry {
@@ -388,6 +393,7 @@ impl SynthSource {
                 delta_to_best_s: None,
                 water_temp_c: Some(88.0),
                 oil_temp_c: Some(102.0),
+                car: self.car_telemetry(),
             }),
             cars,
             weather: {
@@ -397,8 +403,60 @@ impl SynthSource {
                     track_temp_c: Some(31.0 - 8.0 * w),
                     wetness: Some(wetness_word(w).into()),
                     precipitation: Some(w),
+                    ..Default::default()
                 })
             },
+        }
+    }
+}
+
+impl SynthSource {
+    /// A steady car: balanced, with slowly wearing tyres.
+    fn car_telemetry(&self) -> CarTelemetry {
+        let player = &self.cars[self.cfg.player_idx];
+        let age = f64::from((player.laps_completed - player.stint_start).max(0)) + player.pct;
+        let tread = (1.0 - 0.01 * age).max(0.0);
+        let tyre = Tyre {
+            cold_kpa: Some(160.0),
+            hot_kpa: None,
+            temp_c: [Some(84.0), Some(86.0), Some(90.0)],
+            tread: [Some(tread); 3],
+            distance_m: Some(age * 4500.0),
+        };
+        CarTelemetry {
+            clutch: Some(1.0),
+            steering_rad: Some(0.0),
+            yaw_rate_rps: Some(0.0),
+            lat_accel_mps2: Some(0.0),
+            long_accel_mps2: Some(0.0),
+            velocity_x_mps: Some(50.0),
+            velocity_y_mps: Some(0.0),
+            abs_active: Some(false),
+            tyres: Tyres {
+                lf: tyre.clone(),
+                rf: tyre.clone(),
+                lr: tyre.clone(),
+                rr: tyre,
+            },
+            pit: PitState {
+                open: Some(true),
+                fast_repairs_available: Some(1),
+                fast_repairs_used: Some(0),
+                ..Default::default()
+            },
+            controls: vec![
+                Control {
+                    id: "brake_bias".into(),
+                    value: 54.0,
+                },
+                Control {
+                    id: "traction_control".into(),
+                    value: 3.0,
+                },
+            ],
+            p2p_count: Some(200),
+            p2p_active: Some(false),
+            ..Default::default()
         }
     }
 }
@@ -422,6 +480,31 @@ impl TelemetrySource for SynthSource {
         self.step();
         self.tick += 1;
         Ok(Poll::Frame(Box::new(self.frame())))
+    }
+
+    fn extras(&mut self) -> Option<Extras> {
+        let item = |path: &str, value: &str| SetupItem {
+            path: path.into(),
+            value: value.into(),
+        };
+        Some(Extras {
+            channels: vec![Channel {
+                name: "SessionTime".into(),
+                unit: "s".into(),
+                description: "Seconds since session start".into(),
+                value: self.t.into(),
+            }],
+            info: Some(serde_json::json!({ "WeekendInfo": { "TrackName": "demo" } })),
+            setup: Some(Setup {
+                name: Some("baseline".into()),
+                modified: Some(false),
+                passed_tech: Some(true),
+                items: vec![
+                    item("Chassis/Front/ArbBlades", "3"),
+                    item("Chassis/Rear/WingAngle", "7 deg"),
+                ],
+            }),
+        })
     }
 
     fn reconnectable(&self) -> bool {

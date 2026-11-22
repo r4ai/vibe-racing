@@ -7,7 +7,7 @@
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -52,6 +52,8 @@ pub trait Output: Send + Sync + 'static {
     /// Stops playback and drops the queue.
     fn stop(&self);
     fn is_idle(&self) -> bool;
+    /// Loudness from now on, of the clip already playing too (1.0 = as is).
+    fn set_volume(&self, _volume: f32) {}
 }
 
 #[derive(Default)]
@@ -193,6 +195,137 @@ impl Recorder for Mic {
     }
 }
 
+/// How often a device that could not be opened is tried again.
+pub const RETRY: Duration = Duration::from_secs(5);
+
+/// A device that is opened as soon as it can be.
+struct Late<T> {
+    slot: Arc<OnceLock<T>>,
+}
+
+impl<T: Send + Sync + 'static> Late<T> {
+    /// Tries at once, then every `retry` on a thread. `state` is told when
+    /// it fails for the first time and when it works.
+    fn open(
+        name: &str,
+        retry: Duration,
+        open: impl Fn() -> Result<T> + Send + 'static,
+        state: impl Fn(Result<()>) + Send + 'static,
+    ) -> Self {
+        let slot = Arc::new(OnceLock::new());
+        match open() {
+            Ok(d) => {
+                let _ = slot.set(d);
+                state(Ok(()));
+            }
+            Err(e) => {
+                state(Err(e));
+                let weak = Arc::downgrade(&slot);
+                let _ = std::thread::Builder::new()
+                    .name(name.into())
+                    .spawn(move || {
+                        loop {
+                            std::thread::sleep(retry);
+                            let Some(slot) = weak.upgrade() else { return };
+                            if let Ok(d) = open() {
+                                let _ = slot.set(d);
+                                state(Ok(()));
+                                return;
+                            }
+                        }
+                    });
+            }
+        }
+        Self { slot }
+    }
+
+    fn get(&self) -> Option<&T> {
+        self.slot.get()
+    }
+}
+
+/// The default microphone, as soon as there is one.
+pub struct LateMic(Late<Mic>);
+
+impl LateMic {
+    pub fn open(state: impl Fn(Result<()>) + Send + 'static) -> Self {
+        Self(Late::open(
+            "vr-radio-mic-retry",
+            RETRY,
+            || {
+                let mic = Mic::open()?;
+                tracing::info!("microphone: {}", mic.device);
+                Ok(mic)
+            },
+            state,
+        ))
+    }
+}
+
+impl Recorder for LateMic {
+    fn start(&self) {
+        if let Some(m) = self.0.get() {
+            m.start();
+        }
+    }
+    fn stop(&self) -> Recording {
+        self.0.get().map(Mic::stop).unwrap_or_default()
+    }
+    fn level(&self) -> f32 {
+        self.0.get().map_or(0.0, Mic::level)
+    }
+    fn peek(&self, from: usize) -> Recording {
+        self.0.get().map(|m| m.peek(from)).unwrap_or_default()
+    }
+}
+
+/// The default output device, as soon as there is one.
+pub struct LateSpeakers {
+    late: Late<Speakers>,
+    /// Set before the device was there (bits of an `f32`).
+    volume: Arc<AtomicU32>,
+}
+
+impl LateSpeakers {
+    pub fn open(state: impl Fn(Result<()>) + Send + 'static) -> Self {
+        let volume = Arc::new(AtomicU32::new(1f32.to_bits()));
+        let set = volume.clone();
+        let late = Late::open(
+            "vr-radio-speakers-retry",
+            RETRY,
+            move || {
+                let s = Speakers::open()?;
+                s.set_volume(f32::from_bits(set.load(Ordering::Relaxed)));
+                Ok(s)
+            },
+            state,
+        );
+        Self { late, volume }
+    }
+}
+
+impl Output for LateSpeakers {
+    fn play(&self, wav: Vec<u8>) {
+        if let Some(s) = self.late.get() {
+            s.play(wav);
+        }
+    }
+    fn stop(&self) {
+        if let Some(s) = self.late.get() {
+            s.stop();
+        }
+    }
+    fn is_idle(&self) -> bool {
+        self.late.get().is_none_or(Speakers::is_idle)
+    }
+    fn set_volume(&self, volume: f32) {
+        self.volume.store(volume.to_bits(), Ordering::Relaxed);
+        if let Some(s) = self.late.get() {
+            s.set_volume(volume);
+        }
+    }
+}
+
 /// A recorder for machines without a microphone: always silent.
 pub struct NoMic;
 
@@ -213,6 +346,7 @@ impl Recorder for NoMic {
 enum OutCmd {
     Play(Vec<u8>),
     Stop,
+    Volume(f32),
 }
 
 /// The default output device.
@@ -254,6 +388,7 @@ impl Speakers {
                             player.clear();
                             player.play(); // `clear` also pauses
                         }
+                        Ok(OutCmd::Volume(v)) => player.set_volume(v),
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
@@ -286,6 +421,10 @@ impl Output for Speakers {
 
     fn is_idle(&self) -> bool {
         self.idle.load(Ordering::Relaxed)
+    }
+
+    fn set_volume(&self, volume: f32) {
+        self.send(OutCmd::Volume(volume));
     }
 }
 
@@ -329,6 +468,41 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
         let rec = mic.stop();
         assert!((0.8..1.2).contains(&rec.seconds()), "{} s", rec.seconds());
+    }
+
+    #[test]
+    fn a_device_is_opened_as_soon_as_it_can_be() {
+        let tries = AtomicU32::new(0);
+        let (tx, rx) = mpsc::channel();
+        let late = Late::open(
+            "test",
+            Duration::from_millis(5),
+            move || match tries.fetch_add(1, Ordering::SeqCst) {
+                2 => Ok(7),
+                n => Err(anyhow!("try {n}")),
+            },
+            move |r: Result<()>| tx.send(r.map_err(|e| e.to_string())).unwrap(),
+        );
+        assert_eq!(late.get(), None);
+        let wait = || rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Said once that it fails, not at every try.
+        assert_eq!(wait(), Err("try 0".to_string()));
+        assert_eq!(wait(), Ok(()));
+        assert_eq!(late.get(), Some(&7));
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn a_device_that_works_at_once_is_not_tried_again() {
+        let (tx, rx) = mpsc::channel();
+        let late = Late::open(
+            "test",
+            Duration::ZERO,
+            || Ok(1),
+            move |r| tx.send(r.is_ok()).unwrap(),
+        );
+        assert_eq!(late.get(), Some(&1));
+        assert_eq!(rx.iter().collect::<Vec<_>>(), [true]);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use shadcn_iced::prelude::*;
 use vr_radio::app::{self, App, CONFIG, HOTKEY, SETTINGS};
 use vr_radio::config::Config;
 use vr_radio::settings::{self, Settings};
-use vr_radio::{hotkey, resident};
+use vr_radio::{child, hotkey, resident};
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -33,9 +33,17 @@ fn main() -> iced::Result {
             .is_some_and(|s| s != ValueSource::DefaultValue)
     });
     if let Some(question) = config.ask.clone() {
+        // One question, then gone: nothing is started for it.
+        config.serve.clear();
+        config.watch.clear();
+        config.voicevox = Some(String::new());
         let code = ask_once(config, question);
         std::process::exit(code);
     }
+
+    // Nobody reads a console that was opened just for the window, and text
+    // selected in it would hold up whatever logs.
+    resident::leave_own_console();
 
     if !resident::first_instance() {
         tracing::info!("already running: showing its window");
@@ -62,7 +70,7 @@ fn main() -> iced::Result {
         .theme(|_: &App| shadcn_iced::theme::zinc(Mode::Dark).build())
         .window(iced::window::Settings {
             size: iced::Size::new(1040.0, 680.0),
-            min_size: Some(iced::Size::new(760.0, 520.0)),
+            min_size: Some(iced::Size::new(760.0, 640.0)),
             visible,
             // The app decides: quit, or stay in the tray.
             exit_on_close_request: false,
@@ -75,6 +83,7 @@ fn main() -> iced::Result {
         .font(vr_radio::fonts::FILES[2])
         .run();
     hotkey::unbind();
+    child::stop_all();
     result
 }
 

@@ -1,10 +1,10 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -13,10 +13,14 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use vr_engine::*;
 
+use crate::SessionStore;
+
 #[derive(Clone)]
 pub struct AppState {
     pub state: SharedState,
     pub events: broadcast::Sender<Event>,
+    /// Past sessions, for the page and `/v1/sessions`.
+    pub sessions: Option<SessionStore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +64,9 @@ type R<T> = Result<Json<T>, AppError>;
 
 pub fn router(app: AppState) -> Router {
     Router::new()
+        .route("/", get(|| async { Html(include_str!("sessions.html")) }))
+        .route("/v1/sessions", get(sessions))
+        .route("/v1/sessions/{id}", get(session))
         .route("/v1/health", get(health))
         .route(
             "/v1/brief",
@@ -106,11 +113,98 @@ pub fn router(app: AppState) -> Router {
             "/v1/snapshot",
             get(|State(a): State<AppState>| async move { r(a.state.snapshot()) }),
         )
+        .route(
+            "/v1/car",
+            get(|State(a): State<AppState>| async move { r(a.state.car()) }),
+        )
+        .route(
+            "/v1/channels",
+            get(
+                |State(a): State<AppState>, Query(p): Query<ChannelsParams>| async move {
+                    r(a.state.channels(&p))
+                },
+            ),
+        )
+        .route(
+            "/v1/info",
+            get(
+                |State(a): State<AppState>, Query(p): Query<InfoParams>| async move {
+                    r(a.state.info(&p))
+                },
+            ),
+        )
+        .route(
+            "/v1/setup",
+            get(|State(a): State<AppState>| async move { r(a.state.setup()) }),
+        )
+        .route(
+            "/v1/handling",
+            get(
+                |State(a): State<AppState>, Query(p): Query<HandlingParams>| async move {
+                    r(a.state.handling(&p))
+                },
+            ),
+        )
         .with_state(app)
 }
 
 fn r<T>(v: ApiResult<T>) -> R<T> {
     v.map(Json).map_err(AppError)
+}
+
+/// One line of the list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionLine {
+    pub id: String,
+    pub started_ms: i64,
+    pub duration_s: f64,
+    pub kind: vr_core::SessionKind,
+    pub track: Option<String>,
+    pub car: Option<String>,
+    pub player: Option<PlayerSummary>,
+    pub laps_completed: usize,
+    pub best_lap_s: Option<f64>,
+    pub note: Option<String>,
+}
+
+/// Reads files: off the threads that answer the radio.
+async fn with_store<T: Send + 'static>(
+    store: Option<SessionStore>,
+    f: impl FnOnce(SessionStore) -> ApiResult<T> + Send + 'static,
+) -> R<T> {
+    let Some(store) = store else {
+        return r(Err(ApiError::NotFound("sessions are not kept".into())));
+    };
+    let result = tokio::task::spawn_blocking(move || f(store)).await;
+    r(result.unwrap_or_else(|e| Err(ApiError::Other(e.to_string()))))
+}
+
+async fn sessions(State(a): State<AppState>) -> R<Vec<SessionLine>> {
+    with_store(a.sessions, |store| {
+        let line = |r: SessionRecord| SessionLine {
+            best_lap_s: r.best_lap_s(),
+            id: r.id,
+            started_ms: r.started_ms,
+            duration_s: r.duration_s,
+            kind: r.kind,
+            track: r.track,
+            car: r.car,
+            player: r.player,
+            laps_completed: r.laps_completed,
+            note: r.note,
+        };
+        Ok(store.list().into_iter().map(line).collect())
+    })
+    .await
+}
+
+async fn session(State(a): State<AppState>, Path(id): Path<String>) -> R<SessionRecord> {
+    with_store(a.sessions, move |store| {
+        store
+            .find(&id)
+            .map_err(|e| ApiError::NotFound(e.to_string()))
+    })
+    .await
 }
 
 async fn health(State(a): State<AppState>) -> Json<Health> {

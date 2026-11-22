@@ -8,7 +8,7 @@
 //! break us.
 
 use serde_yaml::Value;
-use vr_core::SessionKind;
+use vr_core::{SessionKind, Setup, SetupItem};
 
 /// Keys whose values are free text typed by users or content authors.
 const FREE_TEXT_KEYS: &[&str] = &[
@@ -37,6 +37,9 @@ const FREE_TEXT_KEYS: &[&str] = &[
     "CarPath",
     "LicString",
     "FlairName",
+    "DriverSetupName",
+    "DriverSetupLoadTypeName",
+    "TrackState",
 ];
 
 /// Decode iRacing's latin-1, NUL-terminated session string.
@@ -118,6 +121,67 @@ pub struct SessionInfo {
     pub fuel_kg_per_l: Option<f64>,
     pub fuel_capacity_l: Option<f64>,
     pub drivers: Vec<DriverInfo>,
+    pub pit_speed_limit_mps: Option<f64>,
+    /// Names of the tyre compounds of the player's car, by index.
+    pub tyre_compounds: Vec<String>,
+    pub setup: Option<Setup>,
+    /// The whole document, for what is not normalized.
+    pub raw: Option<serde_json::Value>,
+}
+
+/// `"Chassis/Front/ArbPosition"` → `"P2"`, in the order of the garage.
+fn flatten(path: &str, v: &Value, out: &mut Vec<SetupItem>) {
+    match v {
+        Value::Mapping(m) => {
+            for (k, v) in m {
+                let Some(k) = as_string(Some(k)) else {
+                    continue;
+                };
+                let path = if path.is_empty() {
+                    k
+                } else {
+                    format!("{path}/{k}")
+                };
+                flatten(&path, v, out);
+            }
+        }
+        v => {
+            if let Some(value) = as_string(Some(v)) {
+                out.push(SetupItem {
+                    path: path.to_string(),
+                    value,
+                });
+            }
+        }
+    }
+}
+
+fn parse_setup(doc: &Value) -> Option<Setup> {
+    let mut items = Vec::new();
+    flatten("", get(doc, &["CarSetup"])?, &mut items);
+    items.retain(|i| i.path != "UpdateCount");
+    if items.is_empty() {
+        return None;
+    }
+    let flag = |key| as_i64(get(doc, &["DriverInfo", key])).map(|v| v != 0);
+    Some(Setup {
+        name: as_string(get(doc, &["DriverInfo", "DriverSetupName"])),
+        modified: flag("DriverSetupIsModified"),
+        passed_tech: flag("DriverSetupPassedTech"),
+        items,
+    })
+}
+
+/// `"72.00 kph"`, `"45.00 mph"` → m/s.
+fn speed_mps(s: &str) -> Option<f64> {
+    let mut words = s.split_whitespace();
+    let n: f64 = words.next()?.parse().ok()?;
+    match words.next()? {
+        "mph" => Some(n * 0.44704),
+        "kph" | "km/h" => Some(n / 3.6),
+        "m/s" => Some(n),
+        _ => None,
+    }
 }
 
 fn get<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -191,8 +255,18 @@ impl SessionInfo {
                 let pct = as_f64(get(&doc, &["DriverInfo", "DriverCarMaxFuelPct"])).unwrap_or(1.0);
                 max.map(|m| m * if pct > 0.0 { pct } else { 1.0 })
             },
+            pit_speed_limit_mps: as_string(get(&doc, &["WeekendInfo", "TrackPitSpeedLimit"]))
+                .and_then(|s| speed_mps(&s)),
+            setup: parse_setup(&doc),
+            raw: serde_json::to_value(&doc).ok(),
             ..Default::default()
         };
+        if let Some(Value::Sequence(tyres)) = get(&doc, &["DriverInfo", "DriverTires"]) {
+            si.tyre_compounds = tyres
+                .iter()
+                .map(|t| as_string(t.get("TireCompoundType")).unwrap_or_default())
+                .collect();
+        }
 
         if let Some(Value::Sequence(sessions)) = get(&doc, &["SessionInfo", "Sessions"]) {
             for s in sessions {
@@ -336,6 +410,71 @@ mod tests {
         assert_eq!(si.drivers[2].name, "O'Neil");
         assert_eq!(si.drivers[2].number, "7");
         assert!(si.drivers[0].is_pace_car);
+    }
+
+    #[test]
+    fn reads_the_setup_and_the_rest() {
+        let yaml = format!(
+            "{SAMPLE}{}",
+            concat!(
+                "CarSetup:\n UpdateCount: 4\n TiresAero:\n  LeftFront:\n   ColdPressure: 138 kPa\n",
+                "   LastTempsOMI: 52C, 52C, 52C\n Chassis:\n  Front:\n   ArbPosition: P2\n",
+                "   BumpStiffness: +4 clicks\n   Blades: 3\n  Rear:\n   Empty:\n"
+            )
+        );
+        let yaml = yaml
+            .replace(
+                " DriverCarIdx: 1\n",
+                concat!(
+                    " DriverCarIdx: 1\n DriverSetupName: wet: v2 #3.sto\n DriverSetupIsModified: 1\n",
+                    " DriverSetupPassedTech: 0\n DriverTires:\n - TireIndex: 0\n   TireCompoundType: \"Hard\"\n"
+                ),
+            )
+            .replace(
+                " TrackLength: 6.93 km\n",
+                " TrackLength: 6.93 km\n TrackPitSpeedLimit: 72.00 kph\n",
+            );
+        let si = SessionInfo::parse(&yaml).unwrap();
+        let s = si.setup.unwrap();
+        assert_eq!(s.name.as_deref(), Some("wet: v2 #3.sto"));
+        assert_eq!((s.modified, s.passed_tech), (Some(true), Some(false)));
+        let items: Vec<(&str, &str)> = s
+            .items
+            .iter()
+            .map(|i| (i.path.as_str(), i.value.as_str()))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("TiresAero/LeftFront/ColdPressure", "138 kPa"),
+                ("TiresAero/LeftFront/LastTempsOMI", "52C, 52C, 52C"),
+                ("Chassis/Front/ArbPosition", "P2"),
+                ("Chassis/Front/BumpStiffness", "+4 clicks"),
+                ("Chassis/Front/Blades", "3"),
+            ]
+        );
+        assert_eq!(si.tyre_compounds, ["Hard"]);
+        assert!((si.pit_speed_limit_mps.unwrap() - 20.0).abs() < 1e-9);
+        let raw = si.raw.unwrap();
+        assert_eq!(raw["WeekendInfo"]["TrackConfigName"], "Grand Prix Pits");
+        assert_eq!(raw["DriverInfo"]["Drivers"][1]["IRating"], 2345);
+    }
+
+    #[test]
+    fn without_a_setup_there_is_none() {
+        assert_eq!(SessionInfo::parse(SAMPLE).unwrap().setup, None);
+        let only = format!("{SAMPLE}CarSetup:\n UpdateCount: 1\n");
+        assert_eq!(SessionInfo::parse(&only).unwrap().setup, None);
+    }
+
+    #[test]
+    fn speeds_have_units() {
+        assert!((speed_mps("72.00 kph").unwrap() - 20.0).abs() < 1e-9);
+        assert!((speed_mps("45.00 mph").unwrap() - 20.1168).abs() < 1e-9);
+        assert_eq!(speed_mps("20 m/s"), Some(20.0));
+        assert_eq!(speed_mps("20 knots"), None);
+        assert_eq!(speed_mps("fast kph"), None);
+        assert_eq!(speed_mps("20"), None);
     }
 
     #[test]

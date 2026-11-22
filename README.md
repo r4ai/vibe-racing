@@ -49,9 +49,24 @@ flowchart LR
 - ゴールまでの不足量と給油量（余裕込み）
 - 履歴が無い間は瞬間燃費から推定（推定と明示）
 
+### 車とセットアップ
+
+- タイヤ、損傷、水温・油温、ピット作業、OTS・P2P、車内設定（BB・TC など）と変更履歴
+- ガレージのセットアップ全項目
+- アンダー・オーバー・空転・ロックの傾向と場所、走行中に変えられる項目の提案
+- ゲームが出す全変数（`vr channels`）とセッション情報（`vr info`）
+
+### 過去のセッション
+
+- `vr serve` が自動で保存（結果、全車のラップ、イベント、セットアップ、挙動）
+- ブラウザで閲覧（`vr serve` 中に <http://127.0.0.1:47800/>）
+- `vr sessions` で一覧・詳細・比較・メモ・書き出し・削除
+- iRacing の `.ibt` の取り込み
+
 ### イベント
 
 - フラッグ、順位変動、ピットイン・アウト、インシデント、周回、自己ベスト
+- 燃料不足、損傷、路面の変化、車内設定の変更
 - 差分取得（`vr events --since`）とストリーム（`vr watch`）
 
 ### 出力
@@ -64,7 +79,10 @@ flowchart LR
 
 - 押している間だけ録音（画面のボタン、またはハンドルのボタンに割り当てたホットキー）
 - 文字起こし → ACP でエージェントに質問 → 返答を文ごとに VOICEVOX で読み上げ
-- 話し始めると読み上げとエージェントを中断
+- 話すと読み上げを止め、言葉は必ずエージェントへ送信
+- 出来事（イエロー・順位・損傷・燃料など）ごとに自分から連絡。種類ごとに切替
+- 音量・話速・話者・自動連絡を、画面または走行中の無線で変更（「音量下げて」）
+- 起動すると `vr serve`・VOICEVOX・エージェントも自動で起動
 - 認識・初回応答・初回音声までの時間を表示
 
 ### 記録と再生
@@ -105,7 +123,7 @@ vr brief
 
 ### iRacing で使う
 
-セッションに入り、走行中は `vr serve` を起動しておく。
+セッションに入り、走行中は `vr serve` を起動しておく（`vr-radio` を使うなら自動）。
 
 ```powershell
 vr serve
@@ -116,7 +134,7 @@ vr serve
 
 ### 声で聞く
 
-[VOICEVOX](https://voicevox.hiroshiba.jp/) を起動し、[OpenRouter](https://openrouter.ai/) のキーを設定して起動する。
+[VOICEVOX](https://voicevox.hiroshiba.jp/) を導入し、[OpenRouter](https://openrouter.ai/) のキーを設定して起動する。
 キーは作業ディレクトリの `.env`（`OPENROUTER_API_KEY=<key>`）でもよい。
 
 ```powershell
@@ -149,6 +167,7 @@ $env:OPENROUTER_API_KEY = "<key>"; cargo run --release -p vr-radio
 | `vr serve --port`        | `47800`                                  | 待受ポート（`127.0.0.1` 限定） |
 | `--server` / `VR_SERVER` | 自動検出                                 | 問い合わせ先 URL               |
 | `VR_DISCOVERY`           | `%LOCALAPPDATA%\vibe-racing\server.json` | サーバー発見ファイル           |
+| `VR_SESSIONS`            | `%LOCALAPPDATA%\vibe-racing\sessions`    | 過去のセッションの保存先       |
 
 ### コマンド
 
@@ -159,6 +178,9 @@ $env:OPENROUTER_API_KEY = "<key>"; cargo run --release -p vr-radio
 | `vr fuel`                              | 燃料と給油量                 |
 | `vr standings [--top N \| --around N]` | 順位表                       |
 | `vr laps [--car N] [--last N]`         | ラップ履歴                   |
+| `vr car` / `vr setup` / `vr handling`  | 車の状態・セットアップ・挙動 |
+| `vr sessions list`                     | 過去のセッション             |
+| `vr channels [語]` / `vr info [パス]`  | ゲームの全データ             |
 | `vr events [--since SEQ]` / `vr watch` | イベント                     |
 | `vr record --out x.ndjson`             | 記録のみ                     |
 
