@@ -1410,7 +1410,8 @@ fn rain_trend_needs_two_minutes_and_a_clear_change() {
     let trend = |until: f64, per_min: f64| {
         let mut st = state();
         rainy(&mut st, until, |t| 0.3 + per_min * t / 60.0);
-        st.rain_trend().map(|t| (t.direction, (t.per_min * 1000.0).round() / 1000.0))
+        st.rain_trend()
+            .map(|t| (t.direction, (t.per_min * 1000.0).round() / 1000.0))
     };
     // Not two minutes of it yet (0.9 × 120 s is the least).
     assert_eq!(trend(100.0, 0.05), None);
@@ -1428,5 +1429,8 @@ fn rain_trend_needs_two_minutes_and_a_clear_change() {
     let mut st = state();
     rainy(&mut st, 300.0, |t| 0.1 + 0.03 * t / 60.0);
     let text = st.brief().unwrap().to_text();
-    assert!(text.contains("weather: lightly wet (rain 25%, rising 3%/min)"), "{text}");
+    assert!(
+        text.contains("weather: lightly wet (rain 25%, rising 3%/min)"),
+        "{text}"
+    );
 }

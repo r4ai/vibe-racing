@@ -141,14 +141,22 @@ impl RaceState {
         };
         let t = frame.session.time_s;
         // One sample every few seconds is plenty.
-        if self.rain.back().is_some_and(|(last, _)| t - last < 5.0 && t >= *last) {
+        if self
+            .rain
+            .back()
+            .is_some_and(|(last, _)| t - last < 5.0 && t >= *last)
+        {
             return;
         }
         if self.rain.back().is_some_and(|(last, _)| t < *last) {
             self.rain.clear();
         }
         self.rain.push_back((t, r));
-        while self.rain.front().is_some_and(|(old, _)| t - old > RAIN_WINDOW_S + 10.0) {
+        while self
+            .rain
+            .front()
+            .is_some_and(|(old, _)| t - old > RAIN_WINDOW_S + 10.0)
+        {
             self.rain.pop_front();
         }
     }

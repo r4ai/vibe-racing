@@ -385,6 +385,10 @@
     <figure class="scatter">
       <div class="axes">
         <label
+          >セット
+          <select id="s-axis"></select
+        ></label>
+        <label
           >横軸
           <select id="x-axis"></select
         ></label>
@@ -462,7 +466,11 @@
 <script>
   const D = JSON.parse(document.getElementById("data").textContent);
   const NAMES = { good: "良い", incomplete: "不足", wrong: "誤り", disputed: "判定割れ" };
-  const SETS = { dev: "改善に使うセット（dev）", heldout: "確認専用セット（heldout）" };
+  const SETS = {
+    dev: "改善に使うセット（dev）",
+    hard: "難しい場面のセット（hard、改善に使う）",
+    heldout: "確認専用セット（heldout）",
+  };
   const GRADES = ["good", "incomplete", "wrong", "disputed"];
   const COLORS = { good: "--good", incomplete: "--part", wrong: "--wrong", disputed: "--split" };
   const esc = (s) =>
@@ -732,10 +740,12 @@
       [yk, yn, yb] = YS.find((a) => a[0] === ys.value);
     store.set("vr-eval-x", xk);
     store.set("vr-eval-y", yk);
-    const pts = D.runs
+    const set = document.getElementById("s-axis").value;
+    const runs = D.runs.filter((r) => r.set === set);
+    const pts = runs
       .map((r) => ({ r, x: r.metrics[xk]?.v, y: r.metrics[yk] }))
       .filter((p) => p.x != null && p.y?.v != null);
-    const missing = D.runs.filter((r) => !pts.some((p) => p.r === r)).map((r) => r.label);
+    const missing = runs.filter((r) => !pts.some((p) => p.r === r)).map((r) => r.label);
     const svg = document.getElementById("trade"),
       note = document.getElementById("trade-note");
     // Drawn at the width it is shown, so that the text stays legible.
@@ -777,7 +787,17 @@
     g += `<text transform="translate(14 ${(PT + Ht - PB) / 2}) rotate(-90)" text-anchor="middle" class="name">${yn}（${yb > 0 ? "高いほど良い" : "低いほど良い"}）</text>`;
     if (front.length > 1)
       g += `<polyline points="${front.map((p) => `${X(p.x)},${Y(p.y.v)}`).join(" ")}" fill="none" stroke="var(--best)" stroke-width="2" stroke-dasharray="5 4"/>`;
-    for (const p of pts) {
+    // Labels go right of their point (left near the edge), pushed down
+    // until they clear the ones already placed.
+    const boxes = [];
+    const place = (x, y, w, left) => {
+      const x0 = left ? x - w : x;
+      let ly = y;
+      while (boxes.some((b) => x0 < b.x1 && x0 + w > b.x0 && Math.abs(ly - b.y) < 26)) ly += 26;
+      boxes.push({ x0, x1: x0 + w, y: ly });
+      return ly;
+    };
+    for (const p of [...pts].sort((a, b) => Y(a.y.v) - Y(b.y.v))) {
       const cx = X(p.x),
         cy = Y(p.y.v),
         on = front.includes(p);
@@ -787,9 +807,13 @@
         g += `<line x1="${cx}" x2="${cx}" y1="${Y(p.y.lo)}" y2="${Y(p.y.hi)}" stroke="var(--mark)" stroke-opacity=".45" stroke-width="2"/>`;
       g += `<circle cx="${cx}" cy="${cy}" r="7" fill="var(--mark)" stroke="${on ? "var(--best)" : "var(--surface)"}" stroke-width="${on ? 3 : 1.5}" data-tip="${esc(`${p.r.label}（${p.r.set}）\n${xn}: ${fmt(p.x, xu, p.r.metrics.currency)}\n${yn}: ${fmt(p.y.v)} [${p.y.lo == null ? "–" : fmt(p.y.lo)}, ${p.y.hi == null ? "–" : fmt(p.y.hi)}]、n=${p.y.n}`)}"/>`;
       const left = cx > Wd * 0.7;
-      g += `<text class="pt-label" x="${cx + (left ? -12 : 12)}" y="${cy - 2}" text-anchor="${left ? "end" : "start"}">${esc(p.r.label)}</text>`;
+      const w = 8 + 12 * Math.max([...p.r.label].length, sub.length * 0.55);
+      const ly = place(cx + (left ? -12 : 12), cy, w, left);
+      if (ly !== cy)
+        g += `<line x1="${cx}" y1="${cy}" x2="${cx + (left ? -10 : 10)}" y2="${ly - 4}" stroke="var(--muted)" stroke-width="1"/>`;
+      g += `<text class="pt-label" x="${cx + (left ? -12 : 12)}" y="${ly - 2}" text-anchor="${left ? "end" : "start"}">${esc(p.r.label)}</text>`;
       if (sub)
-        g += `<text class="sub" x="${cx + (left ? -12 : 12)}" y="${cy + 13}" text-anchor="${left ? "end" : "start"}">${esc(sub)}</text>`;
+        g += `<text class="sub" x="${cx + (left ? -12 : 12)}" y="${ly + 13}" text-anchor="${left ? "end" : "start"}">${esc(sub)}</text>`;
     }
     svg.setAttribute("viewBox", `0 0 ${Wd} ${Ht}`);
     svg.innerHTML = g;
@@ -804,7 +828,16 @@
   }
   function axes() {
     const xs = document.getElementById("x-axis"),
-      ys = document.getElementById("y-axis");
+      ys = document.getElementById("y-axis"),
+      ss = document.getElementById("s-axis");
+    ss.innerHTML = Object.keys(bySet)
+      .map((k) => `<option value="${k}">${esc(SETS[k] ?? k)}</option>`)
+      .join("");
+    ss.value = Object.keys(bySet).includes(store.get("vr-eval-set")) ? store.get("vr-eval-set") : Object.keys(bySet)[0];
+    ss.onchange = () => {
+      store.set("vr-eval-set", ss.value);
+      tradeoff();
+    };
     xs.innerHTML = XS.map(([k, n]) => `<option value="${k}">${n}</option>`).join("");
     ys.innerHTML = YS.map(([k, n]) => `<option value="${k}">${n}</option>`).join("");
     xs.value = XS.some((a) => a[0] === store.get("vr-eval-x"))
