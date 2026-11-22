@@ -31,9 +31,27 @@ impl Graded {
         self.record.behavior == AnswerOrAsk && !self.record.facts_stated.iter().any(|s| *s)
     }
 
+    /// Whether all the verdicts agree (`None`: fewer than two).
+    pub fn unanimous(&self) -> Option<bool> {
+        (self.verdicts.len() >= 2).then(|| crate::judge::unanimous(&self.verdicts))
+    }
+
     pub fn key(&self) -> (String, String) {
         (self.record.stint.clone(), self.record.call.clone())
     }
+}
+
+/// 95 % Wilson score interval of `k` successes in `n` trials.
+pub fn wilson(k: usize, n: usize) -> Option<(f64, f64)> {
+    if n == 0 {
+        return None;
+    }
+    let (k, n, z) = (k as f64, n as f64, 1.96_f64);
+    let p = k / n;
+    let centre = p + z * z / (2.0 * n);
+    let half = z * (p * (1.0 - p) / n + z * z / (4.0 * n * n)).sqrt();
+    let denom = 1.0 + z * z / n;
+    Some(((centre - half) / denom, (centre + half) / denom))
 }
 
 pub fn percentile(values: &[f64], p: f64) -> Option<f64> {
@@ -235,6 +253,18 @@ pub fn problems(rows: &[Graded]) -> String {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn wilson_intervals() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let (lo, hi) = wilson(8, 10).unwrap();
+        assert!(close(lo, 0.490_156_846_720_723) && close(hi, 0.943_319_052_019_307));
+        let (lo, hi) = wilson(0, 5).unwrap();
+        assert!(close(lo, 0.0) && close(hi, 0.434_491_494_752_081));
+        let (lo, hi) = wilson(5, 5).unwrap();
+        assert!(close(lo, 0.565_508_505_247_919) && close(hi, 1.0));
+        assert_eq!(wilson(0, 0), None);
+    }
     use crate::run::Heard;
     use crate::scenario::Behavior;
 
@@ -274,6 +304,9 @@ pub mod tests {
                 truth_at_question: String::new(),
                 truth_at_answer: String::new(),
                 truth_between: vec![],
+                tokens: None,
+                primer_tokens: None,
+                session_cost: None,
             },
             verdicts: grades
                 .iter()

@@ -43,7 +43,7 @@ pub enum ToolState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     Ready {
         name: String,
@@ -66,6 +66,13 @@ pub enum AgentEvent {
     TurnEnd {
         turn: Turn,
         stop: String,
+        usage: Option<TokenUsage>,
+    },
+    /// What the session has cost so far, when the agent says.
+    Cost {
+        turn: Turn,
+        amount: f64,
+        currency: String,
     },
     TurnFailed {
         turn: Turn,
@@ -163,7 +170,38 @@ fn map_update(turn: Turn, update: SessionUpdate) -> Option<AgentEvent> {
             title: update.fields.title,
             state: tool_state(update.fields.status),
         }),
+        SessionUpdate::UsageUpdate(u) => u.cost.map(|c| AgentEvent::Cost {
+            turn,
+            amount: c.amount,
+            currency: c.currency,
+        }),
         _ => None,
+    }
+}
+
+/// Tokens of one turn, as the agent reports them (ACP, unstable).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub total: u64,
+    /// Not read from the cache.
+    pub input: u64,
+    pub cached_read: u64,
+    pub cached_write: u64,
+    /// Including the thought.
+    pub output: u64,
+    pub thought: u64,
+}
+
+impl From<agent_client_protocol::v1::schema::Usage> for TokenUsage {
+    fn from(u: agent_client_protocol::v1::schema::Usage) -> Self {
+        Self {
+            total: u.total_tokens,
+            input: u.input_tokens,
+            cached_read: u.cached_read_tokens.unwrap_or(0),
+            cached_write: u.cached_write_tokens.unwrap_or(0),
+            output: u.output_tokens,
+            thought: u.thought_tokens.unwrap_or(0),
+        }
     }
 }
 
@@ -312,7 +350,11 @@ async fn session(
                             forward(Some(turn), inbound);
                         }
                         let _ = events.send(match result {
-                            Ok(r) => AgentEvent::TurnEnd { turn, stop: format!("{:?}", r.stop_reason) },
+                            Ok(r) => AgentEvent::TurnEnd {
+                                turn,
+                                stop: format!("{:?}", r.stop_reason),
+                                usage: r.usage.map(TokenUsage::from),
+                            },
                             Err(e) => AgentEvent::TurnFailed { turn, error: e.to_string() },
                         });
                         if let Some((turn, text)) = queued.take() {
@@ -335,9 +377,9 @@ pub mod fake {
 
     use agent_client_protocol::v1::Responder;
     use agent_client_protocol::v1::schema::{
-        AgentCapabilities, CancelNotification, ContentChunk, InitializeResponse,
+        AgentCapabilities, CancelNotification, ContentChunk, Cost, InitializeResponse,
         NewSessionResponse, SessionId, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
-        ToolCallUpdateFields, ToolKind,
+        ToolCallUpdateFields, ToolKind, Usage, UsageUpdate,
     };
 
     use super::*;
@@ -422,7 +464,19 @@ pub mod fake {
                             )),
                         ))?;
                     }
-                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                    cx.send_notification(SessionNotification::new(
+                        sid.clone(),
+                        SessionUpdate::UsageUpdate(
+                            UsageUpdate::new(1200, 200_000).cost(Cost::new(0.045, "USD")),
+                        ),
+                    ))?;
+                    responder.respond(
+                        PromptResponse::new(StopReason::EndTurn).usage(
+                            Usage::new(1200, 100, 30)
+                                .cached_read_tokens(1070)
+                                .thought_tokens(20),
+                        ),
+                    )
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -509,9 +563,25 @@ mod tests {
         );
         assert_eq!(
             next(&mut ev_rx).await,
+            AgentEvent::Cost {
+                turn: 7,
+                amount: 0.045,
+                currency: "USD".into()
+            }
+        );
+        assert_eq!(
+            next(&mut ev_rx).await,
             AgentEvent::TurnEnd {
                 turn: 7,
-                stop: "EndTurn".into()
+                stop: "EndTurn".into(),
+                usage: Some(TokenUsage {
+                    total: 1200,
+                    input: 100,
+                    cached_read: 1070,
+                    cached_write: 0,
+                    output: 30,
+                    thought: 20,
+                }),
             }
         );
         drop(cmd_tx);
@@ -537,7 +607,7 @@ mod tests {
             .unwrap();
         let mut ends = Vec::new();
         while ends.len() < 2 {
-            if let AgentEvent::TurnEnd { turn, stop } = next(&mut link.rx).await {
+            if let AgentEvent::TurnEnd { turn, stop, .. } = next(&mut link.rx).await {
                 ends.push((turn, stop));
             }
         }
@@ -575,7 +645,8 @@ mod tests {
             next(&mut ev_rx).await,
             AgentEvent::TurnEnd {
                 turn: 1,
-                stop: "Cancelled".into()
+                stop: "Cancelled".into(),
+                usage: None,
             }
         );
         assert!(matches!(
@@ -593,13 +664,14 @@ mod tests {
                 text: "了解。".into()
             }
         );
-        assert_eq!(
+        assert!(matches!(
             next(&mut ev_rx).await,
-            AgentEvent::TurnEnd {
-                turn: 2,
-                stop: "EndTurn".into()
-            }
-        );
+            AgentEvent::Cost { turn: 2, .. }
+        ));
+        assert!(matches!(
+            next(&mut ev_rx).await,
+            AgentEvent::TurnEnd { turn: 2, usage: Some(u), .. } if u.total == 1200
+        ));
         assert_eq!(
             *prompts.lock().unwrap(),
             vec!["slow".to_string(), "燃料".to_string()]

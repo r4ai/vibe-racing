@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use vr_radio::agent::Turn;
+use vr_radio::agent::{TokenUsage, Turn};
 use vr_radio::app;
 use vr_radio::audio::{Output, Recorder, Recording};
 use vr_radio::config::Config;
@@ -70,6 +70,39 @@ pub struct Record {
     pub truth_at_answer: String,
     /// The moving values each second in between.
     pub truth_between: Vec<String>,
+    /// Tokens of every turn that ended during the call (cancelled ones too).
+    #[serde(default)]
+    pub tokens: Option<Tokens>,
+    /// Tokens of the primer, on the first call of the stint.
+    #[serde(default)]
+    pub primer_tokens: Option<Tokens>,
+    /// What the session had cost when the call was over, as the agent says.
+    #[serde(default)]
+    pub session_cost: Option<(f64, String)>,
+}
+
+/// Token counts of one or more turns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tokens {
+    pub turns: u32,
+    pub total: u64,
+    pub input: u64,
+    pub cached_read: u64,
+    pub cached_write: u64,
+    pub output: u64,
+    pub thought: u64,
+}
+
+impl Tokens {
+    pub fn add(&mut self, u: &TokenUsage) {
+        self.turns += 1;
+        self.total += u.total;
+        self.input += u.input;
+        self.cached_read += u.cached_read;
+        self.cached_write += u.cached_write;
+        self.output += u.output;
+        self.thought += u.thought;
+    }
 }
 
 impl Record {
@@ -213,6 +246,9 @@ struct Observed {
     reply: String,
     outcome: Option<Outcome>,
     errors: Vec<String>,
+    /// Kept when a turn is replaced: the cancelled one was paid for too.
+    tokens: Option<Tokens>,
+    cost: Option<(f64, String)>,
 }
 
 impl Observed {
@@ -224,6 +260,8 @@ impl Observed {
                 *self = Observed {
                     turn: Some(turn),
                     errors: std::mem::take(&mut self.errors),
+                    tokens: self.tokens.take(),
+                    cost: self.cost.take(),
                     ..Default::default()
                 }
             }
@@ -243,6 +281,8 @@ impl Observed {
                 self.outcome = Some(outcome)
             }
             Event::Error(e) => self.errors.push(e),
+            Event::Usage { usage, .. } => self.tokens.get_or_insert_default().add(&usage),
+            Event::Cost { amount, currency } => self.cost = Some((amount, currency)),
             _ => {}
         }
     }
@@ -370,6 +410,8 @@ impl Runner {
         radio.ready().await?;
         let mut seen = Observed::default();
         radio.follow(SETTLE, &mut seen).await?;
+        let mut primer_tokens = seen.tokens;
+        let mut cost = seen.cost;
 
         let mut records = Vec::new();
         let mut history = Vec::new();
@@ -378,8 +420,11 @@ impl Runner {
                 .call(stint, call, voices.as_ref(), &world, &mut radio, &history)
                 .await?;
             history.push((r.said.clone(), r.spoken()));
+            cost = r.session_cost.clone().or(cost);
             records.push(Record {
                 first: records.is_empty(),
+                primer_tokens: primer_tokens.take(),
+                session_cost: cost.clone(),
                 ..r
             });
             radio
@@ -502,6 +547,9 @@ impl Runner {
             truth_at_question,
             truth_at_answer,
             truth_between: each_second(&samples),
+            tokens: seen.tokens,
+            primer_tokens: None,
+            session_cost: seen.cost,
         })
     }
 }
@@ -647,5 +695,45 @@ mod tests {
         });
         assert_eq!(o.reply, "b");
         assert_eq!(o.outcome, None);
+        o.apply(Event::Usage {
+            turn: 1,
+            usage: TokenUsage {
+                total: 100,
+                input: 10,
+                cached_read: 80,
+                cached_write: 0,
+                output: 10,
+                thought: 4,
+            },
+        });
+        o.apply(Event::TurnStarted { turn: 3 });
+        o.apply(Event::Usage {
+            turn: 3,
+            usage: TokenUsage {
+                total: 50,
+                input: 5,
+                cached_read: 40,
+                cached_write: 1,
+                output: 5,
+                thought: 0,
+            },
+        });
+        o.apply(Event::Cost {
+            amount: 0.25,
+            currency: "USD".into(),
+        });
+        assert_eq!(
+            o.tokens,
+            Some(Tokens {
+                turns: 2,
+                total: 150,
+                input: 15,
+                cached_read: 120,
+                cached_write: 1,
+                output: 15,
+                thought: 4,
+            })
+        );
+        assert_eq!(o.cost, Some((0.25, "USD".to_string())));
     }
 }

@@ -21,7 +21,14 @@ use crate::scenario::Behavior;
 /// Two models through the Codex CLI (`codex:<model>[@<effort>]`): it runs on
 /// the ChatGPT plan, no per-token bill. Not blind to the vendor when Codex is
 /// also under test: reports say so. `<vendor>/<model>` goes to OpenRouter.
-pub const JUDGES: [&str; 2] = ["codex:gpt-6.1-terra", "codex:gpt-6.2-sol"];
+/// One cheap model three times: its verdicts vary from run to run, the
+/// majority is steadier.
+pub const JUDGES: [&str; 3] = [LUNA, LUNA, LUNA];
+const LUNA: &str = "codex:gpt-6-luna@high";
+
+/// Replies judged in one Codex call: the CLI spends ~14k tokens on itself
+/// per call.
+pub const BATCH: usize = 8;
 
 /// `codex:gpt-6.2-sol@low` is `("gpt-6.2-sol", Some("low"))`.
 pub fn codex_model(judge: &str) -> Option<(&str, Option<&str>)> {
@@ -114,6 +121,39 @@ fn expectation(b: Behavior) -> &'static str {
     }
 }
 
+/// Every reply of a batch, numbered from 1, judged on its own.
+pub fn batch_prompt(cases: &[Case]) -> String {
+    let mut out = format!(
+        "{SYSTEM}\nファイルやコマンドは使わず、下の文章だけで採点する。\n\
+         下の {} 件は別々の無線。1 件ずつ独立に採点し、他の件の内容を持ち込まない。\
+         verdicts には全件を case の番号付きで入れる。\n",
+        cases.len()
+    );
+    for (i, c) in cases.iter().enumerate() {
+        out.push_str(&format!(
+            "\n======== case {} ========\n{}",
+            i + 1,
+            prompt(c)
+        ));
+    }
+    out
+}
+
+fn batch_schema() -> Value {
+    let mut one = schema()["json_schema"]["schema"].clone();
+    one["required"]
+        .as_array_mut()
+        .expect("required")
+        .insert(0, json!("case"));
+    one["properties"]["case"] = json!({"type": "integer"});
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["verdicts"],
+        "properties": {"verdicts": {"type": "array", "items": one}}
+    })
+}
+
 /// The CLI has no system role: the rules come first, and no tools.
 pub fn codex_prompt(c: &Case) -> String {
     format!(
@@ -192,10 +232,40 @@ pub fn grade(v: &Value) -> Result<Grade> {
     })
 }
 
-/// Two opinions as one; `None` when they differ or one is missing.
+/// The grade more than half of at least two verdicts give; `None` otherwise
+/// (two judges must agree, three need two alike).
 pub fn consensus(verdicts: &[Verdict]) -> Option<Grade> {
-    let first = verdicts.first()?.grade;
-    (verdicts.len() >= 2 && verdicts.iter().all(|v| v.grade == first)).then_some(first)
+    if verdicts.len() < 2 {
+        return None;
+    }
+    verdicts
+        .iter()
+        .map(|v| v.grade)
+        .find(|g| 2 * verdicts.iter().filter(|v| v.grade == *g).count() > verdicts.len())
+}
+
+/// A fixed order of `0..n` in which neighbours come from far apart: steps
+/// of a stride coprime with `n`, near the golden ratio of it.
+pub fn spread(n: usize) -> Vec<usize> {
+    if n < 3 {
+        return (0..n).collect();
+    }
+    let gcd = |mut a: usize, mut b: usize| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let mut stride = (n as f64 * 0.618) as usize;
+    while gcd(stride, n) != 1 {
+        stride += 1;
+    }
+    (0..n).map(|i| i * stride % n).collect()
+}
+
+/// Whether every verdict is the same.
+pub fn unanimous(verdicts: &[Verdict]) -> bool {
+    verdicts.windows(2).all(|w| w[0].grade == w[1].grade)
 }
 
 pub struct Judge {
@@ -266,16 +336,70 @@ impl Judge {
         Err(last.expect("tried at least once"))
     }
 
+    /// Several replies; in one call for Codex, one by one otherwise.
+    pub fn judge_many(&self, cases: &[Case]) -> Result<Vec<Verdict>> {
+        let Some((model, effort)) = codex_model(&self.model) else {
+            return cases.iter().map(|c| self.judge(c)).collect();
+        };
+        let mut last = None;
+        for wait in [0, 5, 15] {
+            std::thread::sleep(Duration::from_secs(wait));
+            match self.ask_batch(model, effort, cases) {
+                Ok(v) => return Ok(v),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.expect("tried at least once"))
+    }
+
+    fn ask_batch(&self, model: &str, effort: Option<&str>, cases: &[Case]) -> Result<Vec<Verdict>> {
+        let text = self.run_codex(model, effort, &batch_schema(), batch_prompt(cases))?;
+        let v: Value = serde_json::from_str(text.trim())
+            .with_context(|| format!("verdicts are not JSON: {text}"))?;
+        let list = v["verdicts"].as_array().context("no verdicts")?;
+        (0..cases.len())
+            .map(|i| {
+                let found: Vec<&Value> = list
+                    .iter()
+                    .filter(|x| x["case"].as_u64() == Some(i as u64 + 1))
+                    .collect();
+                ensure!(
+                    found.len() == 1,
+                    "case {} judged {} times",
+                    i + 1,
+                    found.len()
+                );
+                let points = found[0]["points"].as_array().map_or(0, Vec::len);
+                ensure!(
+                    points == cases[i].points.len(),
+                    "case {}: {points} points for {}",
+                    i + 1,
+                    cases[i].points.len()
+                );
+                self.verdict(found[0])
+            })
+            .collect()
+    }
+
     fn ask(&self, case: &Case) -> Result<Verdict> {
         let text = match codex_model(&self.model) {
-            Some((model, effort)) => self.ask_codex(model, effort, case)?,
+            Some((model, effort)) => self.run_codex(
+                model,
+                effort,
+                &schema()["json_schema"]["schema"],
+                codex_prompt(case),
+            )?,
             None => self.ask_openrouter(case)?,
         };
         let v: Value = serde_json::from_str(text.trim())
             .with_context(|| format!("verdict is not JSON: {text}"))?;
+        self.verdict(&v)
+    }
+
+    fn verdict(&self, v: &Value) -> Result<Verdict> {
         Ok(Verdict {
             judge: self.model.clone(),
-            grade: grade(&v)?,
+            grade: grade(v)?,
             reason: format!(
                 "{} {}",
                 v["reasoning"].as_str().unwrap_or_default(),
@@ -284,7 +408,13 @@ impl Judge {
         })
     }
 
-    fn ask_codex(&self, model: &str, effort: Option<&str>, case: &Case) -> Result<String> {
+    fn run_codex(
+        &self,
+        model: &str,
+        effort: Option<&str>,
+        schema: &Value,
+        input: String,
+    ) -> Result<String> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let id = format!(
             "{}-{}",
@@ -294,7 +424,7 @@ impl Judge {
         std::fs::create_dir_all(&self.cwd)?;
         let schema_file = self.cwd.join(format!("schema-{id}.json"));
         let out = self.cwd.join(format!("verdict-{id}.json"));
-        std::fs::write(&schema_file, schema()["json_schema"]["schema"].to_string())?;
+        std::fs::write(&schema_file, schema.to_string())?;
         let mut child = std::process::Command::new(codex_program())
             .args(codex_args(model, effort, &schema_file, &out))
             .current_dir(&self.cwd)
@@ -303,7 +433,6 @@ impl Judge {
             .stderr(Stdio::piped())
             .spawn()
             .context("codex")?;
-        let input = codex_prompt(case);
         let mut stdin = child.stdin.take().context("stdin")?;
         std::thread::spawn(move || {
             let _ = stdin.write_all(input.as_bytes());
@@ -460,6 +589,32 @@ mod tests {
         // Nothing is left behind but what the fake wrote.
         let left: Vec<_> = std::fs::read_dir(&cwd).unwrap().collect();
         assert_eq!(left.len(), 1);
+        // A batch: every case once, with as many points as asked.
+        let batch = |verdicts: &str| {
+            format!(
+                "#!/bin/sh\nwhile [ \"$1\" != \"--output-last-message\" ]; do shift; done\n\
+                 cat > /dev/null\necho '{{\"verdicts\":[{verdicts}]}}' > \"$2\"\n"
+            )
+        };
+        let one = |n: u32, p: &str| {
+            format!("{{\"case\":{n},\"reasoning\":\"r\",\"points\":[\"{p}\"],\"false_claims\":[]}}")
+        };
+        std::fs::write(
+            &fake,
+            batch(&format!("{},{}", one(2, "missing"), one(1, "correct"))),
+        )
+        .unwrap();
+        let v = judge.ask_batch("m", None, &[case(), case()]).unwrap();
+        assert_eq!(
+            v.iter().map(|v| v.grade).collect::<Vec<_>>(),
+            [Grade::Good, Grade::Incomplete]
+        );
+        std::fs::write(&fake, batch(&one(1, "correct"))).unwrap();
+        let e = format!(
+            "{:#}",
+            judge.ask_batch("m", None, &[case(), case()]).unwrap_err()
+        );
+        assert!(e.contains("case 2 judged 0 times"), "{e}");
         std::fs::write(&fake, "#!/bin/sh\necho broken >&2\nexit 3\n").unwrap();
         let e = format!("{:#}", judge.ask(&case()).unwrap_err());
         assert!(
@@ -506,6 +661,48 @@ mod tests {
         assert_eq!(consensus(&[v(Grade::Good), v(Grade::Wrong)]), None);
         assert_eq!(consensus(&[v(Grade::Good)]), None);
         assert_eq!(consensus(&[]), None);
+        // Three: two alike decide, three different do not.
+        let (g, i, w) = (v(Grade::Good), v(Grade::Incomplete), v(Grade::Wrong));
+        assert_eq!(
+            consensus(&[w.clone(), g.clone(), g.clone()]),
+            Some(Grade::Good)
+        );
+        assert_eq!(consensus(&[g.clone(), i.clone(), w.clone()]), None);
+        assert!(unanimous(&[g.clone(), g.clone(), g.clone()]));
+        assert!(!unanimous(&[g.clone(), g, w]));
+        assert!(unanimous(&[i]));
+    }
+
+    #[test]
+    fn neighbours_are_spread_apart() {
+        for n in [0, 1, 2, 3, 8, 24, 63] {
+            let mut o = spread(n);
+            if n >= 8 {
+                // Adjacent cases of the input never meet in the output.
+                assert!(o.windows(2).all(|w| w[0].abs_diff(w[1]) > 1), "{n}");
+            }
+            o.sort();
+            assert_eq!(o, (0..n).collect::<Vec<_>>());
+        }
+        // 8 × 0.618 → 4, not coprime with 8 → 5.
+        assert_eq!(spread(8), [0, 5, 2, 7, 4, 1, 6, 3]);
+        assert_eq!(spread(2), [0, 1]);
+    }
+
+    #[test]
+    fn a_batch_numbers_every_case() {
+        let p = batch_prompt(&[case(), case()]);
+        assert!(p.starts_with(SYSTEM));
+        assert!(p.contains("下の 2 件は別々の無線"));
+        assert!(p.contains("======== case 1 ========") && p.contains("======== case 2 ========"));
+        assert!(!p.contains("case 3"));
+        let s = batch_schema();
+        let item = &s["properties"]["verdicts"]["items"];
+        assert_eq!(
+            item["required"],
+            json!(["case", "reasoning", "points", "false_claims"])
+        );
+        assert_eq!(item["properties"]["case"]["type"], "integer");
     }
 
     #[test]

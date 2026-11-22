@@ -635,6 +635,8 @@ impl App {
                 self.previewing &= s;
             }
             Event::Error(e) => self.error(e),
+            // Measured by vr-eval; the window does not show them.
+            Event::Usage { .. } | Event::Cost { .. } => {}
             Event::TurnStarted { turn } => {
                 self.previewing = false;
                 self.turns.push(TurnView {

@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use vr_eval::audio::Voices;
 use vr_eval::html::{self, Calibration, Meta};
-use vr_eval::judge::{Case, Grade, JUDGES, Judge, Verdict, codex_model, needs_key};
+use vr_eval::judge::{BATCH, Case, Grade, JUDGES, Judge, Verdict, codex_model, needs_key};
 use vr_eval::report::{self, Graded};
 use vr_eval::run::{Record, Runner};
 use vr_eval::{calibrate, scenario};
@@ -352,7 +352,8 @@ fn grade(dir: &Path, name: &str, chosen: &[String], key: Option<&str>) -> Result
     Ok(())
 }
 
-/// Every case by every judge, several at a time.
+/// Every case by every judge, several at a time. A case that one of the
+/// judges could not grade gets no verdicts: it stays disputed.
 fn judge_all(
     dir: &Path,
     cases: &[Case],
@@ -360,44 +361,57 @@ fn judge_all(
     key: Option<&str>,
 ) -> Result<Vec<Vec<Verdict>>> {
     let cwd = std::path::absolute(dir.join("judge"))?;
-    // The CLI is a process with its own rate limit.
-    let at_once = if models.iter().any(|m| codex_model(m).is_some()) {
-        4
-    } else {
-        16
-    };
-    let mut out = Vec::new();
-    for chunk in cases.chunks(at_once) {
-        let results: Vec<Result<Vec<Verdict>>> = std::thread::scope(|s| {
-            let threads: Vec<_> = chunk
-                .iter()
-                .map(|case| {
-                    let cwd = cwd.clone();
-                    s.spawn(move || {
-                        let verdicts = models.iter().filter_map(|m| {
-                            let judge = Judge {
-                                key: key.map(String::from),
-                                model: m.to_string(),
-                                cwd: cwd.clone(),
-                            };
-                            // A missing verdict leaves the call disputed.
-                            judge
-                                .judge(case)
-                                .map_err(|e| eprintln!("{m}: {e:#} ({:?})", case.said))
-                                .ok()
-                        });
-                        Ok(verdicts.collect())
+    // Batches must not put two replies to one question side by side.
+    let order = vr_eval::judge::spread(cases.len());
+    let shuffled: Vec<Case> = order.iter().map(|&i| cases[i].clone()).collect();
+    let cases = &shuffled[..];
+    let mut all: Vec<Vec<Option<Verdict>>> = vec![Vec::new(); cases.len()];
+    for m in models {
+        // The CLI is a process with its own rate limit.
+        let (size, at_once) = if codex_model(m).is_some() {
+            (BATCH, 4)
+        } else {
+            (1, 16)
+        };
+        let judge = Judge {
+            key: key.map(String::from),
+            model: m.to_string(),
+            cwd: cwd.clone(),
+        };
+        let batches: Vec<&[Case]> = cases.chunks(size).collect();
+        let mut got: Vec<Option<Verdict>> = Vec::new();
+        for group in batches.chunks(at_once) {
+            let results: Vec<Vec<Option<Verdict>>> = std::thread::scope(|s| {
+                let threads: Vec<_> = group
+                    .iter()
+                    .map(|batch| {
+                        let judge = &judge;
+                        s.spawn(move || match judge.judge_many(batch) {
+                            Ok(v) => v.into_iter().map(Some).collect(),
+                            Err(e) => {
+                                eprintln!("{m}: {e:#} ({:?})", batch[0].said);
+                                vec![None; batch.len()]
+                            }
+                        })
                     })
-                })
-                .collect();
-            threads
-                .into_iter()
-                .map(|t| t.join().expect("judge thread"))
-                .collect()
-        });
-        for r in results {
-            out.push(r?);
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|t| t.join().expect("judge thread"))
+                    .collect()
+            });
+            got.extend(results.into_iter().flatten());
         }
+        for (acc, v) in all.iter_mut().zip(got) {
+            acc.push(v);
+        }
+    }
+    let mut out = vec![Vec::new(); cases.len()];
+    for (&i, v) in order.iter().zip(all) {
+        out[i] = v
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
     }
     Ok(out)
 }
@@ -455,7 +469,12 @@ fn calibrate_judges(dir: &Path, models: &[String], key: Option<&str>) -> Result<
     println!("{} labelled replies", cases.len());
     let mut all: Vec<Vec<Verdict>> = vec![Vec::new(); cases.len()];
     let mut results = Vec::new();
-    for model in &models {
+    for (k, model) in models.iter().enumerate() {
+        let name = if models.iter().filter(|m| *m == model).count() > 1 {
+            format!("{model} #{}", k + 1)
+        } else {
+            model.to_string()
+        };
         let judged = match judge_all(dir, &cases, &[model], key) {
             Ok(j) => j,
             Err(e) => {
@@ -481,11 +500,11 @@ fn calibrate_judges(dir: &Path, models: &[String], key: Option<&str>) -> Result<
             false_bad += usize::from(g != Grade::Good && l.label == Grade::Good);
         }
         println!(
-            "{model}: exact {right}/{} false-good {false_good} false-bad {false_bad}",
+            "{name}: exact {right}/{} false-good {false_good} false-bad {false_bad}",
             cases.len()
         );
         results.push(Calibration {
-            model: model.to_string(),
+            model: name,
             cases: cases.len(),
             right,
             false_good,
@@ -496,11 +515,6 @@ fn calibrate_judges(dir: &Path, models: &[String], key: Option<&str>) -> Result<
             println!("{}", m.chars().take(400).collect::<String>());
         }
     }
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(
-        dir.join("calibration.json"),
-        serde_json::to_vec_pretty(&results)?,
-    )?;
     let agreed: Vec<_> = labelled
         .iter()
         .zip(&all)
@@ -508,11 +522,37 @@ fn calibrate_judges(dir: &Path, models: &[String], key: Option<&str>) -> Result<
         .filter_map(|(l, v)| vr_eval::judge::consensus(v).map(|g| (g, l.label)))
         .collect();
     let right = agreed.iter().filter(|(g, l)| g == l).count();
+    let unanimous = all
+        .iter()
+        .filter(|v| v.len() == models.len() && vr_eval::judge::unanimous(v))
+        .count();
     println!(
-        "together: {} agreed, {right} of them right, {} disputed",
+        "together: {} agreed, {right} of them right, {} disputed, {unanimous} unanimous",
         agreed.len(),
         cases.len() - agreed.len()
     );
+    if models.len() > 1 {
+        // What the reports use: the majority.
+        results.push(Calibration {
+            model: "多数決".into(),
+            cases: cases.len(),
+            right,
+            false_good: agreed
+                .iter()
+                .filter(|(g, l)| *g == Grade::Good && *l != Grade::Good)
+                .count(),
+            false_bad: agreed
+                .iter()
+                .filter(|(g, l)| *g != Grade::Good && *l == Grade::Good)
+                .count(),
+            used: true,
+        });
+    }
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join("calibration.json"),
+        serde_json::to_vec_pretty(&results)?,
+    )?;
     Ok(())
 }
 

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::agent::{AgentCmd, AgentEvent, AgentLink, ToolState, Turn};
+use crate::agent::{AgentCmd, AgentEvent, AgentLink, TokenUsage, ToolState, Turn};
 use crate::audio::{Output, Recorder};
 use crate::context::ContextSource;
 use crate::early::Early;
@@ -87,6 +87,16 @@ pub enum Event {
         turn: Turn,
         outcome: Outcome,
         ms: u64,
+    },
+    /// Tokens of any turn of the agent, the primer and cancelled ones too.
+    Usage {
+        turn: Turn,
+        usage: TokenUsage,
+    },
+    /// Cost of the session so far, when the agent reports it.
+    Cost {
+        amount: f64,
+        currency: String,
     },
     Speaking(bool),
     Error(String),
@@ -439,6 +449,10 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                 }
             }
             Some(ev) = agent.rx.recv() => match ev {
+                AgentEvent::Cost { amount, currency, .. } => emit(Event::Cost { amount, currency }),
+                AgentEvent::TurnEnd { turn, usage: Some(usage), .. } if current.as_ref().is_none_or(|c| c.turn != turn) => {
+                    emit(Event::Usage { turn, usage });
+                }
                 AgentEvent::Ready { name } => emit(Event::AgentReady { name }),
                 AgentEvent::Closed { error } => {
                     if let Some(c) = current.take() {
@@ -473,6 +487,9 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                     if current.as_ref().is_some_and(|c| c.turn == turn) =>
                 {
                     let mut c = current.take().expect("checked above");
+                    if let AgentEvent::TurnEnd { usage: Some(usage), .. } = &ev {
+                        emit(Event::Usage { turn, usage: *usage });
+                    }
                     if let Some(rest) = c.splitter.finish() {
                         send_clip(&c, rest, &mut first_sentence);
                     }
