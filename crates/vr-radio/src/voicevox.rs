@@ -11,6 +11,11 @@ use crate::http;
 pub trait Synth: Send + Sync + 'static {
     /// Returns a WAV file for `text`. Blocking.
     fn synthesize(&self, text: &str, speaker: u32) -> Result<Vec<u8>>;
+
+    /// Gets a voice ready, so that its first sentence is not slower. Blocking.
+    fn warm_up(&self, _speaker: u32) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// One selectable voice: a character and one of its styles.
@@ -83,6 +88,20 @@ impl Voicevox {
 }
 
 impl Synth for Voicevox {
+    /// The engine loads a voice's model on its first use (about a second on
+    /// a CPU); `skip_reinit` makes it a no-op for a loaded one.
+    fn warm_up(&self, speaker: u32) -> Result<()> {
+        let resp = self
+            .agent
+            .post(format!("{}/initialize_speaker", self.base_url))
+            .query("speaker", speaker.to_string())
+            .query("skip_reinit", "true")
+            .send_empty()
+            .with_context(|| self.unreachable())?;
+        http::check(resp, "VOICEVOX initialize_speaker")?;
+        Ok(())
+    }
+
     fn synthesize(&self, text: &str, speaker: u32) -> Result<Vec<u8>> {
         let speaker = speaker.to_string();
         let resp = self
@@ -149,6 +168,30 @@ mod tests {
         assert_eq!(sent["prePhonemeLength"], 0.05);
         assert_eq!(sent["postPhonemeLength"], 0.05);
         assert_eq!(sent["accent_phrases"], Value::Array(vec![]));
+    }
+
+    #[test]
+    fn warm_up_loads_the_voice_once() {
+        let server = fake::serve(|_| fake::Response {
+            status: 204,
+            content_type: "text/plain",
+            body: vec![],
+        });
+        Voicevox::new(server.url.clone(), 1.0).warm_up(13).unwrap();
+        let reqs = server.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].method, "POST");
+        assert_eq!(
+            reqs[0].target,
+            "/initialize_speaker?speaker=13&skip_reinit=true"
+        );
+        let err = format!(
+            "{:#}",
+            Voicevox::new("http://127.0.0.1:9", 1.0)
+                .warm_up(3)
+                .unwrap_err()
+        );
+        assert!(err.starts_with("VOICEVOX unreachable"), "{err}");
     }
 
     #[test]

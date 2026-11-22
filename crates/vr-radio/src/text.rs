@@ -16,7 +16,8 @@ pub struct SentenceSplitter {
     first: bool,
 }
 
-/// Length from which the first clause is spoken on its own.
+/// Length from which the first clause is spoken on its own; shorter ones
+/// too when they hold a number (`6位、`), the answer a driver waits for.
 const FIRST_CLAUSE: usize = 6;
 
 impl Default for SentenceSplitter {
@@ -66,8 +67,10 @@ impl SentenceSplitter {
     fn find_cut(&self) -> Option<usize> {
         let mut chars = self.buf.char_indices().peekable();
         let mut count = 0;
+        let mut digit = false;
         while let Some((i, c)) = chars.next() {
             count += 1;
+            digit |= c.is_ascii_digit() || ('０'..='９').contains(&c);
             let end = i + c.len_utf8();
             if HARD_STOPS.contains(&c) {
                 // Keep runs like "！？" or "……" together.
@@ -95,7 +98,7 @@ impl SentenceSplitter {
             } else {
                 self.soft_limit
             };
-            if SOFT_STOPS.contains(&c) && count >= limit {
+            if SOFT_STOPS.contains(&c) && (count >= limit || (self.first && digit)) {
                 return Some(end);
             }
         }
@@ -157,6 +160,18 @@ mod tests {
         // Five characters and the comma are enough, fewer are not (了解、).
         assert_eq!(SentenceSplitter::default().push("一二三四五、").len(), 1);
         assert!(SentenceSplitter::default().push("一二三四、").is_empty());
+        // A short first clause with a number is spoken at once, a later one
+        // waits as before.
+        let mut s = SentenceSplitter::default();
+        assert_eq!(s.push("6位、後ろ 0.8、"), ["6位、"]);
+        assert!(s.push("迫ってる").is_empty());
+        assert_eq!(
+            SentenceSplitter::default().push("0.5秒差、毎周"),
+            ["0.5秒差、"]
+        );
+        assert!(SentenceSplitter::default().push("了解、").is_empty());
+        assert_eq!(SentenceSplitter::default().push("６位、"), ["６位、"]);
+        assert!(SentenceSplitter::default().push("六位、").is_empty());
     }
 
     #[test]

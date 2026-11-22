@@ -250,6 +250,17 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
     let speaker = Arc::new(AtomicU32::new(speaker));
     let muted = Arc::new(AtomicBool::new(false));
     let (clip_tx, clip_rx) = unbounded_channel::<Clip>();
+    let warm = {
+        let synth = synth.clone();
+        move |id: u32| {
+            let synth = synth.clone();
+            // A failure shows on the first sentence instead.
+            tokio::task::spawn_blocking(move || {
+                let _ = synth.warm_up(id);
+            });
+        }
+    };
+    warm(speaker.load(Ordering::Relaxed));
     tokio::spawn(speak(
         clip_rx,
         synth,
@@ -413,7 +424,10 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                         agent = connect(&command);
                     }
                     Command::SetStt(cfg) => transcriber = make_transcriber(&cfg),
-                    Command::SetSpeaker(id) => speaker.store(id, Ordering::Relaxed),
+                    Command::SetSpeaker(id) => {
+                        speaker.store(id, Ordering::Relaxed);
+                        warm(id);
+                    }
                     Command::SetMuted(m) => {
                         muted.store(m, Ordering::Relaxed);
                         if m {
@@ -569,10 +583,14 @@ mod tests {
         }
     }
 
-    struct EchoSynth;
+    struct EchoSynth(Arc<Mutex<Vec<u32>>>);
     impl Synth for EchoSynth {
         fn synthesize(&self, text: &str, speaker: u32) -> anyhow::Result<Vec<u8>> {
             Ok(format!("{speaker}:{text}").into_bytes())
+        }
+        fn warm_up(&self, speaker: u32) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(speaker);
+            Ok(())
         }
     }
 
@@ -601,6 +619,7 @@ mod tests {
         events: UnboundedReceiver<Event>,
         out: Arc<FakeOut>,
         prompts: Arc<Mutex<Vec<String>>>,
+        warmed: Arc<Mutex<Vec<u32>>>,
     }
 
     fn start(reply: &'static [&'static str], stt: &'static str, seconds: f32) -> Harness {
@@ -618,6 +637,7 @@ mod tests {
         };
         let other = prompts.clone();
         let out = Arc::new(FakeOut::default());
+        let warmed = Arc::new(Mutex::new(Vec::new()));
         let (cmds, cmd_rx) = unbounded_channel();
         let (ev_tx, events) = unbounded_channel();
         tokio::spawn(run(
@@ -631,7 +651,7 @@ mod tests {
                     assert_eq!(cfg.model, "new");
                     Arc::new(FakeStt("聞き直し"))
                 }),
-                synth: Arc::new(EchoSynth),
+                synth: Arc::new(EchoSynth(warmed.clone())),
                 output: out.clone(),
                 agent: link(reply, prompts.clone()),
                 connect: Box::new(move |command| match command {
@@ -652,6 +672,7 @@ mod tests {
             events,
             out,
             prompts,
+            warmed,
         }
     }
 
@@ -687,6 +708,22 @@ mod tests {
 
     fn is_done(e: &Event) -> bool {
         matches!(e, Event::TurnDone { .. })
+    }
+
+    /// The voice is loaded at start and when it changes, before it speaks.
+    #[tokio::test]
+    async fn the_voice_is_warmed_up_before_it_is_needed() {
+        let h = start(&["了解。"], "q", 1.0);
+        h.cmds.send(Command::SetSpeaker(13)).unwrap();
+        for _ in 0..200 {
+            if h.warmed.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut w = h.warmed.lock().unwrap().clone();
+        w.sort();
+        assert_eq!(w, [3, 13]);
     }
 
     #[tokio::test]
