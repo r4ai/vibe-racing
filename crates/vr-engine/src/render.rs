@@ -158,12 +158,27 @@ fn event_line(e: &Event) -> String {
 
 /// `weather: lightly wet (rain 20%) | air 21.4C | track 29.4C`; `None`
 /// when the game says nothing about it.
-fn weather_line(w: &vr_core::Weather) -> Option<String> {
+fn weather_line(w: &vr_core::Weather, trend: Option<&RainTrend>) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(wet) = &w.wetness {
         let mut p = wet.clone();
-        if let Some(r) = w.precipitation.filter(|r| *r > 0.0) {
-            let _ = write!(p, " (rain {:.0}%)", r * 100.0);
+        let rain = w.precipitation.filter(|r| *r > 0.0);
+        let trend = trend.map(|t| match t.direction {
+            RainDirection::Rising => format!("rising {:.0}%/min", t.per_min * 100.0),
+            RainDirection::Easing => format!("easing {:.0}%/min", -t.per_min * 100.0),
+            RainDirection::Steady => "steady".into(),
+        });
+        match (rain, trend) {
+            (Some(r), Some(t)) => {
+                let _ = write!(p, " (rain {:.0}%, {t})", r * 100.0);
+            }
+            (Some(r), None) => {
+                let _ = write!(p, " (rain {:.0}%)", r * 100.0);
+            }
+            (None, Some(t)) if !t.starts_with("steady") => {
+                let _ = write!(p, " (rain {t})");
+            }
+            _ => {}
         }
         parts.push(p);
     }
@@ -268,7 +283,11 @@ impl Brief {
         if let Some(f) = &self.fuel {
             let _ = writeln!(out, "{}", fuel_line(f));
         }
-        if let Some(w) = self.weather.as_ref().and_then(weather_line) {
+        if let Some(w) = self
+            .weather
+            .as_ref()
+            .and_then(|w| weather_line(w, self.rain_trend.as_ref()))
+        {
             let _ = writeln!(out, "{w}");
         }
         if !self.recent_events.is_empty() {
@@ -510,19 +529,50 @@ mod tests {
             fuel: None,
             recent_events: Vec::new(),
             weather: None,
+            rain_trend: None,
         }
     }
 
     #[test]
     fn weather_line_says_only_what_is_known() {
         let w = |wetness: Option<&str>, rain: Option<f64>, air: Option<f64>, track: Option<f64>| {
-            weather_line(&vr_core::Weather {
-                air_temp_c: air,
-                track_temp_c: track,
-                wetness: wetness.map(String::from),
-                precipitation: rain,
-            })
+            weather_line(
+                &vr_core::Weather {
+                    air_temp_c: air,
+                    track_temp_c: track,
+                    wetness: wetness.map(String::from),
+                    precipitation: rain,
+                },
+                None,
+            )
         };
+        let trend = |per_min, direction| RainTrend { per_min, direction };
+        let wet = vr_core::Weather {
+            wetness: Some("lightly wet".into()),
+            precipitation: Some(0.3),
+            ..Default::default()
+        };
+        assert_eq!(
+            weather_line(&wet, Some(&trend(0.044, RainDirection::Rising))).as_deref(),
+            Some("weather: lightly wet (rain 30%, rising 4%/min)")
+        );
+        assert_eq!(
+            weather_line(&wet, Some(&trend(-0.05, RainDirection::Easing))).as_deref(),
+            Some("weather: lightly wet (rain 30%, easing 5%/min)")
+        );
+        let dry = vr_core::Weather {
+            wetness: Some("dry".into()),
+            precipitation: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            weather_line(&dry, Some(&trend(0.0, RainDirection::Steady))).as_deref(),
+            Some("weather: dry")
+        );
+        assert_eq!(
+            weather_line(&dry, Some(&trend(-0.02, RainDirection::Easing))).as_deref(),
+            Some("weather: dry (rain easing 2%/min)")
+        );
         assert_eq!(
             w(Some("lightly wet"), Some(0.2), Some(21.44), Some(29.4)).as_deref(),
             Some("weather: lightly wet (rain 20%) | air 21.4C | track 29.4C")

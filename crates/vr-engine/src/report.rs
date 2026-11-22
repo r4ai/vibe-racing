@@ -151,6 +151,24 @@ pub struct Brief {
     /// Track and air as the game reports them (absent in older reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weather: Option<vr_core::Weather>,
+    /// Whether the rain grows over the last two minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rain_trend: Option<RainTrend>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RainTrend {
+    /// Change of precipitation (0..1) per minute.
+    pub per_min: f64,
+    pub direction: RainDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RainDirection {
+    Rising,
+    Steady,
+    Easing,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

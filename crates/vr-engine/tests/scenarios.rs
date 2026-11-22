@@ -1388,3 +1388,45 @@ fn zero_best_lap_is_no_best() {
         None
     );
 }
+
+/// Frames of a race in the rain: precipitation `rain(t)` every 5 s.
+fn rainy(st: &mut RaceState, until: f64, rain: impl Fn(f64) -> f64) {
+    let mut t = 0.0;
+    while t <= until {
+        let mut f = frame(SessionKind::Race, t, vec![car(0, 1, 1, 0.5)], 0);
+        f.weather = Some(vr_core::Weather {
+            precipitation: Some(rain(t)),
+            wetness: Some("lightly wet".into()),
+            ..Default::default()
+        });
+        st.ingest_at(f, 0);
+        t += 5.0;
+    }
+}
+
+#[test]
+fn rain_trend_needs_two_minutes_and_a_clear_change() {
+    use vr_engine::RainDirection::{Easing, Rising, Steady};
+    let trend = |until: f64, per_min: f64| {
+        let mut st = state();
+        rainy(&mut st, until, |t| 0.3 + per_min * t / 60.0);
+        st.rain_trend().map(|t| (t.direction, (t.per_min * 1000.0).round() / 1000.0))
+    };
+    // Not two minutes of it yet (0.9 × 120 s is the least).
+    assert_eq!(trend(100.0, 0.05), None);
+    assert_eq!(trend(110.0, 0.05), Some((Rising, 0.05)));
+    assert_eq!(trend(600.0, 0.05), Some((Rising, 0.05)));
+    assert_eq!(trend(600.0, -0.05), Some((Easing, -0.05)));
+    // Under 1 %/min is steady; just over it is not.
+    assert_eq!(trend(600.0, 0.0099).map(|t| t.0), Some(Steady));
+    assert_eq!(trend(600.0, -0.0099).map(|t| t.0), Some(Steady));
+    assert_eq!(trend(600.0, 0.0101).map(|t| t.0), Some(Rising));
+    assert_eq!(trend(600.0, -0.0101).map(|t| t.0), Some(Easing));
+    // Without rain data there is no trend, and the brief says so.
+    let st = state();
+    assert_eq!(st.rain_trend(), None);
+    let mut st = state();
+    rainy(&mut st, 300.0, |t| 0.1 + 0.03 * t / 60.0);
+    let text = st.brief().unwrap().to_text();
+    assert!(text.contains("weather: lightly wet (rain 25%, rising 3%/min)"), "{text}");
+}

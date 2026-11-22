@@ -81,6 +81,7 @@ impl RaceApi for RaceState {
                 fuel: None,
                 recent_events: self.event_log().last(5),
                 weather: None,
+                rain_trend: None,
             });
         };
         let mut nearby = self.nearby(f, None);
@@ -95,6 +96,7 @@ impl RaceApi for RaceState {
             fuel: self.fuel_info(f),
             recent_events: self.event_log().last(5),
             weather: f.weather.clone(),
+            rain_trend: self.rain_trend(),
         })
     }
 

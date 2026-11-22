@@ -83,7 +83,14 @@ pub struct RaceState {
     prev_position: Option<u32>,
     prev_incidents: Option<i32>,
     best_lap_s: Option<f64>,
+    /// Rain over the last minutes: session time and precipitation (0..1).
+    rain: VecDeque<(f64, f64)>,
 }
+
+/// How far back the rain trend looks, in seconds of session time.
+const RAIN_WINDOW_S: f64 = 120.0;
+/// Changes smaller than this per minute are steady rain.
+const RAIN_STEADY_PER_MIN: f64 = 0.01;
 
 impl RaceState {
     pub fn new(game: impl Into<String>, source: SourceKind, capabilities: Capabilities) -> Self {
@@ -103,6 +110,46 @@ impl RaceState {
             prev_position: None,
             prev_incidents: None,
             best_lap_s: None,
+            rain: VecDeque::new(),
+        }
+    }
+
+    /// Rain per minute over the last two minutes; `None` until there are
+    /// two minutes of it.
+    pub fn rain_trend(&self) -> Option<RainTrend> {
+        let &(t1, r1) = self.rain.back()?;
+        let &(t0, r0) = self.rain.iter().find(|(t, _)| t1 - t <= RAIN_WINDOW_S)?;
+        if t1 - t0 < RAIN_WINDOW_S * 0.9 {
+            return None;
+        }
+        let per_min = (r1 - r0) / (t1 - t0) * 60.0;
+        Some(RainTrend {
+            per_min,
+            direction: if per_min > RAIN_STEADY_PER_MIN {
+                RainDirection::Rising
+            } else if per_min < -RAIN_STEADY_PER_MIN {
+                RainDirection::Easing
+            } else {
+                RainDirection::Steady
+            },
+        })
+    }
+
+    fn track_rain(&mut self, frame: &Frame) {
+        let Some(r) = frame.weather.as_ref().and_then(|w| w.precipitation) else {
+            return;
+        };
+        let t = frame.session.time_s;
+        // One sample every few seconds is plenty.
+        if self.rain.back().is_some_and(|(last, _)| t - last < 5.0 && t >= *last) {
+            return;
+        }
+        if self.rain.back().is_some_and(|(last, _)| t < *last) {
+            self.rain.clear();
+        }
+        self.rain.push_back((t, r));
+        while self.rain.front().is_some_and(|(old, _)| t - old > RAIN_WINDOW_S + 10.0) {
+            self.rain.pop_front();
         }
     }
 
@@ -157,6 +204,7 @@ impl RaceState {
         self.detect_session_events(&frame);
         self.track_laps(&frame);
         self.detect_player_events(&frame);
+        self.track_rain(&frame);
 
         self.frame = Some(frame);
         self.ingested_at_ms = Some(now_ms);
@@ -170,6 +218,7 @@ impl RaceState {
         self.prev_position = None;
         self.prev_incidents = None;
         self.best_lap_s = None;
+        self.rain.clear();
     }
 
     fn detect_session_events(&mut self, frame: &Frame) {
