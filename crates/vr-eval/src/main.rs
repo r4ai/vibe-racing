@@ -361,10 +361,6 @@ fn judge_all(
     key: Option<&str>,
 ) -> Result<Vec<Vec<Verdict>>> {
     let cwd = std::path::absolute(dir.join("judge"))?;
-    // Batches must not put two replies to one question side by side.
-    let order = vr_eval::judge::spread(cases.len());
-    let shuffled: Vec<Case> = order.iter().map(|&i| cases[i].clone()).collect();
-    let cases = &shuffled[..];
     let mut all: Vec<Vec<Option<Verdict>>> = vec![Vec::new(); cases.len()];
     for m in models {
         // The CLI is a process with its own rate limit.
@@ -378,7 +374,13 @@ fn judge_all(
             model: m.to_string(),
             cwd: cwd.clone(),
         };
-        let batches: Vec<&[Case]> = cases.chunks(size).collect();
+        // Never two replies to one question in a batch: they get mixed up.
+        let said: Vec<&str> = cases.iter().map(|c| c.said.as_str()).collect();
+        let groups = vr_eval::judge::batches(&said, size);
+        let batches: Vec<Vec<Case>> = groups
+            .iter()
+            .map(|g| g.iter().map(|&i| cases[i].clone()).collect())
+            .collect();
         let mut got: Vec<Option<Verdict>> = Vec::new();
         for group in batches.chunks(at_once) {
             let results: Vec<Vec<Option<Verdict>>> = std::thread::scope(|s| {
@@ -402,18 +404,18 @@ fn judge_all(
             });
             got.extend(results.into_iter().flatten());
         }
-        for (acc, v) in all.iter_mut().zip(got) {
-            acc.push(v);
+        for (&i, v) in groups.iter().flatten().zip(got) {
+            all[i].push(v);
         }
     }
-    let mut out = vec![Vec::new(); cases.len()];
-    for (&i, v) in order.iter().zip(all) {
-        out[i] = v
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .unwrap_or_default();
-    }
-    Ok(out)
+    Ok(all
+        .into_iter()
+        .map(|v| {
+            v.into_iter()
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default()
+        })
+        .collect())
 }
 
 fn write_html(dir: &Path, names: &[String], out: &Path) -> Result<()> {

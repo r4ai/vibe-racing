@@ -526,14 +526,21 @@
   }
 
   function scale(max, x0, x1) {
-    const step = [0.5, 1, 2, 5, 10, 20].find((s) => max / s <= 8) ?? 30;
+    const most = x1 - x0 < 300 ? 4 : 8;
+    const step = [0.5, 1, 2, 5, 10, 20].find((s) => max / s <= most) ?? 30;
     const top = Math.ceil(max / step) * step;
     return {
       x: (v) => x0 + ((x1 - x0) * Math.max(0, v)) / top,
       ticks: Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step),
     };
   }
-  const W = 960,
+  /** A label that fits left of the chart. */
+  const clip = (s) => {
+    const max = L < 150 ? 7 : 14;
+    return [...s].length > max ? [...s].slice(0, max - 1).join("") + "…" : s;
+  };
+  // Set from the width the charts are shown at (see sets()).
+  let W = 960,
     L = 190,
     RIGHT = 60;
 
@@ -551,7 +558,7 @@
     runs.forEach((r, i) => {
       const y = i * H + 23,
         color = i === runs.length - 1 && runs.length > 1 ? "var(--best)" : "var(--mark)";
-      s += `<text class="name" x="0" y="${y + 4}">${esc(r.label)}</text><line x1="${L}" x2="${W - RIGHT}" y1="${y}" y2="${y}" stroke="var(--grid)"/>`;
+      s += `<text class="name" x="0" y="${y + 4}"><title>${esc(r.label)}</title>${esc(clip(r.label))}</text><line x1="${L}" x2="${W - RIGHT}" y1="${y}" y2="${y}" stroke="var(--grid)"/>`;
       r.rows.forEach((c, k) => {
         if (c.informed_s == null || c.behavior !== "answer") return;
         s += `<circle cx="${x(c.informed_s)}" cy="${y + (((k * 7) % 15) - 7)}" r="4.5" fill="${color}" fill-opacity=".55" stroke="var(--surface)" stroke-width="1" data-tip="${esc(c.stint + " / " + c.call + "  " + sec(c.informed_s) + "\n「" + c.said + "」 → 「" + c.spoken + "」")}"/>`;
@@ -577,7 +584,7 @@
     runs.forEach((r, i) => {
       let at = 0;
       const y = i * H + 6;
-      s += `<text class="name" x="0" y="${y + 17}">${esc(r.label)}</text>`;
+      s += `<text class="name" x="0" y="${y + 17}"><title>${esc(r.label)}</title>${esc(clip(r.label))}</text>`;
       keys.forEach((k, j) => {
         const v = value(r, k) ?? 0;
         if (v <= 0) return;
@@ -609,7 +616,11 @@
   }
 
   function sets() {
-    document.getElementById("sets").innerHTML = Object.entries(bySet)
+    const box = document.getElementById("sets");
+    W = Math.max(320, Math.min(960, Math.round(box.getBoundingClientRect().width) - 34) || 960);
+    L = W < 600 ? 112 : 190;
+    RIGHT = W < 600 ? 52 : 60;
+    box.innerHTML = Object.entries(bySet)
       .map(
         ([set, runs]) =>
           `<section><h2>${esc(SETS[set] ?? set)}</h2>${table(runs)}${compare(runs)}${dots(runs)}` +
@@ -727,8 +738,9 @@
     const missing = D.runs.filter((r) => !pts.some((p) => p.r === r)).map((r) => r.label);
     const svg = document.getElementById("trade"),
       note = document.getElementById("trade-note");
-    const Wd = 960,
-      Ht = 420,
+    // Drawn at the width it is shown, so that the text stays legible.
+    const Wd = Math.max(320, Math.min(960, Math.round(svg.getBoundingClientRect().width) || 960)),
+      Ht = Wd < 600 ? 340 : 420,
       PL = 64,
       PR = 24,
       PT = 16,
@@ -753,8 +765,12 @@
       .filter((p) => !pts.some((q) => q !== p && beats(q, p)))
       .sort((a, b) => a.x - b.x);
     let g = "";
-    for (const t of xt)
-      g += `<line x1="${X(t)}" x2="${X(t)}" y1="${PT}" y2="${Ht - PB}" stroke="var(--grid)"/><text x="${X(t)}" y="${Ht - PB + 18}" text-anchor="middle">${fmt(t, xu, pts[0].r.metrics.currency)}</text>`;
+    const every = Wd < 600 ? 2 : 1;
+    for (const [i, t] of xt.entries())
+      g +=
+        i % every
+          ? `<line x1="${X(t)}" x2="${X(t)}" y1="${PT}" y2="${Ht - PB}" stroke="var(--grid)"/>`
+          : `<line x1="${X(t)}" x2="${X(t)}" y1="${PT}" y2="${Ht - PB}" stroke="var(--grid)"/><text x="${X(t)}" y="${Ht - PB + 18}" text-anchor="middle">${fmt(t, xu, pts[0].r.metrics.currency)}</text>`;
     for (const t of yt)
       g += `<line x1="${PL}" x2="${Wd - PR}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--grid)"/><text x="${PL - 8}" y="${Y(t) + 4}" text-anchor="end">${fmt(t)}</text>`;
     g += `<text x="${(PL + Wd - PR) / 2}" y="${Ht - 8}" text-anchor="middle" class="name">${xn}（${xu === "tok" || xu === "cost" ? "少ないほど良い" : "短いほど良い"}）</text>`;
@@ -796,6 +812,14 @@
       : "informed_p50";
     ys.value = YS.some((a) => a[0] === store.get("vr-eval-y")) ? store.get("vr-eval-y") : "good";
     xs.onchange = ys.onchange = tradeoff;
+    let last = 0;
+    new ResizeObserver(([e]) => {
+      const w = Math.round(e.contentRect.width);
+      if (w !== last) {
+        last = w;
+        tradeoff();
+      }
+    }).observe(document.getElementById("trade"));
     tradeoff();
   }
 
@@ -835,6 +859,14 @@
   method();
   axes();
   sets();
+  let setsWidth = 0;
+  new ResizeObserver(([e]) => {
+    const w = Math.round(e.contentRect.width);
+    if (Math.abs(w - setsWidth) > 8) {
+      setsWidth = w;
+      sets();
+    }
+  }).observe(document.getElementById("sets"));
   calls();
   calib();
 </script>

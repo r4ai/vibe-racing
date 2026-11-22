@@ -263,6 +263,22 @@ pub fn spread(n: usize) -> Vec<usize> {
     (0..n).map(|i| i * stride % n).collect()
 }
 
+/// Groups of at most `size` cases, in `spread` order, where no group has
+/// two replies to the same words: a judge would mix them up.
+pub fn batches(said: &[&str], size: usize) -> Vec<Vec<usize>> {
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    for i in spread(said.len()) {
+        let free = out
+            .iter_mut()
+            .find(|b| b.len() < size && b.iter().all(|&j| said[j] != said[i]));
+        match free {
+            Some(b) => b.push(i),
+            None => out.push(vec![i]),
+        }
+    }
+    out
+}
+
 /// Whether every verdict is the same.
 pub fn unanimous(verdicts: &[Verdict]) -> bool {
     verdicts.windows(2).all(|w| w[0].grade == w[1].grade)
@@ -687,6 +703,26 @@ mod tests {
         // 8 × 0.618 → 4, not coprime with 8 → 5.
         assert_eq!(spread(8), [0, 5, 2, 7, 4, 1, 6, 3]);
         assert_eq!(spread(2), [0, 1]);
+    }
+
+    #[test]
+    fn a_batch_never_holds_the_same_words_twice() {
+        let said = ["a", "a", "a", "b", "b", "c", "d", "e", "f", "g"];
+        let b = batches(&said, 4);
+        let mut all: Vec<usize> = b.concat();
+        all.sort();
+        assert_eq!(all, (0..said.len()).collect::<Vec<_>>());
+        for g in &b {
+            assert!(g.len() <= 4);
+            let mut words: Vec<&str> = g.iter().map(|&i| said[i]).collect();
+            words.sort();
+            words.dedup();
+            assert_eq!(words.len(), g.len(), "{b:?}");
+        }
+        // Three "a" need three batches; ten cases fit in three of four.
+        assert_eq!(b.len(), 3);
+        assert_eq!(batches(&[], 8), Vec::<Vec<usize>>::new());
+        assert_eq!(batches(&["x"], 1), [[0]]);
     }
 
     #[test]
