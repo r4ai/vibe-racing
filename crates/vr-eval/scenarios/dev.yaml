@@ -1,0 +1,181 @@
+# Development set: used while changing the radio. See docs/architecture.md for the fields.
+# A stint is one race and one agent session, with the driver's calls in order.
+
+- id: battle
+  world: { start_s: 600 }
+  calls:
+    - id: gap-ahead
+      say: 前との差は？
+      voice: vv:13
+      facts: [gap_ahead]
+      points: [前の車との差（秒）]
+    - id: follow-up-behind
+      say: 後ろは？
+      voice: vv:13
+      facts: [gap_behind]
+      points: [後ろの車との差（秒）]
+    - id: fuel-long-ramble
+      say: えーっと、そうだな、あのー、燃料なんだけどさ、最近ちょっと踏みすぎてる気がしてて、このペースのままだと、結局あと何周もつのかと、最後まで行くなら何リットル入れればいいか、教えてくれる？
+      voice: gemini:Charon
+      noise: { snr_db: 18 }
+      facts: [fuel_laps, fuel_add]
+      points: [燃料があと何周もつか, ゴールまでに足すべき量（リットル）]
+    - id: self-correction
+      say: 後ろ、いや違う、前のやつの、直近のラップタイムっていくつ？
+      voice: gemini:Kore
+      noise: { snr_db: 20 }
+      facts: [last_lap_ahead]
+      points: [前の車（後ろの車ではない）の直近ラップタイム]
+    - id: ack
+      say: 了解、ありがと。
+      voice: vv:13
+      behavior: ack
+      points: [情報を求められていないので、短く受けるだけにする（安全・戦略に直結する一言は可）]
+
+- id: after-stop
+  world: { start_s: 985 }
+  calls:
+    - id: position
+      say: 今何位？
+      voice: vv:2
+      noise: { snr_db: 15 }
+      facts: [position]
+      points: [現在の順位]
+    - id: two-questions
+      say: 後ろの Ito、どのくらい離れてる？あと、燃料は最後までもつ？
+      voice: gemini:Charon
+      noise: { snr_db: 15 }
+      facts: [gap_behind]
+      points: [後ろの Ito との差（秒）, 燃料が最後まで足りること]
+    - id: lap-history
+      say: 俺の直近3周のラップ、どうなってる？
+      voice: gemini:Kore
+      facts: [last_lap]
+      points: [自車の直近 3 周のラップタイム]
+    - id: what-happened
+      say: さっきのピットで、順位いくつ落ちたんだっけ？
+      voice: vv:13
+      facts: []
+      points: [ピットの前後で順位がどう変わったか（履歴の順位変動と矛盾しないこと）]
+
+- id: yellow
+  world: { start_s: 302, yellow: [300, 420] }
+  calls:
+    - id: flag
+      say: イエロー出てる？
+      voice: vv:13
+      noise: { snr_db: 10 }
+      facts: [yellow]
+      points: [現在イエローが出ていること]
+    - id: flag-noisy-gap
+      say: ギャップ、前のギャップ
+      voice: gemini:Charon
+      noise: { snr_db: 3 }
+      facts: [gap_ahead]
+      points: [前の車との差（秒）]
+    - id: clipped-start
+      say: 後ろとの差はどのくらい？
+      voice: gemini:Kore
+      noise: { snr_db: 15 }
+      cut_start_s: 0.35
+      facts: [gap_behind]
+      points: [後ろの車との差（秒）。冒頭が切れて聞き取れなければ聞き返すのも可]
+      behavior: answer_or_ask
+    - id: laps-left
+      say: 残り何周？
+      voice: vv:2
+      facts: [laps_left]
+      points: [残り周回数]
+
+- id: defend
+  world: { start_s: 1478 }
+  calls:
+    - id: pressure
+      say: 後ろ迫ってる？
+      voice: vv:13
+      noise: { snr_db: 12 }
+      facts: [gap_behind]
+      points: [後ろとの差, 詰められているか離しているか]
+    - id: long-plan
+      say: 残り少ないけど、今の順位を守れそうか、ちょっと考えてほしい。後ろがどれくらいのペースで来てて、ゴールまでに追いつかれるのか。それと、逆に前の車に届く可能性はあるのか。その二つを、手短に頼む。
+      voice: gemini:Charon
+      noise: { snr_db: 15 }
+      facts: [gap_behind, gap_ahead]
+      points:
+        [後ろの差と推移から、ゴールまでに追いつかれそうか, 前の差と推移から、届く可能性があるか]
+    - id: pause-in-the-middle
+      say: 前の車なんだけど……<pause 1.6>……何秒差で、毎周どれくらい縮まってる？
+      voice: vv:13
+      noise: { snr_db: 18 }
+      facts: [gap_ahead]
+      points: [前の車との差（秒）, 毎周の縮まり（または広がり）]
+    - id: ahead-name
+      say: 前にいるの誰？
+      voice: gemini:Kore
+      facts: [name_ahead]
+      points: [前の車のドライバー名または車番]
+
+- id: fuel-tight
+  world: { start_s: 520, laps: 30, fuel_start_l: 27, fuel_per_lap_l: 2.9, player_pit_lap: null }
+  calls:
+    - id: box-decision
+      say: このまま行ける？それともボックス必要？
+      voice: gemini:Charon
+      noise: { snr_db: 15 }
+      facts: [fuel_laps]
+      points: [燃料が足りずピットが必要なこと, いつまでにピットすべきか（残り周回または周）]
+    - id: fuel-short
+      say: 何リットル入れる？
+      voice: vv:13
+      facts: [fuel_add]
+      points: [給油すべき量（リットル）]
+    - id: mumble
+      say: ねんぴ、いまなんリッターはしってる？いっしゅうあたり
+      voice: vv:2
+      noise: { snr_db: 8 }
+      facts: [fuel_per_lap]
+      points: [1 周あたりの燃料消費（リットル）]
+    - id: interrupt
+      say: 今トップとの差、教えて
+      voice: vv:13
+      facts: [gap_leader]
+      points: [首位との差（秒）]
+      # Pressed again with another question while the answer is prepared.
+      barge_in:
+        after_s: 1.5
+        say: ごめん、やっぱり最後尾まで何台いるかだけでいい
+        facts: [cars_behind]
+        points: [自分より後ろに何台いるか]
+
+- id: offline
+  world: { start_s: 700, stale_after_start: true }
+  calls:
+    - id: stale
+      say: 前との差は？
+      voice: vv:13
+      behavior: admit_unknown
+      points: [データが途切れている・古いことを伝え、古い値を現在値として言わない]
+
+- id: garbage
+  world: { start_s: 640 }
+  calls:
+    - id: noise-only
+      say: ""
+      duration_s: 2.0
+      noise: { snr_db: 0 }
+      behavior: silent
+      points: [発話が無いので、レース情報を勝手に話さない。短い聞き返しは可]
+    - id: cut-off
+      say: 前の
+      voice: vv:13
+      noise: { snr_db: 8 }
+      cut_end_s: 0.15
+      behavior: answer_or_ask
+      facts: [gap_ahead]
+      points: [前の車についての情報を短く答えるか、短く聞き返す]
+    - id: chatter
+      say: うわっ、あぶね！なんだよ今の！
+      voice: gemini:Charon
+      noise: { snr_db: 12 }
+      behavior: ack
+      points: [質問ではないので短く返す。事実に反することを言わない]

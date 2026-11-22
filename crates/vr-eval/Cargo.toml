@@ -1,0 +1,31 @@
+[package]
+name = "vr-eval"
+description = "End-to-end evaluation of the voice radio: simulated races and driver voices, the real transcriber, agent and speech"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+vr-core.workspace = true
+vr-engine.workspace = true
+vr-radio = { path = "../vr-radio" }
+vr-replay.workspace = true
+vr-server.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

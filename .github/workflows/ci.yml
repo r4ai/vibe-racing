@@ -66,12 +66,12 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
-      # Unreachable without hardware: the Win32 mapping and the audio devices (92% at the time of writing).
+      # Unreachable without hardware: the Win32 mapping and the audio devices; without the network: the evaluation runs.
       - run: >-
           cargo llvm-cov --workspace --lcov --output-path lcov.info
-          --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs)'
+          --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs|vr-eval/src/(main|run|judge)\.rs)'
           --fail-under-lines 90
-      - run: cargo llvm-cov report --summary-only --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs)'
+      - run: cargo llvm-cov report --summary-only --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs|vr-eval/src/(main|run|judge)\.rs)'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lcov

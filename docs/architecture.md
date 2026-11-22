@@ -151,6 +151,7 @@ flowchart BT
 | 配信   | [`crates/vr-server`](../crates/vr-server)                             | コレクター、HTTP・SSE、discovery                                      | 低       |
 | CLI    | [`crates/vr-cli`](../crates/vr-cli)                                   | コマンド定義、ソース登録、バックエンド選択、`doctor`、スキル同梱      | 中       |
 | スキル | [`skills/race-engineer`](../skills/race-engineer)                     | エージェントの手順と返答規範（`vr` バイナリに埋め込み）               | 中       |
+| 評価   | [`crates/vr-eval`](../crates/vr-eval)                                 | 音声無線の端から端までの評価                                          | 中       |
 | 音声   | [`crates/vr-radio`](../crates/vr-radio)                               | 録音・文字起こし・ACP クライアント・VOICEVOX 読み上げ・画面           | 中       |
 
 ## 設計上の不変条件

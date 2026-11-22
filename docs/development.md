@@ -35,6 +35,8 @@ cargo run -q -p vr-cli -- serve --game synthetic --speed 10
 cargo run -q -p vr-radio -- --ask "前との差は？"
 ```
 
+音声無線の応答を評価する手順は [vr-eval](../crates/vr-eval/docs/architecture.md)。
+
 画面を状態ごとに PNG へ描画する（ウィンドウ・デバイス不要）:
 
 ```powershell

@@ -1,0 +1,156 @@
+# Held-out set: run only to confirm a decision made on dev.yaml. Never tune
+# prompts, vocabulary or thresholds by looking at its answers.
+# Other races, other voices and other wordings than the development set.
+
+- id: midfield
+  world:
+    {
+      start_s: 760,
+      cars: 16,
+      player_idx: 6,
+      laps: 25,
+      yellow: [300, 330],
+      player_pit_lap: 12,
+      rival_pit_lap: 9,
+    }
+  calls:
+    - id: gap-both
+      say: 前後の差、教えて
+      voice: eleven:brian
+      noise: { snr_db: 16 }
+      facts: [gap_ahead, gap_behind]
+      points: [前の車との差, 後ろの車との差]
+    - id: rambling-position
+      say: いやー今のコーナーちょっと危なかったな、まあいいや、ところでさ、今の順位って何位で、トップからはどれくらい遅れてるんだっけ
+      voice: gemini:Fenrir
+      noise: { snr_db: 14 }
+      facts: [position, gap_leader]
+      points: [現在の順位, 首位との差（秒）]
+    - id: car-number
+      say: 自分の一つ前の車、直近のラップは俺より速い？遅い？
+      voice: eleven:sarah
+      facts: []
+      points: [前の車の直近ラップが自車より速いか遅いか]
+    - id: best-lap
+      say: ベストラップいくつ？
+      voice: aura:aura-2-ama-ja
+      noise: { snr_db: 12 }
+      facts: [best_lap]
+      points: [自車のベストラップ]
+
+- id: low-fuel
+  world:
+    {
+      start_s: 430,
+      cars: 14,
+      player_idx: 4,
+      laps: 24,
+      fuel_start_l: 22,
+      fuel_per_lap_l: 2.7,
+      player_pit_lap: null,
+      yellow: null,
+    }
+  calls:
+    - id: fuel-short-noisy
+      say: 燃料、あと何周もつ？
+      voice: eleven:brian
+      noise: { snr_db: 6 }
+      facts: [fuel_laps]
+      points: [燃料があと何周もつか]
+    - id: strategy-long
+      say: ピット戦略の話なんだけど、このまま引っ張ったとして、一番遅くて何周目の終わりに入らないとガス欠になるのか、それで、そこで入る時に最低限どれだけ給油すれば完走できるのか、数字で教えてほしいんだ。
+      voice: gemini:Fenrir
+      noise: { snr_db: 15 }
+      facts: [fuel_add]
+      points: [燃料が持つ最後の周（何周目までか）, 完走に必要な給油量]
+    - id: correction
+      say: トップとの……あ、いや、やっぱ後ろとの差を頼む
+      voice: eleven:sarah
+      noise: { snr_db: 14 }
+      facts: [gap_behind]
+      points: [後ろの車との差（首位との差だけを答えるのは不可）]
+    - id: thanks
+      say: オーケー、じゃあそれでいこう
+      voice: eleven:brian
+      behavior: ack
+      points: [情報を求められていないので、短く受けるだけにする（安全・戦略に直結する一言は可）]
+
+- id: late-yellow
+  world:
+    {
+      start_s: 1205,
+      cars: 12,
+      player_idx: 5,
+      laps: 20,
+      yellow: [1200, 1400],
+      player_pit_lap: 8,
+      rival_pit_lap: 6,
+    }
+  calls:
+    - id: yellow-question
+      say: 旗、何か出てる？
+      voice: aura:aura-2-ama-ja
+      noise: { snr_db: 14 }
+      facts: [yellow]
+      points: [イエローが出ていること]
+    - id: gap-trend
+      say: 後ろのやつ、一周でどれだけ縮めてきてる？それとも離してる？
+      voice: gemini:Fenrir
+      noise: { snr_db: 10 }
+      facts: [trend_behind]
+      points: [後ろとの差が縮んでいるか広がっているか, 1 周あたりの変化量]
+    - id: laps-left
+      say: あと何周だっけ
+      voice: eleven:sarah
+      noise: { snr_db: 8 }
+      facts: [laps_left]
+      points: [残り周回数]
+    - id: interrupt
+      say: 俺の平均ペースを教えて
+      voice: eleven:brian
+      facts: [avg_lap]
+      points: [自車の平均ラップ]
+      barge_in:
+        after_s: 1.2
+        say: ストップ、先に前との差
+        facts: [gap_ahead]
+        points: [前の車との差（秒）]
+
+- id: final-laps
+  world: { start_s: 1640, cars: 12, player_idx: 2, laps: 20, player_pit_lap: 9, rival_pit_lap: 7 }
+  calls:
+    - id: can-catch
+      say: ラストだけど、前に追いつける？
+      voice: gemini:Fenrir
+      noise: { snr_db: 15 }
+      facts: [gap_ahead]
+      points: [前との差, 残り周回と推移から見て届きそうかどうか]
+    - id: hesitation
+      say: あのさ……<pause 2.0>……燃料って、最後まで足りてるよね？
+      voice: eleven:brian
+      noise: { snr_db: 16 }
+      facts: []
+      points: [燃料が足りていること]
+    - id: lost-head
+      say: 今の順位とトップとの差は？
+      voice: eleven:sarah
+      noise: { snr_db: 15 }
+      cut_start_s: 0.3
+      behavior: answer_or_ask
+      facts: [gap_leader]
+      points: [首位との差（秒）。聞き取れなければ聞き返すのも可]
+
+- id: dropout
+  world: { start_s: 900, stale_after_start: true, cars: 14, player_idx: 4 }
+  calls:
+    - id: stale-fuel
+      say: 燃料どう？
+      voice: eleven:brian
+      behavior: admit_unknown
+      points: [データが途切れている・古いことを伝え、古い値を現在値として言わない]
+    - id: accidental-press
+      say: ""
+      duration_s: 1.2
+      noise: { snr_db: 5 }
+      behavior: silent
+      points: [発話が無いので、レース情報を勝手に話さない。短い聞き返しは可]

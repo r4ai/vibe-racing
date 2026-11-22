@@ -28,6 +28,11 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ),
     // The voice radio talks to the agent only; the agent runs `vr`.
     ("vr-radio", &[]),
+    // The evaluation puts the radio into a simulated race.
+    (
+        "vr-eval",
+        &["vr-core", "vr-engine", "vr-radio", "vr-replay", "vr-server"],
+    ),
 ];
 
 /// Workspace crate → its workspace dependencies that are not dev-only.
