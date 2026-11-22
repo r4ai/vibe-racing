@@ -27,6 +27,18 @@ pub struct SynthConfig {
     pub yellow: Option<(f64, f64)>,
     /// Session time the player picks up a 2x incident.
     pub incident_at: Option<f64>,
+    /// Lap time lost per lap of tyre age, in seconds; cars differ by ±40 %.
+    pub tyre_deg_s: f64,
+    /// Lap times vary by up to this, in seconds.
+    pub lap_noise_s: f64,
+    /// One lap in this many has a mistake costing 1.5–4 s (0: none).
+    pub mistake_one_in: u32,
+    /// More stops: car index and the lap it pits at the end of.
+    pub stops: Vec<(usize, i32)>,
+    /// Rain: the track is dry before the first session time and fully wet
+    /// from the second one; lap times grow by up to `rain_loss_s`.
+    pub rain: Option<(f64, f64)>,
+    pub rain_loss_s: f64,
 }
 
 impl Default for SynthConfig {
@@ -43,6 +55,12 @@ impl Default for SynthConfig {
             rival_pit_lap: Some(7),
             yellow: Some((300.0, 330.0)),
             incident_at: Some(150.0),
+            tyre_deg_s: 0.0,
+            lap_noise_s: 0.4,
+            mistake_one_in: 0,
+            stops: Vec::new(),
+            rain: None,
+            rain_loss_s: 8.0,
         }
     }
 }
@@ -77,7 +95,11 @@ struct SynthCar {
     lap_start_t: f64,
     last_lap: Option<f64>,
     best_lap: Option<f64>,
-    pit_lap: Option<i32>,
+    pit_laps: Vec<i32>,
+    /// Laps completed when the tyres were last changed.
+    stint_start: i32,
+    /// Tyre wear of this car, in seconds per lap of age.
+    deg_s: f64,
     finished: bool,
     finish_rank: Option<usize>,
 }
@@ -91,8 +113,18 @@ impl SynthCar {
         self.laps_completed as f64 + self.pct
     }
 
-    fn lap_target(&self) -> f64 {
-        self.base_lap + noise(self.idx as u64, self.current_lap() as u64) * 0.4
+    fn lap_target(&self, cfg: &SynthConfig, t: f64) -> f64 {
+        let lap = self.current_lap();
+        let mut target = self.base_lap + noise(self.idx as u64, lap as u64) * cfg.lap_noise_s;
+        target += self.deg_s * f64::from((lap - 1 - self.stint_start).max(0));
+        if cfg.mistake_one_in > 0 {
+            // Uniform in [0, 1): a mistake on 1 lap in `mistake_one_in`.
+            let u = (noise(self.idx as u64 + 1000, lap as u64) + 1.0) / 2.0;
+            if u * f64::from(cfg.mistake_one_in) < 1.0 {
+                target += 1.5 + 2.5 * u * f64::from(cfg.mistake_one_in);
+            }
+        }
+        target + cfg.rain_loss_s * wetness(cfg, t)
     }
 
     /// Progress-rate multiplier: pit lane time loss only applies on pit road.
@@ -106,8 +138,27 @@ impl SynthCar {
     }
 
     fn on_pit_road(&self) -> bool {
-        (self.pit_lap == Some(self.current_lap()) && self.pct > 1.0 - PIT_ROAD_PCT)
-            || (self.pit_lap == Some(self.laps_completed) && self.pct < PIT_ROAD_PCT)
+        (self.pit_laps.contains(&self.current_lap()) && self.pct > 1.0 - PIT_ROAD_PCT)
+            || (self.pit_laps.contains(&self.laps_completed) && self.pct < PIT_ROAD_PCT)
+    }
+}
+
+/// How wet the track is, from 0 (dry) to 1.
+fn wetness(cfg: &SynthConfig, t: f64) -> f64 {
+    match cfg.rain {
+        Some((a, b)) if b > a => ((t - a) / (b - a)).clamp(0.0, 1.0),
+        Some((a, _)) => f64::from(u8::from(t >= a)),
+        None => 0.0,
+    }
+}
+
+/// The game's words for a wetness.
+fn wetness_word(w: f64) -> &'static str {
+    match w {
+        w if w < 0.05 => "dry",
+        w if w < 0.35 => "lightly wet",
+        w if w < 0.7 => "moderately wet",
+        _ => "very wet",
     }
 }
 
@@ -143,13 +194,15 @@ impl SynthSource {
                 } else {
                     90.0 + i as f64 * 0.35
                 };
-                let pit_lap = if i == cfg.player_idx {
+                let first = if i == cfg.player_idx {
                     cfg.player_pit_lap
                 } else if i + 1 == cfg.player_idx {
                     cfg.rival_pit_lap
                 } else {
                     None
                 };
+                let mut pit_laps: Vec<i32> = first.into_iter().collect();
+                pit_laps.extend(cfg.stops.iter().filter(|(c, _)| *c == i).map(|(_, l)| *l));
                 SynthCar {
                     idx: i,
                     base_lap,
@@ -159,7 +212,9 @@ impl SynthSource {
                     lap_start_t: 0.0,
                     last_lap: None,
                     best_lap: None,
-                    pit_lap,
+                    pit_laps,
+                    stint_start: 0,
+                    deg_s: cfg.tyre_deg_s * (1.0 + 0.4 * noise(i as u64, 99)),
                     finished: false,
                     finish_rank: None,
                 }
@@ -199,7 +254,7 @@ impl SynthSource {
             if c.finished {
                 continue;
             }
-            let target = c.lap_target();
+            let target = c.lap_target(&self.cfg, self.t);
             c.pct += dt / target * c.pace_factor();
             if c.idx == player_idx {
                 self.fuel_l = (self.fuel_l - self.cfg.fuel_per_lap_l * dt / target).max(0.0);
@@ -213,8 +268,11 @@ impl SynthSource {
                     c.best_lap = Some(c.best_lap.map_or(lap, |b: f64| b.min(lap)));
                 }
                 c.lap_start_t = self.t;
-                if c.idx == player_idx && c.pit_lap == Some(c.laps_completed) {
-                    self.fuel_l = self.cfg.fuel_capacity_l;
+                if c.pit_laps.contains(&c.laps_completed) {
+                    c.stint_start = c.laps_completed;
+                    if c.idx == player_idx {
+                        self.fuel_l = self.cfg.fuel_capacity_l;
+                    }
                 }
                 if checkered || c.laps_completed >= laps_total {
                     c.finished = true;
@@ -332,12 +390,15 @@ impl SynthSource {
                 oil_temp_c: Some(102.0),
             }),
             cars,
-            weather: Some(Weather {
-                air_temp_c: Some(22.0),
-                track_temp_c: Some(31.0),
-                wetness: Some("dry".into()),
-                precipitation: Some(0.0),
-            }),
+            weather: {
+                let w = wetness(&self.cfg, self.t);
+                Some(Weather {
+                    air_temp_c: Some(22.0 - 3.0 * w),
+                    track_temp_c: Some(31.0 - 8.0 * w),
+                    wetness: Some(wetness_word(w).into()),
+                    precipitation: Some(w),
+                })
+            },
         }
     }
 }
@@ -398,5 +459,99 @@ mod tests {
         let last = frames.last().unwrap();
         assert_eq!(last.session.phase, SessionPhase::Checkered);
         assert!(last.cars.iter().all(|c| c.laps_completed.unwrap() >= 3));
+    }
+
+    fn player_laps(cfg: SynthConfig) -> Vec<f64> {
+        let mut laps = Vec::new();
+        for f in synth_frames(cfg, None) {
+            let p = &f.cars[3];
+            if let Some(l) = p.last_lap_s
+                && laps.len() < p.laps_completed.unwrap_or(0) as usize
+            {
+                laps.push(l);
+            }
+        }
+        laps
+    }
+
+    fn quiet(laps: i32) -> SynthConfig {
+        SynthConfig {
+            laps,
+            lap_noise_s: 0.0,
+            player_pit_lap: None,
+            rival_pit_lap: None,
+            yellow: None,
+            ..Default::default()
+        }
+    }
+
+    /// Defaults keep the race the tests and fixtures were written for.
+    #[test]
+    fn defaults_add_nothing() {
+        let c = SynthConfig::default();
+        assert_eq!(
+            (c.tyre_deg_s, c.lap_noise_s, c.mistake_one_in),
+            (0.0, 0.4, 0)
+        );
+        assert!(c.stops.is_empty() && c.rain.is_none());
+    }
+
+    #[test]
+    fn tyres_wear_until_the_stop() {
+        let deg = 0.3 * (1.0 + 0.4 * noise(3, 99));
+        let laps = player_laps(SynthConfig {
+            tyre_deg_s: 0.3,
+            stops: vec![(3, 7)],
+            ..quiet(10)
+        });
+        // Laps 1..6 lose `deg` per lap of age (times are in 0.1 s steps).
+        let slope = (laps[5] - laps[0]) / 5.0;
+        assert!((slope - deg).abs() < 0.05, "{slope} vs {deg}: {laps:?}");
+        // The stop costs the in and the out lap; then the tyres are new.
+        assert!(laps[6] + laps[7] > 2.0 * laps[5] + 20.0, "{laps:?}");
+        assert!((laps[8] - laps[0]).abs() < 0.25, "{laps:?}");
+    }
+
+    #[test]
+    fn rain_slows_everyone_and_shows_in_the_weather() {
+        let cfg = SynthConfig {
+            rain: Some((200.0, 380.0)),
+            ..quiet(6)
+        };
+        let laps = player_laps(cfg.clone());
+        assert!(laps[5] - laps[0] > 7.0, "{laps:?}");
+        let frames = synth_frames(cfg, Some(400.0));
+        let w = |t: f64| {
+            let f = frames
+                .iter()
+                .find(|f| f.session.time_s >= t)
+                .unwrap()
+                .weather
+                .clone()
+                .unwrap();
+            (f.wetness.unwrap(), f.precipitation.unwrap())
+        };
+        assert_eq!(w(100.0), ("dry".to_string(), 0.0));
+        assert_eq!(w(245.0).0, "lightly wet");
+        assert_eq!(w(290.0).0, "moderately wet");
+        assert_eq!(w(395.0), ("very wet".to_string(), 1.0));
+        assert_eq!(wetness_word(0.049), "dry");
+        assert_eq!(wetness_word(0.05), "lightly wet");
+        assert_eq!(wetness_word(0.35), "moderately wet");
+        assert_eq!(wetness_word(0.7), "very wet");
+    }
+
+    #[test]
+    fn mistakes_cost_whole_seconds_on_a_few_laps() {
+        let laps = player_laps(SynthConfig {
+            mistake_one_in: 4,
+            ..quiet(16)
+        });
+        let slow = laps
+            .iter()
+            .filter(|l| **l > laps[0].min(laps[1]) + 1.4)
+            .count();
+        assert!((1..=8).contains(&slow), "{laps:?}");
+        assert!(laps.iter().all(|l| *l < 90.0 + 4.5), "{laps:?}");
     }
 }

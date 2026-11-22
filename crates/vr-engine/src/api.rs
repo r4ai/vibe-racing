@@ -80,6 +80,7 @@ impl RaceApi for RaceState {
                 nearby: Vec::new(),
                 fuel: None,
                 recent_events: self.event_log().last(5),
+                weather: None,
             });
         };
         let mut nearby = self.nearby(f, None);
@@ -93,6 +94,7 @@ impl RaceApi for RaceState {
             nearby,
             fuel: self.fuel_info(f),
             recent_events: self.event_log().last(5),
+            weather: f.weather.clone(),
         })
     }
 

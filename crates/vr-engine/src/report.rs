@@ -148,6 +148,9 @@ pub struct Brief {
     pub nearby: Vec<RelativeCar>,
     pub fuel: Option<FuelInfo>,
     pub recent_events: Vec<Event>,
+    /// Track and air as the game reports them (absent in older reports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weather: Option<vr_core::Weather>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -156,6 +156,26 @@ fn event_line(e: &Event) -> String {
     )
 }
 
+/// `weather: lightly wet (rain 20%) | air 21.4C | track 29.4C`; `None`
+/// when the game says nothing about it.
+fn weather_line(w: &vr_core::Weather) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(wet) = &w.wetness {
+        let mut p = wet.clone();
+        if let Some(r) = w.precipitation.filter(|r| *r > 0.0) {
+            let _ = write!(p, " (rain {:.0}%)", r * 100.0);
+        }
+        parts.push(p);
+    }
+    if let Some(t) = w.air_temp_c {
+        parts.push(format!("air {t:.1}C"));
+    }
+    if let Some(t) = w.track_temp_c {
+        parts.push(format!("track {t:.1}C"));
+    }
+    (!parts.is_empty()).then(|| format!("weather: {}", parts.join(" | ")))
+}
+
 impl Brief {
     pub fn to_text(&self) -> String {
         let mut out = String::new();
@@ -247,6 +267,9 @@ impl Brief {
         }
         if let Some(f) = &self.fuel {
             let _ = writeln!(out, "{}", fuel_line(f));
+        }
+        if let Some(w) = self.weather.as_ref().and_then(weather_line) {
+            let _ = writeln!(out, "{w}");
         }
         if !self.recent_events.is_empty() {
             out.push_str("recent events:\n");
@@ -486,7 +509,36 @@ mod tests {
             nearby: Vec::new(),
             fuel: None,
             recent_events: Vec::new(),
+            weather: None,
         }
+    }
+
+    #[test]
+    fn weather_line_says_only_what_is_known() {
+        let w = |wetness: Option<&str>, rain: Option<f64>, air: Option<f64>, track: Option<f64>| {
+            weather_line(&vr_core::Weather {
+                air_temp_c: air,
+                track_temp_c: track,
+                wetness: wetness.map(String::from),
+                precipitation: rain,
+            })
+        };
+        assert_eq!(
+            w(Some("lightly wet"), Some(0.2), Some(21.44), Some(29.4)).as_deref(),
+            Some("weather: lightly wet (rain 20%) | air 21.4C | track 29.4C")
+        );
+        assert_eq!(
+            w(Some("dry"), Some(0.0), None, None).as_deref(),
+            Some("weather: dry")
+        );
+        assert_eq!(w(None, Some(0.5), None, None), None);
+        let mut b = brief();
+        assert!(!b.to_text().contains("weather"));
+        b.weather = Some(vr_core::Weather {
+            track_temp_c: Some(31.0),
+            ..Default::default()
+        });
+        assert!(b.to_text().contains("\nweather: track 31.0C\n"));
     }
 
     #[test]
