@@ -833,7 +833,9 @@
     ss.innerHTML = Object.keys(bySet)
       .map((k) => `<option value="${k}">${esc(SETS[k] ?? k)}</option>`)
       .join("");
-    ss.value = Object.keys(bySet).includes(store.get("vr-eval-set")) ? store.get("vr-eval-set") : Object.keys(bySet)[0];
+    ss.value = Object.keys(bySet).includes(store.get("vr-eval-set"))
+      ? store.get("vr-eval-set")
+      : Object.keys(bySet)[0];
     ss.onchange = () => {
       store.set("vr-eval-set", ss.value);
       tradeoff();
