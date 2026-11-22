@@ -4,8 +4,15 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
+/// Trusts the system's certificates (not only Mozilla's): behind a company or
+/// sandbox proxy that re-terminates TLS, the OS knows its CA.
 pub fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .build()
