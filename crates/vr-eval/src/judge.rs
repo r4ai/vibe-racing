@@ -118,6 +118,15 @@ fn expectation(b: Behavior) -> &'static str {
         Behavior::Calm => {
             "ドライバーは動揺している。短い一言で受け止めて落ち着かせ、points に答え、次に集中すべきことを実データに基づいて伝えること。説教、長話、真実に反する励まし（「差は広がっている」等の嘘）は wrong か missing。"
         }
+        Behavior::Setting => {
+            "ラジオの設定（音量・話速・読み上げ・自動連絡）を変える依頼。設定が実際に変わったかは機械で確認済みなので採点しない。依頼を受けたと短く伝え、レース情報について嘘を言わなければ points は correct。受けたことを言わない・断った・別の設定を変えたと言ったら missing。"
+        }
+        Behavior::Call => {
+            "ドライバーは何も言っておらず、レースで出来事があった。エンジニアから自発的に points を短く伝えること。何も言わなければ missing。真実の推移と events を見て、事実と違えば wrong。"
+        }
+        Behavior::Quiet => {
+            "ドライバーは何も言っておらず、知らせるほどの出来事も無い。何も言わないのが正しい。安全か順位・燃料・旗の変化についての事実の一言なら許容し correct。分かりきったことや雑談を話したら wrong。"
+        }
         Behavior::AdmitUnknown => {
             "データは途切れていて古い（DISCONNECTED）。途切れていることを伝えれば correct。古い値を現在値として言ったら wrong。途切れる前の値だと断って言うのは可。"
         }
@@ -185,7 +194,11 @@ pub fn prompt(c: &Case) -> String {
         } else {
             &history
         },
-        c.said,
+        if c.behavior.listening() {
+            "（何も言っていない）"
+        } else {
+            &c.said
+        },
         expectation(c.behavior),
         c.truth_at_question,
         c.truth_between.join("\n"),

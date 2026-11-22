@@ -5,8 +5,11 @@ use vr_core::{
 };
 
 use crate::archive::SessionRecord;
+use crate::chassis::{Chassis, ChassisTracker};
 use crate::handling::HandlingTracker;
 use crate::report::*;
+use crate::strategy::{self, StrategyCall, StrategyReport};
+use crate::trace::{LapTrace, TraceRecorder};
 use crate::util::{mean, now_ms, positive, wrap_half};
 use crate::{Event, EventKind, EventLog};
 
@@ -31,6 +34,11 @@ const FUEL_CHECK_S: f64 = 1.0;
 const LAP_DROP_S: f64 = 1.0;
 /// Session time going back by more than this is a restart.
 const RESTART_S: f64 = 5.0;
+
+/// How often the strategy is looked at without anything having happened.
+const STRATEGY_EVERY_S: f64 = 5.0;
+/// A strategy call is a new one when it did not hold for so long.
+const STRATEGY_FORGET_S: f64 = 60.0;
 
 #[derive(Debug, Clone)]
 struct PendingLap {
@@ -109,6 +117,15 @@ pub struct RaceState {
     session_start_seq: u64,
     extras: Option<Extras>,
     handling: HandlingTracker,
+    traces: TraceRecorder,
+    chassis: ChassisTracker,
+    /// Pit loss of earlier sessions on the track.
+    prior_pit_loss: Option<f64>,
+    /// When a strategy call last held, by key.
+    strategy_calls: BTreeMap<String, f64>,
+    /// When the strategy was looked at.
+    strategy_at: f64,
+    plan: Option<Vec<i32>>,
     adjustments: Vec<Adjustment>,
     /// In-car settings as of the last resting value.
     controls: BTreeMap<String, f64>,
@@ -150,6 +167,12 @@ impl RaceState {
             session_start_seq: 0,
             extras: None,
             handling: HandlingTracker::default(),
+            traces: TraceRecorder::default(),
+            chassis: ChassisTracker::default(),
+            prior_pit_loss: None,
+            strategy_calls: BTreeMap::new(),
+            strategy_at: 0.0,
+            plan: None,
             adjustments: Vec::new(),
             controls: BTreeMap::new(),
             turning: BTreeMap::new(),
@@ -192,6 +215,11 @@ impl RaceState {
     /// Events of the session in progress.
     pub(crate) fn session_events(&self) -> Vec<Event> {
         self.events.since(self.session_start_seq, usize::MAX)
+    }
+
+    /// Laps completed since the last call, place by place.
+    pub fn take_traces(&mut self) -> Vec<LapTrace> {
+        self.traces.take()
     }
 
     /// Sessions that ended since the last call.
@@ -278,6 +306,7 @@ impl RaceState {
         let t = frame.session.time_s;
         let ts = frame.timestamp_ms;
 
+        let before = self.events.last_seq();
         // A restart keeps the session number.
         let restarted = self.session_uid != frame.session.uid
             || self
@@ -308,12 +337,92 @@ impl RaceState {
         self.detect_player_events(&frame);
         self.track_rain(&frame);
         self.handling.ingest(&frame);
+        self.chassis.ingest(&frame);
+        self.traces.ingest(&frame);
         self.detect_car_events(&frame);
 
         self.frame = Some(frame);
         self.ingested_at_ms = Some(now_ms);
         self.frames_ingested += 1;
         self.warn_fuel();
+        // Laps and stops are what changes the strategy.
+        let moved = self.events.since(before, usize::MAX).iter().any(|e| {
+            matches!(
+                e.kind,
+                EventKind::LapCompleted { .. }
+                    | EventKind::PitEntry { .. }
+                    | EventKind::PitExit { .. }
+                    | EventKind::FlagRaised { .. }
+            )
+        });
+        // Others' stops show without an event.
+        let t = self.frame.as_ref().map_or(0.0, |f| f.session.time_s);
+        if moved || !(0.0..STRATEGY_EVERY_S).contains(&(t - self.strategy_at)) {
+            self.strategy_at = t;
+            self.watch_strategy();
+        }
+    }
+
+    /// Track and car, once both are known.
+    pub fn track_and_car(&self) -> Option<(String, String)> {
+        let f = self.frame.as_ref()?;
+        Some((
+            self.session_summary(f).track?,
+            f.player_car()?.car_name.clone()?,
+        ))
+    }
+
+    /// What the wheels did, if the game tells.
+    pub fn chassis(&self) -> Option<Chassis> {
+        self.chassis.get()
+    }
+
+    pub fn set_prior_pit_loss(&mut self, seconds: Option<f64>) {
+        self.prior_pit_loss = seconds;
+    }
+
+    /// The lap the plan stops at the end of, if one is to come.
+    pub(crate) fn next_stop(&self) -> Option<i32> {
+        let lap = self.frame.as_ref()?.player_car()?.lap?;
+        self.plan.as_ref()?.iter().copied().find(|s| *s >= lap)
+    }
+
+    pub(crate) fn strategy_report(&self) -> StrategyReport {
+        strategy::strategy(self, self.prior_pit_loss)
+    }
+
+    /// Tells about strategy calls once, when they begin to hold.
+    fn watch_strategy(&mut self) {
+        let Some((t, ts)) = self
+            .frame
+            .as_ref()
+            .filter(|f| f.session.phase == SessionPhase::Racing)
+            .map(|f| (f.session.time_s, f.timestamp_ms))
+        else {
+            return;
+        };
+        let r = self.strategy_report();
+        let mut advice: Vec<StrategyCall> = r
+            .calls
+            .iter()
+            .filter(|c| !self.strategy_calls.contains_key(&c.key()))
+            .cloned()
+            .collect();
+        // One that comes and goes is told once.
+        for c in &r.calls {
+            self.strategy_calls.insert(c.key(), t);
+        }
+        self.strategy_calls
+            .retain(|_, last| (0.0..STRATEGY_FORGET_S).contains(&(t - *last)));
+        if let Some(stops) = strategy::new_plan(self.plan.as_deref(), &r.plans) {
+            self.plan = Some(stops.clone());
+            advice.push(StrategyCall::Plan { stops });
+        }
+        for a in advice {
+            let text = a.text();
+            self.events
+                .push(t, ts, EventKind::Strategy { advice: a }, text);
+        }
     }
 
     /// Settings, damage, weather: what the driver should hear about.
@@ -452,6 +561,10 @@ impl RaceState {
         self.rain.clear();
         self.session_start_seq = self.events.last_seq();
         self.handling = HandlingTracker::default();
+        self.traces.restart();
+        self.chassis = ChassisTracker::default();
+        self.strategy_calls.clear();
+        self.plan = None;
         self.adjustments.clear();
         self.controls.clear();
         self.turning.clear();

@@ -116,6 +116,27 @@ pub fn foreign(text: &str, language: Option<&str>) -> bool {
         && text.chars().filter(char::is_ascii_alphabetic).count() >= 16
 }
 
+/// Japanese without the blanks that written text puts around numbers and
+/// Latin words. VOICEVOX pauses 0.4 s at every one, and reads `1 分` as two
+/// words. Those between Latin words stay.
+pub fn joined(text: &str) -> String {
+    let wide = |c: Option<char>| c.is_some_and(|c| c >= '\u{2e80}');
+    let mut out = String::with_capacity(text.len());
+    let mut blank = false;
+    for c in text.chars() {
+        if matches!(c, ' ' | '\t' | '\u{3000}') {
+            blank = true;
+            continue;
+        }
+        if blank && !wide(out.chars().next_back()) && !wide(Some(c)) {
+            out.push(' ');
+        }
+        blank = false;
+        out.push(c);
+    }
+    out
+}
+
 /// Removes Markdown and decoration; `None` if nothing is left to say.
 pub fn speakable(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
@@ -140,7 +161,7 @@ pub fn speakable(raw: &str) -> Option<String> {
             out.push(' ');
         }
     }
-    let out = out.trim().to_string();
+    let out = joined(out.trim());
     let has_content = out
         .chars()
         .any(|c| c.is_alphanumeric() || ('\u{3040}'..='\u{9fff}').contains(&c));
@@ -152,9 +173,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blanks_go_where_japanese_begins_or_ends() {
+        assert_eq!(
+            joined("残り 13 周、Ito まで 0.6 秒"),
+            "残り13周、Itoまで0.6秒"
+        );
+        assert_eq!(joined("1 分 30 秒 6"), "1分30秒6");
+        assert_eq!(joined("うしろ　は"), "うしろは");
+        assert_eq!(joined("A. Senna と Demo Raceway"), "A. SennaとDemo Raceway");
+        assert_eq!(joined("a  b"), "a b");
+        assert_eq!(joined("前は 0.6\n後ろは 0.8"), "前は0.6\n後ろは0.8");
+        assert_eq!(joined(" 前 "), "前");
+        // The first character that counts as Japanese.
+        assert_eq!(joined("a \u{2e80}"), "a\u{2e80}");
+        assert_eq!(joined("a \u{2e7f}"), "a \u{2e7f}");
+    }
+
+    #[test]
     fn the_first_clause_is_spoken_early_and_only_the_first() {
         let mut s = SentenceSplitter::default();
-        assert_eq!(s.push("前の Ito まで 0.6 秒、"), ["前の Ito まで 0.6 秒、"]);
+        assert_eq!(s.push("前の Ito まで 0.6 秒、"), ["前のItoまで0.6秒、"]);
         assert!(s.push("毎周 0.4 秒ずつ詰めてる、").is_empty());
         assert_eq!(s.push("2 周で射程内。").len(), 1);
         // Five characters and the comma are enough, fewer are not (了解、).
@@ -201,11 +239,7 @@ mod tests {
                 "6、毎周 0.4 詰めてる",
                 "。2 周で射程内。"
             ]),
-            vec![
-                "前の Ito まで 0.6、",
-                "毎周 0.4 詰めてる。",
-                "2 周で射程内。"
-            ]
+            vec!["前のItoまで0.6、", "毎周0.4詰めてる。", "2周で射程内。"]
         );
     }
 
@@ -213,7 +247,7 @@ mod tests {
     fn emits_only_completed_sentences_while_streaming() {
         let mut s = SentenceSplitter::default();
         assert!(s.push("燃料はあと").is_empty());
-        assert_eq!(s.push("5 周。給油"), vec!["燃料はあと5 周。"]);
+        assert_eq!(s.push("5 周。給油"), vec!["燃料はあと5周。"]);
         assert_eq!(s.finish().as_deref(), Some("給油"));
         assert_eq!(s.finish(), None);
     }
@@ -259,15 +293,15 @@ mod tests {
     fn strips_markdown() {
         assert_eq!(
             speakable("## **前**との差は `0.6` 秒").as_deref(),
-            Some("前との差は 0.6 秒")
+            Some("前との差は0.6秒")
         );
-        assert_eq!(speakable("- 燃料 OK").as_deref(), Some("燃料 OK"));
+        assert_eq!(speakable("- 燃料 OK").as_deref(), Some("燃料OK"));
         assert_eq!(speakable("| a | b |").as_deref(), Some("a b"));
     }
 
     #[test]
     fn lines_join_with_single_spaces() {
-        assert_eq!(speakable("前\n後").as_deref(), Some("前 後"));
+        assert_eq!(speakable("前\n後").as_deref(), Some("前後"));
         assert_eq!(speakable("a \nb").as_deref(), Some("a b"));
         assert_eq!(speakable("\n\nb").as_deref(), Some("b"));
     }

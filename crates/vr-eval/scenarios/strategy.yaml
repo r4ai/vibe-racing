@@ -1,0 +1,89 @@
+# Stops, undercuts and tyre life, in races whose truth is known.
+# See docs/architecture.md for the fields.
+
+- id: undercut
+  world:
+    start_s: 1180
+    laps: 30
+    tyre_deg_s: 0.2
+    lap_noise_s: 0.15
+    fuel_start_l: 90
+    player_pit_lap: null
+    rival_pit_lap: null
+    yellow: null
+    stops: [[6, 8], [7, 9], [8, 9], [9, 10]]
+  calls:
+    - id: when
+      say: ピットいつ入る？
+      facts: [stop_lap]
+      points:
+        [止まる周（データの最速案か、1 秒以内の次点）, 理由となる数字（落ち方・損失・後ろの車など）]
+    - id: cost
+      say: ピット入ったら何秒失う？
+      facts: [pit_loss]
+      points: [ピットの損失（秒）]
+    - id: rejoin
+      say: 今入ったら何番手で戻れる？
+      facts: [rejoin]
+      points: [戻る順位, 前か後ろの車との近さ（渋滞）に触れるのは可]
+    - id: threat
+      say: 後ろが先に入ったらやられる？
+      points: [後ろの車が先に入ったときの得失を根拠に、危険かどうかを言う, 応じる期限か稼ぎの秒数]
+    - id: chance
+      say: 前の車、アンダーカットできる？
+      points: [できない（差に対して稼ぎが足りない）こと, 差と稼ぎの数字]
+    - id: fade
+      say: タイヤどれくらい落ちてきてる？
+      points: [1 周あたりのタイムの落ち（秒）]
+    - id: none
+      say: ピット入らずに最後まで行くのはどう？
+      points: [止まる案より遅いこと, 何秒遅いか、または落ちの理由]
+
+- id: no-stops-yet
+  world:
+    start_s: 620
+    laps: 30
+    tyre_deg_s: 0.15
+    lap_noise_s: 0.15
+    fuel_start_l: 32
+    player_pit_lap: null
+    rival_pit_lap: null
+    yellow: null
+    stops: []
+  calls:
+    - id: plan
+      say: 作戦どうする？
+      points:
+        [
+          燃料で止まる必要があること、または燃料が何周目まで持つか,
+          まだ誰も止まっておらず損失が分からない、または分からないことを断定していない,
+        ]
+    - id: stretch
+      say: どこまで引っ張れる？
+      points: [燃料が持つ周（周目か残り周数）]
+
+- id: stopped-behind
+  proactive: true
+  world:
+    start_s: 1240
+    laps: 30
+    tyre_deg_s: 0.2
+    lap_noise_s: 0.15
+    fuel_start_l: 90
+    player_pit_lap: null
+    rival_pit_lap: null
+    yellow: null
+    stops: [[6, 8], [7, 9], [8, 9], [1, 14]]
+  calls:
+    - id: answer
+      behavior: call
+      event_at: 1275
+      listen_until: 1330
+      points:
+        [
+          後ろの 9 号車 Hart（B. Hart）が先に止まったことへの対応、またはこの周・次の周に止まる提案,
+          行動か期限を言っている,
+        ]
+    - id: ask
+      say: どうすればいい？
+      points: [止まる提案（この周か、あと 1〜3 周以内）, 根拠の数字]

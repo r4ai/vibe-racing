@@ -25,6 +25,11 @@ pub use session_info::{SessionInfo, sanitize_yaml};
 pub use shm::SharedMemory;
 pub use source::IRacingSource;
 
+/// Where the game writes its telemetry files, in the user's documents.
+pub fn telemetry_dir(documents: &std::path::Path) -> std::path::PathBuf {
+    documents.join("iRacing").join("telemetry")
+}
+
 /// Open the live iRacing telemetry (Windows only).
 pub fn open_live() -> Result<IRacingSource<shm::Mapped>, vr_core::SourceError> {
     Ok(IRacingSource::new(shm::Mapped::open()?))

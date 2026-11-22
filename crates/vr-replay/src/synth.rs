@@ -3,10 +3,21 @@ use std::time::Duration;
 use vr_core::{
     Capabilities, CarState, CarTelemetry, Channel, Control, Extras, Flag, Frame, PitState,
     PlayerTelemetry, Poll, SessionKind, SessionPhase, SessionState, Setup, SetupItem, SourceError,
-    TelemetrySource, TrackInfo, TrackSurface, Tyre, Tyres, Weather,
+    TelemetrySource, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather,
 };
 
 use crate::Pacer;
+
+/// How the player's car misbehaves, in seconds per lap.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Balance {
+    /// Steering more without turning more, off the pedals.
+    pub understeer_mid_s: f64,
+    /// Steering against the turn, on the throttle.
+    pub oversteer_exit_s: f64,
+    pub rear_lock_s: f64,
+    pub wheelspin_s: f64,
+}
 
 /// Parameters of the generated race.
 #[derive(Debug, Clone)]
@@ -40,6 +51,10 @@ pub struct SynthConfig {
     /// from the second one; lap times grow by up to `rain_loss_s`.
     pub rain: Option<(f64, f64)>,
     pub rain_loss_s: f64,
+    /// Corners in the player's telemetry; `None`: driving straight on.
+    pub balance: Option<Balance>,
+    /// Session time the player's car is damaged, and how long the crew needs.
+    pub damage: Option<(f64, f64)>,
 }
 
 impl Default for SynthConfig {
@@ -62,6 +77,8 @@ impl Default for SynthConfig {
             stops: Vec::new(),
             rain: None,
             rain_loss_s: 8.0,
+            balance: None,
+            damage: None,
         }
     }
 }
@@ -394,7 +411,8 @@ impl SynthSource {
                 water_temp_c: Some(88.0),
                 oil_temp_c: Some(102.0),
                 car: self.car_telemetry(),
-            }),
+            })
+            .map(|p| self.driven(p)),
             cars,
             weather: {
                 let w = wetness(&self.cfg, self.t);
@@ -442,6 +460,11 @@ impl SynthSource {
                 open: Some(true),
                 fast_repairs_available: Some(1),
                 fast_repairs_used: Some(0),
+                repair_left_s: self
+                    .cfg
+                    .damage
+                    .filter(|(at, _)| self.t >= *at)
+                    .map(|(_, s)| s),
                 ..Default::default()
             },
             controls: vec![
@@ -454,10 +477,64 @@ impl SynthSource {
                     value: 3.0,
                 },
             ],
+            warnings: match self.cfg.damage {
+                Some((at, _)) if self.t >= at => vec![Warning::Damage],
+                _ => Vec::new(),
+            },
             p2p_count: Some(200),
             p2p_active: Some(false),
             ..Default::default()
         }
+    }
+}
+
+/// Corners of a lap, all alike.
+const CORNERS: f64 = 10.0;
+/// Understeer shows only after the car was followed for this long, a slide
+/// once the steering is smoothed.
+const NOTICE_S: f64 = 0.2;
+const SMOOTH_S: f64 = 0.1;
+
+impl SynthSource {
+    /// The inputs and motion of a corner of `balance`: brakes, coasts, gets on
+    /// the throttle. Each tendency lasts its share of the lap.
+    fn driven(&self, mut p: PlayerTelemetry) -> PlayerTelemetry {
+        let Some(b) = self.cfg.balance else { return p };
+        let car = &self.cars[self.cfg.player_idx];
+        let corner_s = car.base_lap / CORNERS;
+        // Seconds since the corner began.
+        let s = (car.pct * CORNERS).fract() * corner_s;
+        let (brake_s, mid_s, exit_s) = (1.5, 2.5, 2.0);
+        let c = &mut p.car;
+        let turning = |c: &mut CarTelemetry, steer: f64, yaw: f64| {
+            c.steering_rad = Some(steer);
+            c.yaw_rate_rps = Some(yaw);
+            c.lat_accel_mps2 = Some(20.0);
+        };
+        p.throttle = Some(0.9);
+        if s < brake_s {
+            (p.throttle, p.brake) = (Some(0.0), Some(0.8));
+            if s < b.rear_lock_s / CORNERS {
+                p.rpm = p.rpm.map(|r| r * 0.85);
+            }
+        } else if s < brake_s + mid_s {
+            let s = s - brake_s;
+            p.throttle = Some(0.0);
+            // The wheel goes on turning, the car does not.
+            let more = if b.understeer_mid_s > 0.0 {
+                s.min(b.understeer_mid_s / CORNERS + NOTICE_S)
+            } else {
+                0.0
+            };
+            turning(c, 0.1 + 0.5 * more, 0.4 - 0.05 * more);
+        } else if s < brake_s + mid_s + exit_s {
+            let s = s - brake_s - mid_s;
+            let caught = b.oversteer_exit_s > 0.0 && s < b.oversteer_exit_s / CORNERS + SMOOTH_S;
+            turning(c, if caught { -0.1 } else { 0.1 }, 0.4);
+        } else if s < brake_s + mid_s + exit_s + b.wheelspin_s / CORNERS {
+            p.rpm = p.rpm.map(|r| r * 1.15);
+        }
+        p
     }
 }
 
@@ -622,6 +699,21 @@ mod tests {
         assert_eq!(wetness_word(0.05), "lightly wet");
         assert_eq!(wetness_word(0.35), "moderately wet");
         assert_eq!(wetness_word(0.7), "very wet");
+    }
+
+    #[test]
+    fn damage_needs_the_crew() {
+        let cfg = SynthConfig {
+            damage: Some((20.0, 35.0)),
+            ..quiet(2)
+        };
+        let repair = |t: f64| {
+            let f = synth_frames(cfg.clone(), Some(t)).pop().unwrap();
+            let car = f.player.unwrap().car;
+            (car.pit.repair_left_s, car.warnings)
+        };
+        assert_eq!(repair(19.0), (None, vec![]));
+        assert_eq!(repair(20.5), (Some(35.0), vec![Warning::Damage]));
     }
 
     #[test]

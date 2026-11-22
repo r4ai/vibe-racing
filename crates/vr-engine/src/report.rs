@@ -8,6 +8,7 @@ use vr_core::{
 
 use crate::Event;
 use crate::advice::Advice;
+use crate::garage::Experiment;
 use crate::handling::{Behaviour, HandlingLap, Zone};
 
 /// How the data behind a response was obtained.
@@ -321,6 +322,9 @@ pub struct HandlingReport {
     pub controls: Vec<Control>,
     pub adjustments: Vec<Adjustment>,
     pub advice: Vec<Advice>,
+    /// What the changes while driving did.
+    #[serde(default)]
+    pub experiments: Vec<Experiment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

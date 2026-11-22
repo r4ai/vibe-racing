@@ -36,6 +36,7 @@ fn main() -> iced::Result {
         // One question, then gone: nothing is started for it.
         config.serve.clear();
         config.watch.clear();
+        config.live.clear();
         config.voicevox = Some(String::new());
         let code = ask_once(config, question);
         std::process::exit(code);

@@ -1,0 +1,90 @@
+# Held out: looked at only to confirm a change made on features.yaml.
+
+- id: car-h
+  world: { start_s: 1010, damage: [930, 48] }
+  calls:
+    - id: rubber
+      say: ゴムまだいける？何パーセント？
+      voice: vv:8
+      facts: [tyre_tread]
+      points: [タイヤの残り（％）]
+    - id: repair
+      say: どっか壊れてる？修理時間は？
+      voice: gemini:Puck
+      facts: [repair_s]
+      points: [修理が要ること, 必須の修理の秒数]
+    - id: push
+      say: プッシュトゥパスの残り教えて。
+      voice: vv:8
+      facts: [p2p]
+      points: [残り回数]
+
+- id: snap
+  world:
+    { start_s: 760, player_pit_lap: null, balance: { oversteer_exit_s: 2.5, wheelspin_s: 1.2 } }
+  calls:
+    - id: exits
+      say: アクセル開けると後ろが出る。何を変えたらいい？
+      voice: gemini:Puck
+      noise: { snr_db: 18 }
+      points: [トラコンの介入を強めるか、リアを落ち着かせる変更（suggestions と同じ向き）]
+    - id: bias-value
+      say: BB今いくつに入ってる？
+      voice: vv:8
+      facts: [brake_bias]
+      points: [ブレーキバイアスの値]
+
+- id: earlier
+  world: { start_s: 620, past: [{ days_ago: 2, laps: 7, player_idx: 2, fuel_per_lap_l: 2.2 }] }
+  calls:
+    - id: best-back-then
+      say: この間ここで走ったときの最速ラップは？
+      voice: vv:8
+      facts: [past_best]
+      points: [2 日前のレースのベストラップ]
+    - id: how-many-laps
+      say: そのとき何周走った？
+      voice: gemini:Puck
+      points: [2 日前のレースで走った周回数]
+
+- id: settings-h
+  world: { start_s: 620 }
+  calls:
+    - id: quiet-voice
+      say: 声が小さくて聞き取れない。
+      voice: vv:8
+      behavior: setting
+      settings: [volume>100]
+      points: [音量を上げたと伝える]
+    - id: stop-calling
+      say: しばらくそっちから話しかけないで。
+      voice: gemini:Puck
+      behavior: setting
+      settings: [proactive=off]
+      points: [自分からの連絡を止めると受ける]
+    - id: slower
+      say: 喋るのちょっと遅くして。
+      voice: vv:8
+      behavior: setting
+      settings: [speed<1.2]
+      points: [話す速さを下げたと伝える]
+    - id: fuel
+      say: 燃料は何周ぶん残ってる？
+      voice: gemini:Puck
+      facts: [fuel_laps]
+      points: [燃料があと何周もつか]
+
+- id: calls-h
+  proactive: true
+  world: { start_s: 420, yellow: [470, 560], incident_at: null }
+  calls:
+    - id: flag
+      behavior: call
+      event_at: 470
+      listen_until: 500
+      points: [イエロー（黄旗）が出たこと]
+    - id: green-again
+      behavior: call
+      event_at: 560
+      listen_until: 590
+      points: [イエローが解除されたこと（グリーンに戻ったこと）]

@@ -7,6 +7,15 @@ use anyhow::{Result, bail};
 /// Trusts the system's certificates (not only Mozilla's): behind a company or
 /// sandbox proxy that re-terminates TLS, the OS knows its CA.
 pub fn agent(timeout: Duration) -> ureq::Agent {
+    builder(timeout).build().into()
+}
+
+/// Keeps unused connections open for `keep`.
+pub fn agent_keeping(timeout: Duration, keep: Duration) -> ureq::Agent {
+    builder(timeout).max_idle_age(keep).build().into()
+}
+
+fn builder(timeout: Duration) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     ureq::Agent::config_builder()
         .tls_config(
             ureq::tls::TlsConfig::builder()
@@ -15,8 +24,6 @@ pub fn agent(timeout: Duration) -> ureq::Agent {
         )
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
-        .build()
-        .into()
 }
 
 /// Fails with the status and (truncated) body unless the response is 2xx.

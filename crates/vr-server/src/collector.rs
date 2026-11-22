@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use vr_core::{Poll, SourceError, SourceFactory};
-use vr_engine::{Event, SessionRecord, SharedState};
+use vr_engine::{Event, LapTrace, SessionRecord, SharedState};
 use vr_replay::Recorder;
 
 use crate::SessionStore;
@@ -54,6 +54,7 @@ pub fn spawn_collector(
         .name("vr-collector".into())
         .spawn(move || {
             let mut warned = false;
+            let mut place = None;
             while !stop.load(Ordering::Relaxed) {
                 let mut src = match factory() {
                     Ok(s) => s,
@@ -99,17 +100,20 @@ pub fn spawn_collector(
                                 .is_none_or(|t| t.elapsed() >= EXTRAS_EVERY)
                                 .then(|| src.extras())
                                 .flatten();
-                            let (new_events, finished) = match state.write() {
+                            let (new_events, finished, laps, at) = match state.write() {
                                 Ok(mut st) => {
                                     let before = st.event_log().last_seq();
                                     st.ingest(*f);
                                     // Ended sessions keep their own extras.
                                     let finished = st.take_finished();
+                                    let at = st.track_and_car();
                                     if let Some(e) = extras {
                                         last_extras = Some(Instant::now());
                                         st.set_extras(e);
                                     }
-                                    (st.event_log().since(before, usize::MAX), finished)
+                                    let laps = st.take_traces();
+                                    let events = st.event_log().since(before, usize::MAX);
+                                    (events, finished, laps, at)
                                 }
                                 Err(_) => return,
                             };
@@ -117,13 +121,22 @@ pub fn spawn_collector(
                                 tracing::info!("event: {}", e.text);
                                 let _ = events.send(e);
                             }
+                            if at.is_some() && at != place {
+                                place = at;
+                                if let (Some(p), Some(s)) = (place.clone(), &cfg.sessions) {
+                                    recall_pit_loss(s.clone(), p, state.clone());
+                                }
+                            }
                             if let Some(store) = &cfg.sessions {
                                 for r in finished {
                                     keep(store, r);
                                 }
-                                if last_save.elapsed() >= cfg.save_every {
+                                if last_save.elapsed() >= cfg.save_every || !laps.is_empty() {
                                     last_save = Instant::now();
-                                    keep_current(store, &state);
+                                    let id = keep_current(store, &state);
+                                    for lap in laps {
+                                        keep_lap(store, id.as_deref(), &lap);
+                                    }
                                 }
                             }
                         }
@@ -162,17 +175,39 @@ pub fn spawn_collector(
 /// How often the values that are not in every frame are refreshed.
 const EXTRAS_EVERY: Duration = Duration::from_secs(1);
 
-fn keep(store: &SessionStore, r: SessionRecord) {
-    if let Err(e) = store.save(r) {
-        tracing::warn!("session not saved: {e:#}");
+/// Saves a session and returns its id.
+fn keep(store: &SessionStore, r: SessionRecord) -> Option<String> {
+    match store.save(r) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!("session not saved: {e:#}");
+            None
+        }
     }
 }
 
-fn keep_current(store: &SessionStore, state: &SharedState) {
-    let record = state.read().ok().and_then(|st| SessionRecord::of(&st));
-    if let Some(r) = record {
-        keep(store, r);
+/// What stops cost on the track in earlier sessions. Reads them all: not on
+/// the thread the telemetry arrives on.
+fn recall_pit_loss(store: SessionStore, place: (String, String), state: SharedState) {
+    std::thread::spawn(move || {
+        let loss = store.pit_loss(&place.0, &place.1);
+        if let Ok(mut st) = state.write() {
+            st.set_prior_pit_loss(loss);
+        }
+    });
+}
+
+fn keep_lap(store: &SessionStore, id: Option<&str>, lap: &LapTrace) {
+    if let Some(id) = id
+        && let Err(e) = store.save_trace(id, lap)
+    {
+        tracing::warn!("lap not saved: {e:#}");
     }
+}
+
+fn keep_current(store: &SessionStore, state: &SharedState) -> Option<String> {
+    let record = state.read().ok().and_then(|st| SessionRecord::of(&st));
+    keep(store, record?)
 }
 
 fn set_connected(state: &SharedState, c: bool) {

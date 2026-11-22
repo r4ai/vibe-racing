@@ -246,6 +246,33 @@ pub struct CarTelemetry {
     /// Cars alongside, e.g. `"left"`, as the game's spotter sees them.
     pub alongside: Option<String>,
     pub team_incidents: Option<i32>,
+    /// What each wheel does, where the game tells it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wheels: Option<Wheels>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Wheels {
+    pub lf: Wheel,
+    pub rf: Wheel,
+    pub lr: Wheel,
+    pub rr: Wheel,
+}
+
+/// One wheel at this moment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Wheel {
+    /// Of the tread: what the car would drive if the wheel did not slip.
+    pub speed_mps: Option<f64>,
+    pub pressure_kpa: Option<f64>,
+    /// Outer edge, middle, inner edge.
+    pub surface_c: [Option<f64>; 3],
+    pub ride_height_m: Option<f64>,
+    /// Positive in bump.
+    pub shock_mps: Option<f64>,
+    pub brake_bar: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

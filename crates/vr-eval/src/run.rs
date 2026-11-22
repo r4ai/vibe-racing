@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,12 +14,14 @@ use vr_radio::agent::{TokenUsage, Turn};
 use vr_radio::app;
 use vr_radio::audio::{Output, Recorder, Recording};
 use vr_radio::config::Config;
-use vr_radio::engine::{Command, Event, Outcome};
+use vr_radio::engine::{Command, Event, Outcome, STANDBY};
 use vr_radio::voicevox::{Synth, Voicevox};
+use vr_radio::watch::Follow;
 
 use crate::audio::{RATE, Spec, Utterance, Voices, wav_seconds};
 use crate::facts::{Fact, Sample};
 use crate::scenario::{Behavior, Call, Stint, strip_pauses};
+use crate::setting;
 use crate::world::World;
 
 /// The driver is busy between joining and the first call.
@@ -79,6 +82,12 @@ pub struct Record {
     /// What the session had cost when the call was over, as the agent says.
     #[serde(default)]
     pub session_cost: Option<(f64, String)>,
+    /// Settings of the radio that were changed, in order.
+    #[serde(default)]
+    pub settings: Vec<(String, String)>,
+    /// Whether they are the ones the call was for (absent in older records).
+    #[serde(default)]
+    pub settings_met: Option<bool>,
 }
 
 /// Token counts of one or more turns.
@@ -114,6 +123,19 @@ impl Record {
 
     pub fn first_audio_s(&self) -> Option<f64> {
         self.heard.first().map(|h| h.start_s)
+    }
+
+    /// The first words of the answer itself.
+    pub fn answer_audio_s(&self) -> Option<f64> {
+        self.heard
+            .iter()
+            .find(|h| h.text != STANDBY)
+            .map(|h| h.start_s)
+    }
+
+    /// Whether the driver was told to wait.
+    pub fn announced(&self) -> bool {
+        self.heard.iter().any(|h| h.text == STANDBY)
     }
 }
 
@@ -253,6 +275,7 @@ struct Observed {
     /// Kept when a turn is replaced: the cancelled one was paid for too.
     tokens: Option<Tokens>,
     cost: Option<(f64, String)>,
+    settings: Vec<(String, String)>,
 }
 
 impl Observed {
@@ -260,9 +283,10 @@ impl Observed {
         let mine = |t: Turn, me: &Option<Turn>| *me == Some(t);
         match e {
             // A new turn replaces an interrupted one.
-            Event::TurnStarted { turn } => {
+            Event::TurnStarted { turn } | Event::CallStarted { turn, .. } => {
                 *self = Observed {
                     turn: Some(turn),
+                    settings: std::mem::take(&mut self.settings),
                     errors: std::mem::take(&mut self.errors),
                     tokens: self.tokens.take(),
                     cost: self.cost.take(),
@@ -285,6 +309,7 @@ impl Observed {
                 self.outcome = Some(outcome)
             }
             Event::Error(e) => self.errors.push(e),
+            Event::Setting(s) => self.settings.push(setting::pair(&s)),
             Event::Usage { usage, .. } => self.tokens.get_or_insert_default().add(&usage),
             Event::Cost { amount, currency } => self.cost = Some((amount, currency)),
             _ => {}
@@ -293,7 +318,7 @@ impl Observed {
 }
 
 impl Radio {
-    fn start(cfg: &Config) -> Self {
+    fn start(cfg: &Config, proactive: bool) -> Self {
         let texts = Arc::new(Mutex::new(HashMap::new()));
         let mic = Arc::new(FakeMic::default());
         let speakers = Arc::new(FakeSpeakers {
@@ -309,7 +334,10 @@ impl Radio {
         });
         let (cmds, cmd_rx) = unbounded_channel();
         let (ev_tx, events) = unbounded_channel();
-        let deps = app::deps(cfg, mic.clone(), speakers.clone(), synth);
+        let mut deps = app::deps(cfg, mic.clone(), speakers.clone(), synth);
+        if proactive {
+            deps.watch = Follow::start(&cfg.watch, cfg.agent_cwd());
+        }
         tokio::spawn(vr_radio::engine::run(deps, cmd_rx, ev_tx));
         Self {
             cmds,
@@ -390,11 +418,16 @@ pub struct Runner {
     pub port: u16,
     /// Typed questions instead of voices.
     pub text: bool,
+    /// Where the past sessions are put (`VR_SESSIONS`).
+    pub sessions: Option<PathBuf>,
 }
 
 /// Calls of a stint in text mode: a call without words has nothing to type.
 pub fn typed_calls(stint: &Stint) -> impl Iterator<Item = &Call> {
-    stint.calls.iter().filter(|c| !c.typed_words().is_empty())
+    stint
+        .calls
+        .iter()
+        .filter(|c| c.behavior.listening() || !c.typed_words().is_empty())
 }
 
 impl Runner {
@@ -406,11 +439,14 @@ impl Runner {
             stint
                 .calls
                 .iter()
-                .map(|c| Ok((c, Some(self.utterances(c)?))))
+                .map(|c| match c.behavior.listening() {
+                    true => Ok((c, None)),
+                    false => Ok((c, Some(self.utterances(c)?))),
+                })
                 .collect::<Result<Vec<_>>>()?
         };
-        let world = World::start(&stint.world, self.port).await?;
-        let mut radio = Radio::start(&self.cfg);
+        let world = World::start(&stint.world, self.port, self.sessions.as_deref()).await?;
+        let mut radio = Radio::start(&self.cfg, stint.proactive);
         radio.ready().await?;
         let mut seen = Observed::default();
         radio.follow(SETTLE, &mut seen).await?;
@@ -476,6 +512,9 @@ impl Runner {
         let mut seen = Observed::default();
         let mut question_end = match voices {
             Some((main, _)) => radio.say(main, &mut seen).await?,
+            None if call.behavior.listening() => world
+                .instant_of(call.event_at.unwrap_or(0.0))
+                .max(Instant::now()),
             None => radio.type_in(&call.typed_words()),
         };
         let (mut said, mut facts, mut points) =
@@ -498,8 +537,20 @@ impl Runner {
             facts = b.facts.clone();
             points = b.points.clone();
         }
-        let truth_at_question = world.text();
-        radio.answer(&mut seen).await?;
+        let mut truth_at_question = world.text();
+        if let Some(until) = call.listen_until {
+            let until = world.instant_of(until);
+            radio
+                .follow(until.saturating_duration_since(Instant::now()), &mut seen)
+                .await?;
+            truth_at_question = world.text_before(question_end);
+            // A call may still be spoken.
+            if seen.turn.is_some() {
+                radio.answer(&mut seen).await?;
+            }
+        } else {
+            radio.answer(&mut seen).await?;
+        }
         let _ = radio.cmds.send(Command::Cancel);
 
         let since = |t: Instant| {
@@ -554,6 +605,8 @@ impl Runner {
             tokens: seen.tokens,
             primer_tokens: None,
             session_cost: seen.cost,
+            settings_met: Some(setting::met(&call.settings, &seen.settings)),
+            settings: seen.settings,
         })
     }
 }
@@ -578,7 +631,7 @@ fn each_second(samples: &[Sample]) -> Vec<String> {
 /// fact, or of the first sentence when nothing is checked by number.
 fn informed_s(facts: &[Fact], heard: &[Heard], samples: &[Sample]) -> Option<f64> {
     let Some(fact) = facts.first() else {
-        return heard.first().map(|h| h.end_s);
+        return heard.iter().find(|h| h.text != STANDBY).map(|h| h.end_s);
     };
     let mut said = String::new();
     heard.iter().find_map(|h| {
@@ -613,6 +666,9 @@ mod tests {
         assert_eq!(informed_s(&[Fact::FuelAdd], &h, &s), None);
         assert_eq!(informed_s(&[], &h, &s), Some(2.0));
         assert_eq!(informed_s(&[], &[], &s), None);
+        // Being told to wait informs nobody.
+        let h = [heard(STANDBY, 1.0, 2.0), heard("4位。", 4.0, 5.0)];
+        assert_eq!(informed_s(&[], &h, &s), Some(5.0));
     }
 
     #[test]

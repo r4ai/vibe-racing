@@ -230,6 +230,90 @@ fn finite_sources_are_read_into_sessions() {
     let mut st = RaceState::new("synthetic", SourceKind::Replay, Capabilities::ALL);
     let got = read_sessions(&mut src, &mut st).unwrap();
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].laps_completed, 2);
-    assert!(got[0].setup.is_some());
+    let (r, laps) = &got[0];
+    assert_eq!(r.laps_completed, 2);
+    assert!(r.setup.is_some());
+    // The first lap starts on the grid, ahead of the line.
+    assert_eq!(laps.len(), 2);
+    assert_eq!((laps[0].lap, laps[1].lap), (1, 2));
+    for (lap, kept) in laps.iter().zip(&r.laps) {
+        assert_eq!(lap.speed.len(), vr_engine::TRACE_POINTS);
+        assert!((lap.time_s - kept.time_s.unwrap()).abs() < 0.2, "{lap:?}");
+    }
+}
+
+#[test]
+fn laps_are_kept_next_to_their_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let mut src = SynthSource::new(
+        SynthConfig {
+            laps: 2,
+            ..Default::default()
+        },
+        0.0,
+    );
+    let mut st = RaceState::new("synthetic", SourceKind::Replay, Capabilities::ALL);
+    let (r, laps) = read_sessions(&mut src, &mut st).unwrap().remove(0);
+    let id = store.save(r).unwrap();
+    assert!(store.traces(&id).is_empty());
+    for lap in &laps {
+        store.save_trace(&id, lap).unwrap();
+    }
+    // Again, with another time: it replaces the first.
+    let again = LapTrace {
+        time_s: 91.2345,
+        pit: true,
+        ..laps[0].clone()
+    };
+    store.save_trace(&id, &again).unwrap();
+    let lines = store.traces(&id);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        lines[0],
+        TraceLine {
+            lap: 1,
+            time_s: 91.235,
+            pit: true
+        }
+    );
+    assert_eq!(store.trace(&id, 1), Some(again));
+    assert_eq!(store.trace(&id, 3), None);
+    // The sessions are still listed, and a deleted one takes its laps along.
+    assert_eq!(store.list().len(), 1);
+    store.delete(&id).unwrap();
+    assert!(store.traces(&id).is_empty());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn the_pit_loss_is_that_of_the_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    assert_eq!(store.pit_loss("Spa", "GT3"), None);
+    let race = |id: &str, started: i64, track: &str, car: &str, in_lap: f64| {
+        let mut r = record(id, started);
+        (r.track, r.car) = (Some(track.into()), Some(car.into()));
+        r.others.clear();
+        let lap = r.laps[0].clone();
+        r.laps = (1..=12)
+            .map(|n| LapRecord {
+                lap: n,
+                time_s: Some(if n == 6 { in_lap } else { 90.0 }),
+                pit: n == 6 || n == 7,
+                caution: false,
+                ..lap.clone()
+            })
+            .collect();
+        store.save(r).unwrap();
+    };
+    race("20260101-000000-race-a", 1_000_000, "Spa", "GT3", 110.0);
+    race("20260102-000000-race-a", 2_000_000, "Spa", "GT3", 112.0);
+    race("20260103-000000-race-a", 3_000_000, "Spa", "SF23", 115.0);
+    race("20260104-000000-race-a", 4_000_000, "Monza", "GT3", 120.0);
+    assert_eq!(store.pit_loss("Spa", "GT3"), Some(22.0));
+    assert_eq!(store.pit_loss("Spa", "SF23"), Some(25.0));
+    // Another car is better than nothing.
+    assert_eq!(store.pit_loss("Spa", "MX-5"), Some(25.0));
+    assert_eq!(store.pit_loss("Suzuka", "GT3"), None);
 }

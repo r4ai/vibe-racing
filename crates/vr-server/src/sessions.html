@@ -5,172 +5,923 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>過去のセッション</title>
     <style>
+      /* shadcn/ui, zinc. */
       :root {
-        --bg: #fafafa;
-        --panel: #fff;
-        --line: #e4e4e7;
-        --text: #18181b;
-        --dim: #71717a;
-        --accent: #2563eb;
-        --warn: #b45309;
+        color-scheme: light dark;
+        --background: oklch(1 0 0);
+        --foreground: oklch(0.141 0.005 285.823);
+        --soft: oklch(0.37 0.013 285.805);
+        --muted: oklch(0.967 0.001 286.375);
+        --muted-foreground: oklch(0.552 0.016 285.938);
+        --border: oklch(0.92 0.004 286.32);
+        --input: oklch(0.92 0.004 286.32);
+        --input-fill: transparent;
+        --ring: oklch(0.705 0.015 286.067);
+        --primary: oklch(0.21 0.006 285.885);
+        --primary-foreground: oklch(0.985 0 0);
+        --secondary: oklch(0.967 0.001 286.375);
+        --sidebar: oklch(0.985 0 0);
+        --sidebar-accent: oklch(0.967 0.001 286.375);
+        --tab: oklch(1 0 0);
+        --mark: oklch(0.83 0.01 286);
+        --me: #2a78d6;
+        --other: #1baf7a;
+        --warn: #b7791f;
+        --loss: #e34948;
+        --gain: #2a78d6;
+        --reference: oklch(0.68 0.015 286);
+        --shade: rgb(234 179 8 / 0.14);
+        --radius: 10px;
+        --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.05);
+        --shadow-sm: 0 1px 3px rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
       }
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg: #09090b;
-          --panel: #18181b;
-          --line: #27272a;
-          --text: #fafafa;
-          --dim: #a1a1aa;
-          --accent: #60a5fa;
-          --warn: #fbbf24;
+          --background: oklch(0.141 0.005 285.823);
+          --foreground: oklch(0.985 0 0);
+          --soft: oklch(0.82 0.01 286);
+          --muted: oklch(0.274 0.006 286.033);
+          --muted-foreground: oklch(0.705 0.015 286.067);
+          --border: oklch(1 0 0 / 0.1);
+          --input: oklch(1 0 0 / 0.15);
+          --input-fill: oklch(1 0 0 / 0.045);
+          --ring: oklch(0.552 0.016 285.938);
+          --primary: oklch(0.92 0.004 286.32);
+          --primary-foreground: oklch(0.21 0.006 285.885);
+          --secondary: oklch(0.274 0.006 286.033);
+          --sidebar: oklch(0.21 0.006 285.885);
+          --sidebar-accent: oklch(0.274 0.006 286.033);
+          --tab: oklch(1 0 0 / 0.07);
+          --mark: oklch(0.44 0.015 286);
+          --me: #3987e5;
+          --other: #199e70;
+          --warn: #e0a83a;
+          --loss: #e66767;
+          --gain: #3987e5;
+          --reference: oklch(0.6 0.015 286);
+          --shade: rgb(234 179 8 / 0.1);
         }
       }
       * {
         box-sizing: border-box;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
       }
       body {
         margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        font:
-          14px/1.6 system-ui,
-          "Noto Sans JP",
-          sans-serif;
-        display: grid;
-        grid-template-columns: 340px 1fr;
         height: 100vh;
+        display: grid;
+        grid-template-columns: 272px minmax(0, 1fr) 288px;
+        background: var(--background);
+        color: var(--foreground);
+        font:
+          14px/1.43 Geist,
+          Inter,
+          system-ui,
+          "Noto Sans JP",
+          "Yu Gothic UI",
+          sans-serif;
+        font-variant-numeric: tabular-nums;
+        -webkit-font-smoothing: antialiased;
       }
-      aside {
-        border-right: 1px solid var(--line);
-        overflow: auto;
-      }
-      aside header {
-        position: sticky;
-        top: 0;
-        background: var(--bg);
-        padding: 16px;
-        border-bottom: 1px solid var(--line);
-      }
-      h1 {
-        font-size: 16px;
-        margin: 0 0 8px;
-      }
-      h2 {
-        font-size: 20px;
-        margin: 0;
-      }
-      h3 {
-        font-size: 14px;
-        margin: 24px 0 8px;
-      }
-      input {
-        width: 100%;
-        padding: 6px 10px;
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        background: var(--panel);
-        color: inherit;
+      button,
+      input,
+      select {
         font: inherit;
+        color: inherit;
       }
-      aside button {
-        display: block;
-        width: 100%;
-        text-align: left;
-        padding: 10px 16px;
+      button {
         border: 0;
-        border-bottom: 1px solid var(--line);
         background: none;
-        color: inherit;
-        font: inherit;
+        padding: 0;
         cursor: pointer;
+        text-align: left;
       }
-      aside button:hover,
-      aside button[aria-current="true"] {
-        background: var(--panel);
+      :focus-visible {
+        outline: 3px solid color-mix(in oklab, var(--ring) 50%, transparent);
+        outline-offset: 0;
       }
-      aside button[aria-current="true"] {
-        box-shadow: inset 3px 0 var(--accent);
+      .sr {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
       }
-      .dim {
-        color: var(--dim);
+
+      /* Sidebar. */
+      nav {
+        background: var(--sidebar);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .head {
+        padding: 8px;
+        display: grid;
+        gap: 8px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px;
+        height: 48px;
+        line-height: 1.25;
+      }
+      .brand i {
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        background: var(--primary);
+        color: var(--primary-foreground);
+      }
+      .brand svg {
+        width: 16px;
+        height: 16px;
+      }
+      .brand b {
+        display: block;
+        font-weight: 500;
+      }
+      .brand span {
         font-size: 12px;
+        color: var(--muted-foreground);
       }
+      .search {
+        position: relative;
+      }
+      .search svg {
+        position: absolute;
+        left: 8px;
+        top: 8px;
+        width: 16px;
+        height: 16px;
+        opacity: 0.5;
+        pointer-events: none;
+      }
+      .search input {
+        width: 100%;
+        height: 32px;
+        padding: 0 12px 0 32px;
+        border: 1px solid var(--input);
+        border-radius: 8px;
+        background: var(--background);
+        outline-offset: 0;
+      }
+      .search input::placeholder {
+        color: var(--muted-foreground);
+      }
+      .search input:focus-visible {
+        border-color: var(--ring);
+      }
+      #list {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 0 8px 8px;
+      }
+      .day {
+        display: flex;
+        align-items: center;
+        height: 32px;
+        padding: 0 8px;
+        margin-top: 8px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted-foreground);
+      }
+      .pick {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        column-gap: 8px;
+        row-gap: 1px;
+        padding: 8px;
+        border-radius: 8px;
+        line-height: 1.35;
+      }
+      .pick + .pick {
+        margin-top: 4px;
+      }
+      .pick:hover,
+      .pick[aria-current="true"] {
+        background: var(--sidebar-accent);
+      }
+      .pick > :nth-child(1) {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pick[aria-current="true"] > :nth-child(1) {
+        font-weight: 500;
+      }
+      .pick > :nth-child(3),
+      .pick > :nth-child(4) {
+        font-size: 12px;
+        color: var(--muted-foreground);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .pick > :nth-child(4) {
+        text-align: right;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        height: 20px;
+        padding: 0 8px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .pick .badge {
+        justify-self: end;
+        align-self: center;
+        height: 18px;
+        padding: 0 6px;
+        font-size: 11px;
+        background: var(--background);
+      }
+
+      /* The session. */
       main {
-        overflow: auto;
-        padding: 24px;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 16px 24px;
+        overflow: hidden;
+      }
+      .top {
+        display: flex;
+        align-items: flex-start;
+        gap: 20px;
+      }
+      .name {
+        flex: 1;
+        min-width: 0;
+      }
+      .name h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        line-height: 1.3;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .name h1 small,
+      .meta {
+        font-size: 12px;
+        font-weight: 400;
+        color: var(--muted-foreground);
+      }
+      .name h1 small {
+        font-size: 13px;
+        margin-left: 8px;
+      }
+      .tools {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .tools select {
+        appearance: none;
+        height: 32px;
+        max-width: 190px;
+        padding: 0 32px 0 12px;
+        border: 1px solid var(--input);
+        border-radius: 8px;
+        background: var(--input-fill)
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")
+          no-repeat right 10px center / 16px;
+        box-shadow: var(--shadow-xs);
+        text-overflow: ellipsis;
+      }
+      .tools option {
+        background: var(--background);
+      }
+      .switch {
+        display: flex;
+        height: 32px;
+        padding: 3px;
+        border-radius: var(--radius);
+        background: var(--muted);
+      }
+      .switch button {
+        padding: 0 10px;
+        border-radius: 7px;
+        border: 1px solid transparent;
+        font-weight: 500;
+        color: var(--muted-foreground);
+        white-space: nowrap;
+      }
+      .switch button:hover {
+        color: var(--foreground);
+      }
+      .switch button[aria-pressed="true"] {
+        background: var(--tab);
+        border-color: var(--border);
+        color: var(--foreground);
+        box-shadow: var(--shadow-sm);
       }
       .facts {
         display: flex;
+        gap: 12px 32px;
         flex-wrap: wrap;
-        gap: 8px 28px;
-        margin-top: 12px;
+        margin: 18px 0 8px;
+      }
+      .facts div {
+        line-height: 1.25;
+      }
+      .facts i {
+        display: block;
+        font-style: normal;
+        font-size: 11px;
+        color: var(--muted-foreground);
+        margin-bottom: 2px;
       }
       .facts b {
-        display: block;
-        font-size: 18px;
-        font-variant-numeric: tabular-nums;
-      }
-      table {
-        border-collapse: collapse;
-        font-variant-numeric: tabular-nums;
-      }
-      th {
-        text-align: left;
-        font-weight: 500;
-        color: var(--dim);
-        font-size: 12px;
-      }
-      td,
-      th {
-        padding: 3px 16px 3px 0;
-        border-bottom: 1px solid var(--line);
-        white-space: nowrap;
-      }
-      tr.me td {
-        color: var(--accent);
+        font-size: 24px;
         font-weight: 600;
+        letter-spacing: -0.025em;
       }
-      .scroll {
-        overflow-x: auto;
+      .facts u {
+        text-decoration: none;
+        font-size: 12px;
+        color: var(--soft);
+        margin-left: 6px;
+      }
+      .other {
+        color: var(--soft);
+      }
+      .other::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 2px;
+        margin-right: 4px;
+        vertical-align: middle;
+        background: var(--other);
+      }
+      #stage {
+        flex: 1;
+        min-height: 0;
+        position: relative;
+        overflow: hidden;
+      }
+      #stage.setup {
+        overflow: auto;
       }
       svg {
+        display: block;
         width: 100%;
-        max-width: 760px;
-        height: 180px;
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 8px;
+        height: 100%;
+        outline: none;
       }
       svg text {
-        fill: var(--dim);
+        fill: var(--muted-foreground);
         font-size: 11px;
       }
-      @media (max-width: 720px) {
+      svg text.on {
+        fill: var(--foreground);
+      }
+      svg text.soft {
+        fill: var(--soft);
+      }
+      .empty {
+        margin: auto;
+        color: var(--muted-foreground);
+      }
+
+      /* What is looked at, and the others. */
+      aside {
+        padding: 16px 16px 16px 0;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        gap: 18px;
+      }
+      .look {
+        height: 264px;
+        flex: none;
+        overflow-y: auto;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        font-size: 13px;
+      }
+      .look p {
+        margin: 10px 0 0;
+        font-size: 12px;
+        color: var(--muted-foreground);
+      }
+      .look header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 8px;
+      }
+      .look header b {
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .look ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 5px;
+      }
+      .look li {
+        display: grid;
+        grid-template-columns: 44px 1fr;
+        gap: 8px;
+        color: var(--soft);
+      }
+      .look li > :first-child {
+        color: var(--muted-foreground);
+        font-size: 11px;
+        line-height: 20px;
+      }
+      .rows {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: grid;
+        align-content: start;
+      }
+      .rows p {
+        margin: 0;
+        padding: 0 8px;
+        font-size: 12px;
+        color: var(--muted-foreground);
+      }
+      .rows div {
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr) auto;
+        gap: 8px;
+        padding: 2px 8px;
+        border-radius: 6px;
+        color: var(--soft);
+        line-height: 22px;
+        font-size: 13px;
+      }
+      .rows div > :first-child {
+        text-align: right;
+        color: var(--muted-foreground);
+      }
+      .rows div > :nth-child(2) {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .rows .me {
+        background: var(--muted);
+        color: var(--foreground);
+        font-weight: 500;
+      }
+
+      /* Telemetry. */
+      .facts label {
+        display: flex;
+        align-items: center;
+        min-height: 17px;
+        font-size: 11px;
+        color: var(--muted-foreground);
+        margin-bottom: 2px;
+      }
+      .lap {
+        appearance: none;
+        max-width: 180px;
+        margin: -3px 0 -3px -6px;
+        padding: 3px 22px 3px 6px;
+        border: 0;
+        border-radius: 6px;
+        font-size: 12px;
+        color: var(--soft);
+        background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")
+          no-repeat right 4px center / 14px;
+        text-overflow: ellipsis;
+        cursor: pointer;
+      }
+      .lap:hover {
+        background-color: var(--muted);
+      }
+      .lap option,
+      .lap optgroup {
+        background: var(--background);
+      }
+      .facts .line {
+        display: inline-block;
+        width: 14px;
+        height: 2px;
+        margin: 0 6px 0 0;
+        vertical-align: middle;
+        background: var(--reference);
+      }
+      #stage svg {
+        touch-action: none;
+        cursor: crosshair;
+      }
+      .back {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 24px;
+        padding: 0 10px;
+        border: 1px solid var(--input);
+        border-radius: 6px;
+        background: var(--background);
+        box-shadow: var(--shadow-xs);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .map {
+        height: 280px;
+        flex: none;
+        cursor: crosshair;
+      }
+      .key {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        color: var(--muted-foreground);
+      }
+      .key i {
+        flex: 1;
+        height: 4px;
+        border-radius: 2px;
+        background: linear-gradient(to right in oklab, var(--gain), var(--mark), var(--loss));
+      }
+      .key i.speed {
+        background: linear-gradient(to right in oklab, var(--mark), var(--me));
+      }
+      .loss {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: grid;
+        align-content: start;
+        gap: 2px;
+        margin: 0 -4px;
+      }
+      .loss button {
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr) auto;
+        column-gap: 10px;
+        align-items: baseline;
+        padding: 6px 8px;
+        border-radius: 8px;
+        font-size: 13px;
+      }
+      .loss button:hover,
+      .loss button.on {
+        background: var(--muted);
+      }
+      .loss span:first-child {
+        color: var(--muted-foreground);
+        text-align: right;
+      }
+      .loss span:nth-child(2) {
+        color: var(--soft);
+        font-size: 12px;
+      }
+      .loss b {
+        font-weight: 600;
+      }
+      .loss em {
+        grid-column: 2 / 4;
+        height: 3px;
+        margin-top: 4px;
+      }
+      .loss em i {
+        display: block;
+        height: 3px;
+        border-radius: 2px;
+      }
+
+      /* What the run tells about the setup: the car seen from above. */
+      .diagnosis {
+        display: grid;
+        grid-template-columns: minmax(420px, 560px) minmax(220px, 1fr);
+        gap: 8px 40px;
+        padding: 8px 4px 28px 0;
+        align-items: start;
+      }
+      .diagnosis > .plan {
+        grid-row: 1 / span 2;
+      }
+      .diagnosis h2 {
+        margin: 0 0 4px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted-foreground);
+      }
+      .plan {
+        display: grid;
+        grid-template-columns: 116px minmax(0, 1fr) 116px;
+        gap: 20px 24px;
+        align-items: center;
+      }
+      .plan.single {
+        display: block;
+      }
+      .wheel h3,
+      .diagnosis li h3 {
+        margin: 0 0 4px;
+        font-size: 12px;
+        font-weight: 500;
+        display: flex;
+        justify-content: space-between;
+      }
+      .wheel small,
+      .diagnosis li small {
+        color: var(--muted-foreground);
+        font-size: 12px;
+        font-weight: 400;
+        white-space: nowrap;
+      }
+      .tread {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 2px;
+      }
+      .tread b {
+        padding: 9px 0;
+        font-weight: 500;
+        text-align: center;
+        border-radius: 4px;
+        background: color-mix(
+          in oklab,
+          var(--loss) calc(8% + var(--heat) * 34%),
+          var(--background)
+        );
+      }
+      .did {
+        display: flex;
+        gap: 10px;
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--muted-foreground);
+      }
+      .did i {
+        font-style: normal;
+        margin-right: 3px;
+      }
+      .did .loud {
+        color: var(--loss);
+        font-weight: 500;
+      }
+      .damper {
+        display: flex;
+        gap: 1px;
+        height: 4px;
+        margin-top: 5px;
+      }
+      .damper i {
+        background: var(--mark);
+        border-radius: 1px;
+      }
+      .damper .fast {
+        background: var(--warn);
+      }
+      .rides,
+      .sides {
+        display: grid;
+        gap: 3px 12px;
+        font-size: 12px;
+        align-items: center;
+      }
+      .rides {
+        grid-template-columns: 1.3fr repeat(3, 1fr);
+        text-align: right;
+      }
+      .rides i,
+      .sides > i {
+        font-style: normal;
+        font-size: 11px;
+        color: var(--muted-foreground);
+      }
+      .rides span {
+        color: var(--muted-foreground);
+      }
+      .rides b,
+      .sides b {
+        font-weight: 500;
+      }
+      .middle p {
+        margin: 10px 0 0;
+        font-size: 12px;
+        color: var(--muted-foreground);
+        text-align: right;
+      }
+      .sides {
+        grid-template-columns: 24px 1fr auto 1fr 24px;
+        gap: 6px 8px;
+      }
+      .sides > i:nth-child(2),
+      .sides > b:nth-child(5n + 1) {
+        text-align: right;
+      }
+      .sides span {
+        color: var(--muted-foreground);
+      }
+      .sides div {
+        height: 8px;
+        display: flex;
+      }
+      .sides .u {
+        justify-content: flex-end;
+      }
+      .sides div i {
+        height: 8px;
+        border-radius: 2px;
+        background: var(--loss);
+      }
+      .sides .under {
+        background: var(--gain);
+      }
+      .diagnosis ol {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 12px;
+      }
+      .diagnosis li h3 {
+        margin: 0;
+        color: var(--muted-foreground);
+      }
+      .diagnosis li p {
+        margin: 2px 0 0;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      @media (max-width: 1180px) {
+        .diagnosis {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .diagnosis > .plan {
+          grid-row: auto;
+        }
+      }
+
+      /* The setup, item by item. */
+      .garage {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+        gap: 24px 36px;
+        padding: 8px 4px 24px 0;
+        align-content: start;
+      }
+      .garage section.wide {
+        grid-column: span 2;
+      }
+      .garage h2 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted-foreground);
+      }
+      .grid {
+        display: grid;
+        row-gap: 1px;
+      }
+      .grid.four {
+        grid-template-columns: minmax(90px, 1.3fr) repeat(4, minmax(64px, 1fr));
+      }
+      .grid.one {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+      .grid > * {
+        padding: 2px 0;
+      }
+      .grid .k {
+        color: var(--soft);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .grid .v {
+        text-align: right;
+        padding-left: 8px;
+      }
+      .grid .h {
+        text-align: right;
+        font-size: 11px;
+        color: var(--muted-foreground);
+      }
+      .diff {
+        color: var(--other);
+        font-weight: 500;
+      }
+      .diff s {
+        color: var(--muted-foreground);
+        font-weight: 400;
+        margin-right: 6px;
+        text-decoration: none;
+      }
+
+      @media (max-width: 1080px) {
         body {
-          grid-template-columns: 1fr;
+          grid-template-columns: 220px minmax(0, 1fr);
+          grid-template-rows: minmax(520px, 1fr) auto;
           height: auto;
+          min-height: 100vh;
+        }
+        nav {
+          grid-row: 1 / 3;
+          max-height: 100vh;
+          position: sticky;
+          top: 0;
         }
         aside {
-          border-right: 0;
-          max-height: 40vh;
+          padding: 0 28px 24px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 28px;
+        }
+        .look {
+          height: auto;
+        }
+      }
+      @media (max-width: 640px) {
+        body {
+          display: block;
+        }
+        nav {
+          position: static;
+          max-height: 34vh;
+        }
+        main {
+          padding: 16px;
+          height: 640px;
+        }
+        .top {
+          flex-wrap: wrap;
+        }
+        aside {
+          padding: 0 16px 24px;
+          display: block;
+        }
+        .garage section.wide {
+          grid-column: auto;
+          overflow-x: auto;
         }
       }
     </style>
   </head>
   <body>
-    <aside>
-      <header>
-        <h1>過去のセッション</h1>
-        <input
-          id="filter"
-          type="search"
-          placeholder="コース・車・種別で絞り込み"
-          aria-label="絞り込み"
-        />
-      </header>
+    <nav aria-label="過去のセッション">
+      <div class="head">
+        <div class="brand">
+          <i aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+              <path d="M12 7v5l4 2" />
+            </svg>
+          </i>
+          <div><b>過去のセッション</b><span id="count"></span></div>
+        </div>
+        <div class="search">
+          <label class="sr" for="filter">絞り込み</label>
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.3-4.3" />
+          </svg>
+          <input id="filter" type="search" placeholder="コース・車・種別" />
+        </div>
+      </div>
       <div id="list"></div>
-    </aside>
-    <main id="main"><p class="dim">左から選んでください。</p></main>
+    </nav>
+    <main id="main"></main>
+    <aside id="side"></aside>
     <script>
       "use strict";
       const KIND = {
@@ -184,282 +935,1832 @@
       // Text only: names come from other drivers.
       const el = (tag, props, ...children) => {
         const e = Object.assign(document.createElement(tag), props || {});
-        e.append(...children.filter((c) => c !== null && c !== undefined));
+        e.append(
+          ...children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false),
+        );
         return e;
       };
-      const lap = (s) => {
-        if (!(s > 0)) return "--";
-        const ms = Math.round(s * 1000),
-          m = Math.floor(ms / 60000);
-        const rest = ((ms - m * 60000) / 1000).toFixed(3);
-        return m ? m + ":" + rest.padStart(6, "0") : rest;
+      const svg = (tag, attrs, text) => {
+        const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+        for (const k in attrs) if (attrs[k] !== null) e.setAttribute(k, attrs[k]);
+        if (text !== undefined) e.textContent = text;
+        return e;
       };
-      const time = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
-      const pos = (r) =>
-        r.player?.car.position ? "P" + r.player.car.position + " / " + r.player.cars_total : "--";
-      let sessions = [],
-        current = null;
+      const lapTime = (s, digits = 3) => {
+        if (!(s > 0)) return "−";
+        const unit = 10 ** digits,
+          n = Math.round(s * unit),
+          m = Math.floor(n / (60 * unit));
+        const rest = ((n - m * 60 * unit) / unit).toFixed(digits);
+        return m ? m + ":" + rest.padStart(digits + 3, "0") : rest;
+      };
+      const clock = (s) =>
+        Math.floor(s / 60) + ":" + String(Math.floor(Math.max(0, s) % 60)).padStart(2, "0");
+      const signed = (v, digits) => (v < 0 ? "−" : "+") + Math.abs(v).toFixed(digits);
+      const sum = (p) => p.entry + p.mid + p.exit;
+      const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+      const short = (track) => {
+        const [name, ...layout] = (track || "−").split(" - ");
+        return [name, layout.join(" - ")];
+      };
+      const clean = (l) => l.time_s > 0 && !l.pit && !l.caution;
 
-      function drawList() {
+      let sessions = [],
+        record = null,
+        rival = null,
+        view = "telemetry",
+        focus = null;
+
+      /* ---- The list ---- */
+      const dayName = (ms) => {
+        const d = new Date(ms),
+          day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+        const ago = Math.round((day(new Date()) - day(d)) / 86400000);
+        if (ago === 0) return "今日";
+        if (ago === 1) return "昨日";
+        return d.toLocaleDateString("ja-JP", {
+          year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+          month: "long",
+          day: "numeric",
+          weekday: "short",
+        });
+      };
+      const hour = (ms) =>
+        new Date(ms).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+      const place = (r) => (r.player?.car.position ? "P" + r.player.car.position : "");
+
+      function shown() {
         const words = $("filter").value.toLowerCase().split(/\s+/).filter(Boolean);
-        const rows = sessions.filter((r) => {
+        return sessions.filter((r) => {
           const text = [r.track, r.car, KIND[r.kind], r.kind, r.note].join(" ").toLowerCase();
           return words.every((w) => text.includes(w));
         });
-        $("list").replaceChildren(
-          ...rows.map((r) => {
-            const b = el(
-              "button",
-              { type: "button" },
-              el("div", null, (KIND[r.kind] || r.kind) + " · " + (r.track || "--")),
-              el(
-                "div",
-                { className: "dim" },
-                new Date(r.started_ms).toLocaleString() +
-                  " · " +
-                  pos(r) +
-                  " · " +
-                  r.laps_completed +
-                  " 周 · " +
-                  lap(r.best_lap_s),
-              ),
-              r.note ? el("div", { className: "dim" }, "📝 " + r.note) : null,
-            );
-            b.setAttribute("aria-current", r.id === current);
-            b.onclick = () => {
-              location.hash = r.id;
-            };
-            return b;
-          }),
-        );
-        if (!rows.length)
-          $("list").append(
-            el("p", { className: "dim", style: "padding: 16px" }, "セッションがありません。"),
-          );
       }
 
-      function chart(laps) {
-        const pts = laps.filter((l) => l.time_s > 0);
-        if (pts.length < 2) return null;
-        const NS = "http://www.w3.org/2000/svg";
-        const s = (tag, attrs, text) => {
-          const e = document.createElementNS(NS, tag);
-          for (const k in attrs) e.setAttribute(k, attrs[k]);
-          if (text !== undefined) e.textContent = text;
-          return e;
-        };
-        const W = 760,
-          H = 180,
-          L = 64,
-          R = 16,
-          T = 16,
-          B = 26;
-        const ts = pts.map((l) => l.time_s),
-          lo = Math.min(...ts),
-          hi = Math.max(...ts, lo + 0.5);
-        const x = (n) =>
-          L + ((W - L - R) * (n - pts[0].lap)) / Math.max(1, pts[pts.length - 1].lap - pts[0].lap);
-        const y = (t) => T + ((H - T - B) * (hi - t)) / (hi - lo);
-        const svg = s("svg", {
+      function drawList() {
+        const out = [];
+        let day = null;
+        for (const r of shown()) {
+          const d = dayName(r.started_ms);
+          if (d !== day) out.push(el("div", { className: "day" }, (day = d)));
+          const b = el(
+            "button",
+            { type: "button", className: "pick", title: r.note || "" },
+            el("span", null, short(r.track)[0]),
+            place(r) ? el("span", { className: "badge" }, place(r)) : el("span"),
+            el(
+              "span",
+              null,
+              [
+                KIND[r.kind] || r.kind,
+                r.best_lap_s ? lapTime(r.best_lap_s) : null,
+                r.laps_completed + "周",
+              ]
+                .filter(Boolean)
+                .join("・"),
+            ),
+            el("span", null, hour(r.started_ms)),
+          );
+          b.setAttribute("aria-current", r.id === record?.id);
+          b.onclick = () => (location.hash = r.id);
+          out.push(b);
+        }
+        if (!out.length) out.push(el("div", { className: "day" }, "セッションがありません"));
+        $("list").replaceChildren(...out);
+        $("count").textContent = shown().length + "件";
+      }
+
+      /* ---- What the events mean ---- */
+      const FLAGS = {
+        green: "グリーン",
+        yellow: "イエロー",
+        yellow_waving: "ローカルイエロー",
+        caution: "コーション",
+        caution_waving: "コーション",
+        red: "赤旗",
+        white: "ファイナルラップ",
+        checkered: "チェッカー",
+        blue: "青旗",
+        black: "黒旗",
+        repair: "修理の旗",
+        disqualify: "失格",
+      };
+      const WARNINGS = {
+        damage: "要修理",
+        oil_pressure: "油圧低下",
+        water_temp: "水温上昇",
+        oil_temp: "油温上昇",
+        fuel_pressure: "燃圧低下",
+      };
+      const YELLOW = ["yellow", "yellow_waving", "caution", "caution_waving"];
+      // What the engineer worked out about the stops.
+      function advice(a) {
+        const who = a.car ? "#" + a.car.number : "";
+        switch (a.call) {
+          case "plan":
+            return ["◇", a.stops.length ? "作戦: " + a.stops.join("・") + "周目" : "作戦: 無給油"];
+          case "box_this_lap":
+            return ["◇", "最適なピット"];
+          case "window_open":
+            return ["◇", "ピットの窓が開く"];
+          case "fuel_stop":
+            return ["!", a.by_lap + "周目までに給油"];
+          case "undercut_threat":
+            return ["◇", who + "のアンダーカット警戒"];
+          case "answer":
+            return ["◇", who + "に" + a.within_laps + "周以内に応じる"];
+          case "undercut_chance":
+            return ["◇", who + "にアンダーカット"];
+          case "overcut_chance":
+            return ["◇", who + "にオーバーカット"];
+          default:
+            return null;
+        }
+      }
+      // [symbol, words], or null for what the lanes show anyway.
+      function meaning(e) {
+        switch (e.type) {
+          case "incident":
+            return ["▲", "インシデント+" + e.added + "x"];
+          case "damage":
+            return ["!", WARNINGS[e.warning] || e.text.replace(/^car warning: /, "")];
+          case "flag_raised":
+            if (["green", "start_ready", "one_to_green"].includes(e.flag)) return null;
+            return ["⚑", FLAGS[e.flag] || e.text];
+          case "pit_entry":
+            return e.is_player ? ["P", "ピットイン"] : null;
+          case "pit_exit":
+            return e.is_player ? ["P", "ピットアウト"] : null;
+          case "fuel_low":
+            return ["!", "燃料が残り" + e.laps.toFixed(1) + "周分"];
+          case "weather_changed":
+            return ["☂", "路面: " + e.from + "→" + e.to];
+          case "adjustment":
+            return ["⚙", e.text];
+          case "strategy":
+            return advice(e.advice);
+          case "position_changed":
+            return [e.to < e.from ? "↑" : "↓", "P" + e.from + "→P" + e.to];
+          default:
+            return null;
+        }
+      }
+
+      /* ---- The race: everything on one time axis ---- */
+      // A lap is a column as wide as it took.
+      function columns(r) {
+        return r.laps
+          .filter((l) => l.time_s > 0)
+          .map((l) => ({ ...l, from: l.session_time_s - l.time_s, to: l.session_time_s }));
+      }
+      function yellows(r) {
+        const out = [];
+        let since = null;
+        for (const e of r.events) {
+          if (e.type === "flag_raised" && YELLOW.includes(e.flag)) since ??= e.session_time_s;
+          else if (since !== null && e.type === "flag_cleared" && YELLOW.includes(e.flag)) {
+            out.push([since, e.session_time_s]);
+            since = null;
+          }
+        }
+        if (since !== null) out.push([since, r.duration_s]);
+        return out;
+      }
+      function positions(r) {
+        const out = [];
+        for (const e of r.events)
+          if (e.type === "position_changed") {
+            if (!out.length) out.push([0, e.from]);
+            out.push([e.session_time_s, e.to]);
+          }
+        const p = r.player?.car.position;
+        if (!out.length && p) out.push([0, p]);
+        return out;
+      }
+
+      function drawRace() {
+        const stage = $("stage"),
+          r = record,
+          cols = columns(r);
+        const W = stage.clientWidth,
+          H = stage.clientHeight;
+        if (!cols.length) {
+          stage.replaceChildren(el("p", { className: "empty" }, "計測された周回がありません。"));
+          return;
+        }
+        const L = 64,
+          R = 4,
+          start = cols[0].from,
+          done = cols[cols.length - 1].to,
+          // The lap that was not completed, as long as it is one.
+          end = Math.max(done, Math.min(r.duration_s, done + cols[cols.length - 1].time_s));
+        const x = (t) => L + ((W - L - R) * (t - start)) / (end - start);
+        const inside = (t) => t >= start - 1 && t <= end + 1;
+        const root = svg("svg", {
           viewBox: `0 0 ${W} ${H}`,
           role: "img",
-          "aria-label": "ラップタイムの推移",
+          tabindex: 0,
+          "aria-label": "ラップタイム・順位・出来事・挙動を時間軸に並べた図",
         });
-        svg.append(
-          s("text", { x: 8, y: y(hi) + 4 }, lap(hi)),
-          s("text", { x: 8, y: y(lo) + 4 }, lap(lo)),
+        const label = (y, text) => root.append(svg("text", { x: 0, y }, text));
+
+        // Lanes, from below: fixed ones first, the rest is shared.
+        const handling = new Map(r.handling.map((h) => [h.lap, h.behaviour]));
+        const TENDENCIES = [
+          ["アンダー", (b) => sum(b.understeer), 3],
+          ["オーバー", (b) => sum(b.oversteer), 2],
+          ["空転", (b) => b.wheelspin_s, 1.5],
+          ["後輪ロック", (b) => b.rear_lock_s, 1],
+        ].filter(([, f]) =>
+          cols.some((c) => handling.has(c.lap) && f(handling.get(c.lap)) >= 0.05),
         );
-        svg.append(
-          s("polyline", {
-            points: pts.map((l) => x(l.lap) + "," + y(l.time_s)).join(" "),
-            fill: "none",
-            stroke: "var(--accent)",
+        const rowH = 17,
+          numbers = 22,
+          narrow = Math.min(...cols.map((c) => x(c.to) - x(c.from))),
+          times = narrow > 44,
+          fuels = narrow > 26,
+          textRows = 22 * (times + fuels),
+          eventH = 34;
+        const handlingH = TENDENCIES.length * rowH + (TENDENCIES.length ? 16 : 0);
+        const free = H - numbers - textRows - eventH - handlingH - 34;
+        const timeH = Math.min(280, Math.max(90, free * 0.58)),
+          posH = Math.min(170, Math.max(50, free * 0.42));
+        const yTime = 18,
+          yText = yTime + timeH + 8,
+          yPos = yText + textRows + 14,
+          yEvent = yPos + posH + 10,
+          yHand = yEvent + eventH + 8,
+          yNum = yHand + handlingH;
+
+        for (const [a, b] of yellows(r)) {
+          const from = Math.max(a, start),
+            to = Math.min(b, end);
+          if (to > from)
+            root.append(
+              svg("rect", {
+                x: x(from),
+                y: yTime - 8,
+                width: x(to) - x(from),
+                height: yNum - yTime + 4,
+                fill: "var(--shade)",
+              }),
+            );
+        }
+        const cursor = svg("rect", {
+          y: yTime - 14,
+          height: yNum - yTime + 30,
+          rx: 6,
+          fill: "var(--muted)",
+          visibility: "hidden",
+        });
+        root.append(cursor);
+
+        // Lap times: how much longer than the best one.
+        const best = Math.min(...cols.map((c) => c.time_s)),
+          losses = cols.map((c) => c.time_s - best).sort((a, b) => a - b);
+        const typical = losses[Math.floor(losses.length * 0.75)];
+        const top = Math.max(0.6, Math.min(losses[losses.length - 1], typical * 1.8));
+        const other = new Map((rival ? columns(rival) : []).map((c) => [c.lap, c.time_s]));
+        const bar = (v) => Math.max(3, (Math.min(v, top) / top) * (timeH - 22));
+        const base = yTime + timeH;
+        label(base - 2, "遅れ");
+        if (times) label(base + 22, "タイム");
+        if (fuels) label(base + 22 * (1 + times), "燃料");
+        cols.forEach((c) => {
+          const x0 = x(c.from),
+            w = x(c.to) - x0,
+            mid = x0 + w / 2;
+          const bw = Math.max(3, Math.min(32, w - 8)),
+            loss = c.time_s - best,
+            h = bar(loss),
+            isBest = loss === 0;
+          const cut = loss > top;
+          root.append(
+            svg("rect", {
+              x: mid - bw / 2,
+              y: base - h,
+              width: bw,
+              height: h,
+              rx: Math.min(3, bw / 2),
+              fill: isBest ? "var(--me)" : "var(--mark)",
+            }),
+          );
+          // A bar that does not fit is cut open.
+          if (cut)
+            root.append(
+              svg("path", {
+                d: `M${mid - bw / 2 - 2} ${base - h + 13}l${bw + 4} -7`,
+                stroke: "var(--background)",
+                "stroke-width": 3,
+              }),
+            );
+          if (w > 44 || isBest || (cut && w > 26))
+            root.append(
+              svg(
+                "text",
+                { x: mid, y: base - h - 6, "text-anchor": "middle", class: isBest ? "on" : null },
+                isBest ? "ベスト" : "+" + loss.toFixed(loss < 10 ? 1 : 0),
+              ),
+            );
+          if (other.has(c.lap)) {
+            const y = base - Math.max(1, bar(Math.max(0, other.get(c.lap) - best)));
+            root.append(
+              svg("path", {
+                d: `M${mid - bw / 2 - 5} ${y}h${bw + 10}`,
+                stroke: "var(--other)",
+                "stroke-width": 2,
+                "stroke-linecap": "round",
+              }),
+            );
+          }
+          const t = { x: mid, "text-anchor": "middle" };
+          if (times && w > 62)
+            root.append(
+              svg("text", { ...t, y: base + 22, class: isBest ? "on" : "soft" }, lapTime(c.time_s)),
+            );
+          else if (times)
+            root.append(
+              svg(
+                "text",
+                { ...t, y: base + 22, class: isBest ? "on" : "soft" },
+                lapTime(c.time_s, 1),
+              ),
+            );
+          if (fuels && c.fuel_used_l > 0)
+            root.append(
+              svg(
+                "text",
+                { ...t, y: base + 22 * (1 + times) },
+                c.fuel_used_l.toFixed(w > 40 ? 2 : 1),
+              ),
+            );
+        });
+
+        // Places: down is worse.
+        const all = positions(r),
+          seen = all.filter(([t]) => t <= end);
+        if (seen.length) {
+          const first = Math.min(...seen.map((p) => p[1])),
+            // One place must not look like a comeback.
+            worst = Math.max(first + 4, ...seen.map((p) => p[1]));
+          const y = (p) => yPos + 8 + ((posH - 18) * (p - first)) / (worst - first);
+          label(yPos + posH / 2 + 4, "順位");
+          let d = "",
+            last = null;
+          seen.forEach(([t, p], i) => {
+            const px = x(Math.max(t, start));
+            d += i ? `H${px}V${y(p)}` : `M${px} ${y(p)}`;
+            last = p;
+          });
+          d += `H${x(end)}`;
+          root.append(
+            svg("path", {
+              d,
+              fill: "none",
+              stroke: "var(--me)",
+              "stroke-width": 2,
+              "stroke-linejoin": "round",
+            }),
+          );
+          // Where it stayed for a while; the rest is in the line.
+          const spots = seen.map(([t, p], i) => {
+            const to = i + 1 < seen.length ? seen[i + 1][0] : end;
+            return { from: x(Math.max(t, start)), to: x(Math.min(to, end)), p };
+          });
+          let free = -Infinity,
+            named = null;
+          for (const s of spots)
+            if (s.to - s.from > 30 && s.from > free) {
+              root.append(svg("text", { x: s.from + 4, y: y(s.p) - 6, class: "soft" }, "P" + s.p));
+              free = s.from + 30;
+              named = s;
+            }
+          const final = spots[spots.length - 1];
+          if (named !== final || final.to - final.from > 120)
+            root.append(
+              svg(
+                "text",
+                { x: x(end), y: y(last) - 6, "text-anchor": "end", class: "on" },
+                "P" + last,
+              ),
+            );
+        }
+
+        // What happened, where it happened.
+        label(yEvent + 20, "出来事");
+        const marks = r.events
+          .filter((e) => e.type !== "position_changed" && inside(e.session_time_s))
+          .map((e) => ({ at: x(Math.min(Math.max(e.session_time_s, start), end)), m: meaning(e) }))
+          .filter((e) => e.m);
+        const groups = [];
+        for (const e of marks) {
+          const g = groups[groups.length - 1];
+          if (g && e.at - g.at < 18) g.items.push(e);
+          else groups.push({ at: e.at, items: [e] });
+        }
+        for (const g of groups) {
+          const kinds = new Set(g.items.map((e) => e.m[0]));
+          // The gravest one stands for the group.
+          const symbol = ["!", "⚑", "P", "▲", "☂", "⚙"].find((s) => kinds.has(s)) || "•";
+          const grave = symbol === "!" || symbol === "⚑";
+          const t = svg(
+            "text",
+            {
+              x: g.at,
+              y: yEvent + 20,
+              "text-anchor": "middle",
+              style: `fill:${grave ? "var(--warn)" : "var(--soft)"};font-size:12px;font-weight:600`,
+            },
+            symbol,
+          );
+          root.append(t);
+          if (g.items.length > 1)
+            root.append(
+              svg("text", { x: g.at + 8, y: yEvent + 13, style: "font-size:9px" }, g.items.length),
+            );
+        }
+
+        // How the car behaved, as shades.
+        TENDENCIES.forEach(([name, f, full], i) => {
+          const y = yHand + i * rowH;
+          label(y + 12, name);
+          cols.forEach((c) => {
+            const b = handling.get(c.lap);
+            if (!b) return;
+            const v = f(b),
+              x0 = x(c.from) + 1,
+              w = Math.max(1, x(c.to) - x(c.from) - 2);
+            root.append(
+              svg("rect", {
+                x: x0,
+                y,
+                width: w,
+                height: rowH - 3,
+                rx: 3,
+                fill: "var(--me)",
+                "fill-opacity": (0.05 + 0.75 * Math.min(1, v / full)).toFixed(2),
+              }),
+            );
+            if (w > 34 && v >= 0.05)
+              root.append(
+                svg(
+                  "text",
+                  { x: x0 + w / 2, y: y + 11, "text-anchor": "middle", class: "on" },
+                  v.toFixed(1) + "s",
+                ),
+              );
+          });
+        });
+
+        label(yNum + 14, "周");
+        let lastNumber = -Infinity;
+        cols.forEach((c) => {
+          const mid = (x(c.from) + x(c.to)) / 2;
+          if (mid - lastNumber < 20) return;
+          lastNumber = mid;
+          root.append(svg("text", { x: mid, y: yNum + 14, "text-anchor": "middle" }, c.lap));
+        });
+
+        const show = (lap) => {
+          const c = cols.find((k) => k.lap === lap);
+          cursor.setAttribute("visibility", c ? "visible" : "hidden");
+          if (c) {
+            cursor.setAttribute("x", x(c.from) + 1);
+            cursor.setAttribute("width", Math.max(2, x(c.to) - x(c.from) - 2));
+          }
+          drawLook(c || null);
+        };
+        const at = (ev) => {
+          const px = ev.clientX - root.getBoundingClientRect().left;
+          return cols.find((c) => px >= x(c.from) && px < x(c.to))?.lap ?? null;
+        };
+        root.onpointermove = (ev) => show(at(ev) ?? focus);
+        root.onpointerleave = () => show(focus);
+        root.onclick = (ev) => {
+          const lap = at(ev);
+          focus = lap === focus ? null : lap;
+          show(focus);
+        };
+        root.onkeydown = (ev) => {
+          const step = { ArrowLeft: -1, ArrowRight: 1 }[ev.key];
+          if (!step) return;
+          const i = cols.findIndex((c) => c.lap === focus);
+          focus = cols[Math.min(cols.length - 1, Math.max(0, i < 0 ? 0 : i + step))].lap;
+          show(focus);
+          ev.preventDefault();
+        };
+        stage.replaceChildren(root);
+        show(cols.some((c) => c.lap === focus) ? focus : null);
+      }
+
+      /* ---- The side ---- */
+      function drawLook(c) {
+        const r = record,
+          items = [];
+        const add = (k, v) => items.push(el("li", null, el("span", null, k), el("span", null, v)));
+        let head,
+          right,
+          hint = null;
+        if (c) {
+          head = c.lap + "周目";
+          right = lapTime(c.time_s);
+          const best = Math.min(...columns(r).map((k) => k.time_s));
+          add("差", c.time_s === best ? "ベスト" : "ベストから+" + (c.time_s - best).toFixed(3));
+          const o = rival && columns(rival).find((k) => k.lap === c.lap);
+          if (o) add("比較", lapTime(o.time_s) + "（" + signed(c.time_s - o.time_s, 3) + "）");
+          if (c.position) add("順位", "P" + c.position);
+          if (c.fuel_used_l > 0) add("燃料", c.fuel_used_l.toFixed(2) + "L");
+          for (const e of r.events) {
+            const m = meaning(e);
+            if (m && e.session_time_s > c.from && e.session_time_s <= c.to + 0.5)
+              add(clock(e.session_time_s - c.from), m[1]);
+          }
+          const b = r.handling.find((h) => h.lap === c.lap)?.behaviour;
+          if (b) {
+            const parts = [
+              ["アンダー", sum(b.understeer)],
+              ["オーバー", sum(b.oversteer)],
+              ["空転", b.wheelspin_s],
+              ["後輪ロック", b.rear_lock_s],
+            ].filter(([, v]) => v >= 0.1);
+            if (parts.length)
+              add("挙動", parts.map(([k, v]) => k + v.toFixed(1) + "秒").join("、"));
+          }
+        } else {
+          head = "この" + (KIND[r.kind] || "セッション");
+          right = clock(r.duration_s);
+          const laps = r.laps.filter(clean).map((l) => l.time_s);
+          const incidents = r.events.filter((e) => e.type === "incident");
+          // Neither the standing start nor a spin tells how even the pace is.
+          const even = laps.filter((t) => t < Math.min(...laps) * 1.07);
+          if (even.length > 2) {
+            const m = mean(even);
+            const dev = Math.sqrt(mean(even.map((t) => (t - m) ** 2)));
+            add("ペース", "ばらつき±" + dev.toFixed(1) + "秒");
+          }
+          const moves = r.events.filter((e) => e.type === "position_changed");
+          const up = moves.filter((e) => e.to < e.from).reduce((n, e) => n + e.from - e.to, 0),
+            down = moves.filter((e) => e.to > e.from).reduce((n, e) => n + e.to - e.from, 0);
+          if (up || down) add("順位", "上げた" + up + "・落とした" + down);
+          if (incidents.length) {
+            const cols = columns(r),
+              count = new Map();
+            for (const e of incidents) {
+              const k = cols.find((q) => e.session_time_s > q.from && e.session_time_s <= q.to);
+              if (k) count.set(k.lap, (count.get(k.lap) || 0) + e.added);
+            }
+            const worst = [...count].sort((a, b) => b[1] - a[1])[0];
+            if (worst) add("事故", worst[0] + "周目が最多（" + worst[1] + "x）");
+          }
+          const total = { アンダー: 0, オーバー: 0, 空転: 0, 後輪ロック: 0 };
+          for (const h of r.handling) {
+            total["アンダー"] += sum(h.behaviour.understeer);
+            total["オーバー"] += sum(h.behaviour.oversteer);
+            total["空転"] += h.behaviour.wheelspin_s;
+            total["後輪ロック"] += h.behaviour.rear_lock_s;
+          }
+          const n = Math.max(1, r.handling.length);
+          const most = Object.entries(total).sort((a, b) => b[1] - a[1])[0];
+          if (most && most[1] / n >= 0.1)
+            add("挙動", most[0] + "が最も長い（毎周" + (most[1] / n).toFixed(1) + "秒）");
+          if (r.adjustments.length) add("調整", "車内設定を" + r.adjustments.length + "回変更");
+          if (r.note) add("メモ", r.note);
+          hint = view === "race" && columns(r).length ? "周にカーソルを合わせると詳細を表示" : null;
+        }
+        const box = el(
+          "section",
+          { className: "look" },
+          el("header", null, el("b", null, head), el("span", { className: "meta" }, right)),
+          el("ul", null, items),
+          hint && el("p", null, hint),
+        );
+        const old = document.querySelector(".look");
+        if (old) old.replaceWith(box);
+        else $("side").prepend(box);
+      }
+
+      function drawResult() {
+        const known = (s) => s.is_player || s.car.position || s.laps_completed || s.best_lap_s > 0;
+        const rows = record.standings.filter(known).map((s) => {
+          const gap = s.laps_completed === 0 && !(s.best_lap_s > 0) ? "−" : lapTime(s.best_lap_s);
+          const e = el(
+            "div",
+            { className: s.is_player ? "me" : "", title: "#" + s.car.number },
+            el("span", null, s.car.position || "−"),
+            el("span", null, s.car.driver),
+            el(
+              "span",
+              null,
+              s.best_lap_s > 0 ? gap : s.laps_completed ? s.laps_completed + "周" : "−",
+            ),
+          );
+          return e;
+        });
+        if (rows.length < 2 && record.standings.length > 1)
+          rows.push(el("p", null, "他の" + (record.standings.length - 1) + "台の記録はありません"));
+        const box = el("section", { className: "rows" }, rows);
+        box.setAttribute("aria-label", "結果");
+        $("side").replaceChildren(box);
+        box.querySelector(".me")?.scrollIntoView({ block: "nearest" });
+      }
+
+      /* ---- Telemetry: two laps, place by place ---- */
+      // `laps` are those of the session, `others` of earlier ones on the track.
+      let tele = { laps: [], others: [], a: null, b: null, corners: [], zoom: [0, 1] };
+      const lapCache = new Map();
+      const json = async (path) => {
+        const res = await fetch(path);
+        return res.ok ? res.json() : null;
+      };
+      const sessionPath = (id) => "/v1/sessions/" + encodeURIComponent(id);
+      const lapPath = (id, lap) => sessionPath(id) + "/laps/" + lap;
+      async function loadLap(id, lap) {
+        const key = id + "/" + lap;
+        if (!lapCache.has(key)) {
+          const t = await json(lapPath(id, lap));
+          if (!t) return null;
+          // Between two gears the box reads neutral.
+          let gear = 0;
+          t.gear = t.gear.map((g) => (gear = g || gear));
+          lapCache.set(key, { ...t, id });
+        }
+        return lapCache.get(key);
+      }
+      const fastest = (laps) =>
+        laps.filter((l) => !l.pit).reduce((b, l) => (!b || l.time_s < b.time_s ? l : b), null);
+
+      async function openTelemetry(r) {
+        const laps = (await json(sessionPath(r.id) + "/laps")) || [];
+        const alike = sessions.filter(
+          (s) => s.id !== r.id && s.track === r.track && s.car === r.car,
+        );
+        const bests = await Promise.all(
+          alike.slice(0, 12).map(async (s) => {
+            const best = fastest((await json(sessionPath(s.id) + "/laps")) || []);
+            return best && { ...best, id: s.id, when: s.started_ms };
+          }),
+        );
+        const others = bests.filter(Boolean).sort((x, y) => x.time_s - y.time_s);
+        const best = fastest(laps);
+        // The last lap that was driven in earnest, against the best one.
+        const serious = laps.filter((l) => !l.pit && best && l.time_s < best.time_s * 1.03);
+        const a = [...serious].reverse().find((l) => l !== best) || best || laps[0];
+        const b = a && a === best ? others[0] : best;
+        return {
+          laps,
+          others,
+          a: a ? await loadLap(r.id, a.lap) : null,
+          b: b ? await loadLap(b.id || r.id, b.lap) : null,
+          corners: [],
+          zoom: [0, 1],
+        };
+      }
+      const same = () => !tele.b || (tele.a.id === tele.b.id && tele.a.lap === tele.b.lap);
+      async function compareLaps() {
+        const { a, b } = tele;
+        tele.corners =
+          (a &&
+            b &&
+            (await json(
+              lapPath(a.id, a.lap) +
+                "/compare?session=" +
+                encodeURIComponent(b.id) +
+                "&lap=" +
+                b.lap,
+            ))) ||
+          [];
+      }
+      async function setLaps(a, b) {
+        tele.a = a;
+        tele.b = b;
+        await compareLaps();
+        drawMain();
+      }
+      const gapAt = (i) => (tele.a.t_ms[i] - tele.b.t_ms[i]) / 1000;
+
+      function lapPickers() {
+        const best = fastest(tele.laps);
+        const option = (l, id, text) => el("option", { value: id + "/" + l.lap }, text);
+        const mark = (l) => (l === best ? "　ベスト" : l.pit ? "　ピット" : "");
+        const mine = () =>
+          tele.laps.map((l) =>
+            option(l, record.id, l.lap + "周目　" + lapTime(l.time_s) + mark(l)),
+          );
+        const pick = (title, chosen, options, apply) => {
+          const s = el("select", { title }, options);
+          s.className = "lap";
+          s.setAttribute("aria-label", title);
+          if (chosen) s.value = chosen.id + "/" + chosen.lap;
+          s.onchange = async () => {
+            const cut = s.value.lastIndexOf("/");
+            apply(await loadLap(s.value.slice(0, cut), +s.value.slice(cut + 1)));
+          };
+          return s;
+        };
+        const groups = [el("optgroup", { label: "このセッション" }, mine())];
+        if (tele.others.length)
+          groups.push(
+            el(
+              "optgroup",
+              { label: "他のセッションのベスト" },
+              tele.others.map((l) =>
+                option(l, l.id, dayName(l.when) + " " + hour(l.when) + "　" + lapTime(l.time_s)),
+              ),
+            ),
+          );
+        return {
+          a: pick("見る周", tele.a, mine(), (l) => setLaps(l, tele.b)),
+          b: pick("基準の周", tele.b, groups, (l) => setLaps(tele.a, l)),
+        };
+      }
+
+      // What was done differently, in the order it happens.
+      function reasons(c) {
+        const out = [];
+        const metres = (v) => Math.abs(v).toFixed(0) + "m";
+        if (c.brake_m !== null && Math.abs(c.brake_m) >= 5)
+          out.push("ブレーキ" + metres(c.brake_m) + (c.brake_m < 0 ? "早い" : "遅い"));
+        if (Math.abs(c.min_kmh) >= 1.5) out.push("最低速" + signed(c.min_kmh, 0));
+        if (c.throttle_m !== null && Math.abs(c.throttle_m) >= 5)
+          out.push("アクセル" + metres(c.throttle_m) + (c.throttle_m > 0 ? "遅い" : "早い"));
+        if (Math.abs(c.exit_kmh) >= 1.5) out.push("出口" + signed(c.exit_kmh, 0));
+        return out;
+      }
+
+      // Time lost around each place: -1 (gaining) to 1 (losing).
+      function rates() {
+        const n = tele.a.speed.length,
+          w = Math.round(n / 80);
+        const out = tele.a.speed.map(
+          (_, i) => gapAt(Math.min(n - 1, i + w)) - gapAt(Math.max(0, i - w)),
+        );
+        const order = out.map(Math.abs).sort((x, y) => x - y);
+        const top = Math.max(0.02, order[Math.floor(n * 0.96)]);
+        return out.map((v) => Math.max(-1, Math.min(1, v / top)));
+      }
+
+      // Moves everything to a place of the lap (0 to 1), or nowhere.
+      let cursorAt = () => {},
+        mapCursor = () => {};
+
+      const LANES = [
+        { key: "gap", name: "差", share: 1.1 },
+        { key: "speed", name: "速度", unit: "km/h", share: 3.2, k: 0.1 },
+        {
+          key: "throttle",
+          name: "アクセル",
+          unit: "%",
+          share: 1,
+          k: 1,
+          lo: 0,
+          hi: 100,
+          fill: true,
+        },
+        { key: "brake", name: "ブレーキ", unit: "%", share: 1, k: 1, lo: 0, hi: 100, fill: true },
+        { key: "gear", name: "ギア", unit: "", share: 0.7, k: 1, step: true },
+        { key: "steer", name: "舵", unit: "°", share: 0.9, k: 0.1, middle: true },
+      ];
+
+      function drawLanes() {
+        const stage = $("stage"),
+          { a, b } = tele;
+        if (!a) {
+          stage.replaceChildren(
+            el(
+              "p",
+              { className: "empty" },
+              "このセッションには波形の記録がありません。",
+              el("br"),
+              "VR Radioかvr serveが動いている間に走ると、周ごとに残ります。",
+              el("br"),
+              "iRacingの.ibtは vr sessions import で取り込めます。",
+            ),
+          );
+          return;
+        }
+        const W = stage.clientWidth,
+          H = stage.clientHeight,
+          L = 64,
+          R = 78,
+          n = a.speed.length,
+          alone = same(),
+          [z0, z1] = tele.zoom;
+        const x = (f) => L + ((W - L - R) * (f - z0)) / (z1 - z0);
+        const place = (px) => z0 + ((px - L) / (W - L - R)) * (z1 - z0);
+        const root = svg("svg", {
+          viewBox: `0 0 ${W} ${H}`,
+          tabindex: 0,
+          role: "img",
+          "aria-label": "速度と操作の波形。二つの周を距離で重ねたもの",
+        });
+        const clipTo = (id, shape) => {
+          const c = svg("clipPath", { id });
+          c.append(shape);
+          root.append(c);
+          return `url(#${id})`;
+        };
+        const box = (y, h) => svg("rect", { x: L, y, width: W - L - R, height: Math.max(0, h) });
+        const plot = clipTo("plot", box(0, H));
+
+        const lanes = LANES.filter((l) => !alone || l.key !== "gap");
+        const top = 24,
+          bottom = 22,
+          space = 14;
+        const unit =
+          (H - top - bottom - space * (lanes.length - 1)) / lanes.reduce((s, l) => s + l.share, 0);
+        const first = Math.max(0, Math.floor(z0 * n) - 1),
+          last = Math.min(n - 1, Math.ceil(z1 * n) + 1);
+        const indices = [];
+        for (let i = first; i <= last; i++) indices.push(i);
+        const path = (f, step) =>
+          indices
+            .map((i, k) =>
+              !k ? `M${x(i / n)} ${f(i)}` : step ? `H${x(i / n)}V${f(i)}` : `L${x(i / n)} ${f(i)}`,
+            )
+            .join("");
+        const down = (d, y) => d + `L${x(last / n)} ${y}L${x(first / n)} ${y}Z`;
+
+        // The corner under the cursor, behind everything.
+        const band = svg("rect", {
+          y: top - 8,
+          height: H - top - bottom + 12,
+          rx: 6,
+          fill: "var(--muted)",
+          visibility: "hidden",
+          "clip-path": plot,
+        });
+        root.append(band);
+        for (const c of tele.corners)
+          if (c.apex >= z0 && c.apex <= z1)
+            root.append(
+              svg("path", {
+                d: `M${x(c.apex)} ${top - 4}V${H - bottom}`,
+                stroke: "var(--border)",
+                "stroke-dasharray": "2 4",
+              }),
+              svg(
+                "text",
+                { x: x(c.apex), y: 14, "text-anchor": "middle", class: "soft" },
+                c.number,
+              ),
+            );
+
+        const readouts = [];
+        let y0 = top;
+        for (const lane of lanes) {
+          const h = lane.share * unit,
+            base = y0 + h,
+            g = svg("g", { "clip-path": plot });
+          let y, value, mine;
+          if (lane.key === "gap") {
+            const gaps = indices.map(gapAt);
+            const hi = Math.max(0.1, ...gaps),
+              lo = Math.min(-0.1, ...gaps),
+              top0 = y0;
+            // Below the line is behind.
+            y = (v) => top0 + (h * (v - lo)) / (hi - lo);
+            const d = path((i) => y(gapAt(i)));
+            for (const [id, from, to, color] of [
+              ["late", y(0), base, "--loss"],
+              ["early", y0, y(0), "--gain"],
+            ])
+              g.append(
+                svg("path", {
+                  d: down(d, y(0)),
+                  fill: `var(${color})`,
+                  "fill-opacity": 0.35,
+                  "clip-path": clipTo(id, box(from, to - from)),
+                }),
+              );
+            g.append(
+              svg("path", { d: `M${L} ${y(0)}H${W - R}`, stroke: "var(--border)" }),
+              svg("path", { d, fill: "none", stroke: "var(--foreground)", "stroke-width": 1.75 }),
+            );
+            mine = gapAt;
+            value = (i) => [signed(gapAt(i), 2), null];
+          } else {
+            const A = a[lane.key],
+              B = alone ? null : b[lane.key];
+            let lo = lane.lo,
+              hi = lane.hi;
+            if (lo === undefined) {
+              const all = indices.flatMap((i) => (B ? [A[i], B[i]] : [A[i]]));
+              lo = Math.min(...all) * lane.k;
+              hi = Math.max(...all) * lane.k;
+            }
+            if (lane.middle) {
+              hi = Math.max(Math.abs(lo), Math.abs(hi), 5);
+              lo = -hi;
+            }
+            if (hi - lo < 1) hi = lo + 1;
+            y = (v) => base - (h * (v - lo)) / (hi - lo);
+            mine = (i) => A[i] * lane.k;
+            const line = (t) => path((i) => y(t[i] * lane.k), lane.step);
+            const own = line(A);
+            g.append(
+              svg("path", {
+                d: `M${L} ${lane.middle ? y(0) : base}H${W - R}`,
+                stroke: "var(--border)",
+              }),
+            );
+            if (lane.key === "speed" && B) {
+              // Between the lines: what was lost and what was won.
+              const edge = line(B);
+              const between =
+                own +
+                [...indices]
+                  .reverse()
+                  .map((i) => `L${x(i / n)} ${y(B[i] * lane.k)}`)
+                  .join("") +
+                "Z";
+              for (const [id, to, color] of [
+                ["slow", base + 2, "--loss"],
+                ["fast", y0 - 2, "--gain"],
+              ])
+                g.append(
+                  svg("path", {
+                    d: between,
+                    fill: `var(${color})`,
+                    "fill-opacity": 0.5,
+                    "clip-path": clipTo(id, svg("path", { d: down(edge, to) })),
+                  }),
+                );
+            }
+            if (lane.fill)
+              g.append(
+                svg("path", { d: down(own, base), fill: "var(--foreground)", "fill-opacity": 0.1 }),
+              );
+            if (B)
+              g.append(
+                svg("path", {
+                  d: line(B),
+                  fill: "none",
+                  stroke: "var(--reference)",
+                  "stroke-width": 1.5,
+                }),
+              );
+            g.append(
+              svg("path", {
+                d: own,
+                fill: "none",
+                stroke: "var(--foreground)",
+                "stroke-width": 1.75,
+                "stroke-linejoin": "round",
+              }),
+            );
+            const text = (v) => (v * lane.k).toFixed(0).replace("-", "−");
+            value = (i) => [text(A[i]), B ? text(B[i]) : null];
+            if (lane.key === "speed")
+              root.append(
+                svg("text", { x: L - 8, y: y0 + 9, "text-anchor": "end" }, hi.toFixed(0)),
+                svg("text", { x: L - 8, y: base, "text-anchor": "end" }, lo.toFixed(0)),
+              );
+          }
+          const middle = y0 + h / 2 + 4;
+          const out = svg("text", {
+            x: W - R + 12,
+            y: middle,
+            class: "on",
+            style: "font-size:14px;font-weight:600",
+          });
+          const ref = svg("text", { x: W, y: middle, "text-anchor": "end" });
+          const dot = svg("circle", {
+            r: 3.5,
+            fill: "var(--foreground)",
+            stroke: "var(--background)",
+            "stroke-width": 2,
+            visibility: "hidden",
+          });
+          root.append(svg("text", { x: 0, y: middle, class: "soft" }, lane.name), g, out, ref, dot);
+          readouts.push({ lane, value, out, ref, dot, y, mine });
+          y0 = base + space;
+        }
+
+        // Distance.
+        const km = a.length_m / 1000;
+        const tick = [0.1, 0.2, 0.5, 1, 2, 5].find((s) => ((z1 - z0) * km) / s <= 9) || 5;
+        for (let v = Math.ceil((z0 * km) / tick) * tick; v <= z1 * km + 1e-9; v += tick)
+          root.append(
+            svg(
+              "text",
+              { x: x(v / km), y: H - 6, "text-anchor": "middle" },
+              v.toFixed(tick < 1 ? 1 : 0) + "km",
+            ),
+          );
+        const hair = svg("path", { stroke: "var(--muted-foreground)", visibility: "hidden" });
+        const picked = svg("rect", {
+          y: top - 8,
+          height: H - top - bottom + 12,
+          fill: "var(--foreground)",
+          opacity: 0.1,
+          visibility: "hidden",
+        });
+        root.append(hair, picked);
+
+        cursorAt = (f) => {
+          const i = f === null ? null : Math.min(n - 1, Math.max(0, Math.round(f * n)));
+          const on = i !== null && f >= z0 && f <= z1;
+          hair.setAttribute("visibility", on ? "visible" : "hidden");
+          if (on) hair.setAttribute("d", `M${x(i / n)} ${top - 8}V${H - bottom + 4}`);
+          for (const r of readouts) {
+            const [own, other] = on ? r.value(i) : ["", null];
+            r.out.textContent = own;
+            r.ref.textContent = other ?? (on ? r.lane.unit || "" : "");
+            r.dot.setAttribute("visibility", on ? "visible" : "hidden");
+            if (on) {
+              r.dot.setAttribute("cx", x(i / n));
+              r.dot.setAttribute("cy", r.y(r.mine(i)));
+            }
+          }
+          const c = f === null ? null : tele.corners.find((k) => f >= k.from && f < k.to);
+          band.setAttribute("visibility", c ? "visible" : "hidden");
+          if (c) {
+            band.setAttribute("x", x(c.from));
+            band.setAttribute("width", Math.max(0, x(c.to) - x(c.from)));
+          }
+          for (const row of document.querySelectorAll(".loss button"))
+            row.classList.toggle("on", +row.dataset.n === c?.number);
+          mapCursor(i);
+        };
+        const at = (ev) =>
+          Math.min(1, Math.max(0, place(ev.clientX - root.getBoundingClientRect().left)));
+        let from = null;
+        root.onpointerdown = (ev) => {
+          from = at(ev);
+          root.setPointerCapture(ev.pointerId);
+        };
+        root.onpointermove = (ev) => {
+          const f = at(ev);
+          if (from !== null && Math.abs(x(f) - x(from)) > 6) {
+            picked.setAttribute("visibility", "visible");
+            picked.setAttribute("x", Math.min(x(f), x(from)));
+            picked.setAttribute("width", Math.abs(x(f) - x(from)));
+          }
+          cursorAt(f);
+        };
+        root.onpointerup = (ev) => {
+          const f = at(ev),
+            began = from;
+          from = null;
+          picked.setAttribute("visibility", "hidden");
+          if (began !== null && Math.abs(x(f) - x(began)) > 12)
+            zoomTo(Math.min(f, began), Math.max(f, began));
+        };
+        root.onpointerleave = () => cursorAt(null);
+        root.ondblclick = () => zoomTo(0, 1);
+        root.onwheel = (ev) => {
+          ev.preventDefault();
+          const f = at(ev),
+            k = ev.deltaY > 0 ? 1.25 : 0.8;
+          zoomTo(f - (f - z0) * k, f + (z1 - f) * k);
+        };
+        root.onkeydown = async (ev) => {
+          if (ev.key === "Escape") return zoomTo(0, 1);
+          const step = { ArrowLeft: -1, ArrowRight: 1 }[ev.key];
+          const next = step && tele.laps[tele.laps.findIndex((l) => l.lap === a.lap) + step];
+          if (!next) return;
+          ev.preventDefault();
+          await setLaps(await loadLap(record.id, next.lap), tele.b);
+          document.querySelector("#stage svg")?.focus();
+        };
+        stage.replaceChildren(root);
+        if (z0 > 0 || z1 < 1) {
+          const back = el("button", { type: "button", className: "back" }, "全体");
+          back.onclick = () => zoomTo(0, 1);
+          stage.append(back);
+        }
+      }
+
+      function zoomTo(a, b) {
+        const least = 0.015,
+          middle = (a + b) / 2;
+        if (b - a < least) [a, b] = [middle - least / 2, middle + least / 2];
+        tele.zoom = [Math.max(0, a), Math.min(1, b)];
+        drawLanes();
+        drawMap();
+      }
+
+      function drawMap() {
+        const box = document.querySelector(".map");
+        if (!box || !tele.a) return;
+        const { a } = tele,
+          n = a.speed.length,
+          W = box.clientWidth,
+          H = box.clientHeight,
+          pad = 20;
+        const x0 = Math.min(...a.x),
+          x1 = Math.max(...a.x),
+          y0 = Math.min(...a.y),
+          y1 = Math.max(...a.y);
+        // Upright or lying, whichever is larger in the box.
+        const turned = x1 - x0 < y1 - y0 !== W < H;
+        const w = turned ? y1 - y0 : x1 - x0,
+          h = turned ? x1 - x0 : y1 - y0;
+        const k = Math.min((W - pad * 2) / w, (H - pad * 2) / h),
+          ox = (W - w * k) / 2,
+          oy = (H - h * k) / 2;
+        const points = a.x.map((_, i) =>
+          turned
+            ? [ox + (a.y[i] - y0) * k, oy + (a.x[i] - x0) * k]
+            : [ox + (a.x[i] - x0) * k, H - oy - (a.y[i] - y0) * k],
+        );
+        const at = (i) => points[((i % n) + n) % n];
+        const root = svg("svg", {
+          viewBox: `0 0 ${W} ${H}`,
+          role: "img",
+          "aria-label": "コースマップ",
+        });
+        const alone = same(),
+          tint = alone ? null : rates(),
+          top = Math.max(...a.speed),
+          low = Math.min(...a.speed),
+          [z0, z1] = tele.zoom,
+          piece = 5;
+        for (let i = 0; i < n; i += piece) {
+          let d = "M" + at(i).join(" ");
+          for (let j = i + 1; j <= i + piece; j++) d += "L" + at(j).join(" ");
+          const v = alone ? (a.speed[i] - low) / (top - low) : tint[Math.min(n - 1, i + 2)];
+          const hue = alone ? "--me" : v > 0 ? "--loss" : "--gain";
+          root.append(
+            svg("path", {
+              d,
+              fill: "none",
+              stroke: `color-mix(in oklab, var(${hue}) ${Math.round(Math.abs(v) * 100)}%, var(--mark))`,
+              "stroke-width": 5,
+              "stroke-linecap": "round",
+              opacity: i / n >= z0 && i / n <= z1 ? 1 : 0.25,
+            }),
+          );
+        }
+        // The line, across the track.
+        const [sx, sy] = at(0),
+          [tx, ty] = at(3),
+          len = Math.hypot(tx - sx, ty - sy) || 1,
+          nx = (-(ty - sy) / len) * 8,
+          ny = ((tx - sx) / len) * 8;
+        root.append(
+          svg("path", {
+            d: `M${sx + nx} ${sy + ny}L${sx - nx} ${sy - ny}`,
+            stroke: "var(--foreground)",
             "stroke-width": 2,
           }),
         );
-        for (const l of pts) {
-          const c = s("circle", {
-            cx: x(l.lap),
-            cy: y(l.time_s),
-            r: 4,
-            fill: l.pit || l.caution ? "var(--warn)" : "var(--accent)",
-          });
-          c.append(
-            s(
-              "title",
-              {},
-              l.lap +
-                " 周目 " +
-                lap(l.time_s) +
-                (l.pit ? " ピット" : "") +
-                (l.caution ? " 黄旗" : ""),
+        for (const c of tele.corners) {
+          const i = Math.round(c.apex * n),
+            [px, py] = at(i),
+            [bx, by] = at(i - 12),
+            [fx, fy] = at(i + 12);
+          // Outside of the bend.
+          let dx = px - (bx + fx) / 2,
+            dy = py - (by + fy) / 2;
+          if (Math.hypot(dx, dy) < 0.5) [dx, dy] = [px - W / 2, py - H / 2];
+          const l = Math.hypot(dx, dy) || 1;
+          root.append(
+            svg(
+              "text",
+              {
+                x: px + (dx / l) * 13,
+                y: py + (dy / l) * 13 + 4,
+                "text-anchor": "middle",
+                class: "soft",
+                style: "font-size:10px",
+              },
+              c.number,
             ),
           );
-          svg.append(c, s("text", { x: x(l.lap), y: H - 8, "text-anchor": "middle" }, l.lap));
         }
-        return svg;
+        const dot = svg("circle", {
+          r: 6,
+          fill: "var(--foreground)",
+          stroke: "var(--background)",
+          "stroke-width": 2.5,
+          visibility: "hidden",
+        });
+        root.append(dot);
+        mapCursor = (i) => {
+          dot.setAttribute("visibility", i === null ? "hidden" : "visible");
+          if (i === null) return;
+          dot.setAttribute("cx", at(i)[0]);
+          dot.setAttribute("cy", at(i)[1]);
+        };
+        root.onpointermove = (ev) => {
+          const r = root.getBoundingClientRect(),
+            mx = ((ev.clientX - r.left) * W) / r.width,
+            my = ((ev.clientY - r.top) * H) / r.height;
+          let best = null,
+            least = 400;
+          points.forEach(([px, py], i) => {
+            const d = (px - mx) ** 2 + (py - my) ** 2;
+            if (d < least) [best, least] = [i, d];
+          });
+          cursorAt(best === null ? null : best / n);
+        };
+        root.onpointerleave = () => cursorAt(null);
+        box.replaceChildren(root);
       }
 
-      function table(head, rows) {
+      function drawLosses() {
+        const rows = [...tele.corners].sort((p, q) => q.loss_s - p.loss_s);
+        const most = Math.max(0.05, ...rows.map((c) => Math.abs(c.loss_s)));
+        return rows.map((c) => {
+          const why = reasons(c);
+          const bar = el("i");
+          bar.style.width = ((Math.abs(c.loss_s) / most) * 100).toFixed(0) + "%";
+          bar.style.background = `var(${c.loss_s > 0 ? "--loss" : "--gain"})`;
+          const b = el(
+            "button",
+            { type: "button" },
+            el("span", null, String(c.number)),
+            el("span", null, why.length ? why.join("、") : "ほぼ同じ"),
+            el("b", null, signed(c.loss_s, 2)),
+            el("em", null, bar),
+          );
+          b.dataset.n = c.number;
+          const pad = (c.to - c.from) * 0.1,
+            range = [Math.max(0, c.from - pad), Math.min(1, c.to + pad)];
+          b.onclick = () =>
+            tele.zoom.every((v, i) => Math.abs(v - range[i]) < 1e-6)
+              ? zoomTo(0, 1)
+              : zoomTo(...range);
+          b.onpointerenter = () => cursorAt(c.apex);
+          b.onpointerleave = () => cursorAt(null);
+          return b;
+        });
+      }
+
+      function drawTelemetrySide() {
+        if (!tele.a) {
+          drawResult();
+          drawLook(null);
+          return;
+        }
+        const alone = same();
+        $("side").replaceChildren(
+          el("div", { className: "map" }),
+          el(
+            "div",
+            { className: "key" },
+            el("span", null, alone ? "遅い" : "稼いだ"),
+            el("i", { className: alone ? "speed" : "" }),
+            el("span", null, alone ? "速い" : "失った"),
+          ),
+          el("section", { className: "loss" }, alone ? null : drawLosses()),
+        );
+        drawMap();
+      }
+
+      function telemetryFigures() {
+        const { a, b } = tele,
+          alone = same();
+        const fact = (label, big, small) =>
+          el(
+            "div",
+            null,
+            el("label", null, label),
+            el("b", null, big),
+            small && el("u", null, small),
+          );
+        const top = (t) => Math.max(...t.speed) / 10;
+        const full = (t) => (100 * t.throttle.filter((v) => v >= 95).length) / t.throttle.length;
+        const pickers = lapPickers();
+        const out = [fact(pickers.a, lapTime(a.time_s), null)];
+        if (!alone) {
+          const gap = a.time_s - b.time_s,
+            g = fact("基準との差", signed(gap, 3), null);
+          g.querySelector("b").style.color = `var(${gap > 0 ? "--loss" : "--gain"})`;
+          const lost = tele.corners.reduce((s, c) => s + Math.max(0, c.loss_s), 0);
+          g.querySelector("b").title = "負の値は、見る周のほうが速い";
+          out.push(
+            fact([el("i", { className: "line" }), pickers.b], lapTime(b.time_s), null),
+            g,
+            fact("失った合計", lost.toFixed(2), "秒"),
+          );
+        }
+        out.push(
+          fact("最高速", top(a).toFixed(0), alone ? "km/h" : signed(top(a) - top(b), 0) + "km/h"),
+          fact(
+            "アクセル全開",
+            full(a).toFixed(0) + "%",
+            alone ? null : signed(full(a) - full(b), 0) + "%",
+          ),
+        );
+        return out;
+      }
+
+      /* ---- The setup ---- */
+      const CORNERS = ["LeftFront", "RightFront", "LeftRear", "RightRear"];
+      const CORNER_NAMES = ["左前", "右前", "左後", "右後"];
+      // What the analysis says, in the driver's language.
+      const AREA = {
+        brakes: "ブレーキ",
+        traction: "トラクション",
+        slow_balance: "低速のバランス",
+        fast_balance: "高速のバランス",
+        balance: "バランス",
+        ride_height: "車高",
+        camber: "キャンバー",
+        pressure: "内圧",
+        dampers: "ダンパー",
+      };
+      const CHANGE = [
+        ["bias rearward", "BBを後ろへ 0.5〜1.0（前輪が先にロック）"],
+        ["bias forward", "BBを前へ 0.5〜1.0（後輪が先にロック）"],
+        ["bias is right", "BBはこのまま。踏力のピークを下げ、早めに抜く"],
+        ["more locking off", "オフスロットルのデフを強く"],
+        ["more preload", "デフのプリロードを増やす（片輪だけ空転）"],
+        ["smaller drive angle", "ドライブ角を小さく（オンで効かせる）"],
+        ["softer rear bar", "リアARBを柔らかく"],
+        ["stiffer rear bar", "リアARBを硬く"],
+        ["softer front bar", "フロントARBを柔らかく"],
+        ["stiffer front bar", "フロントARBを硬く"],
+        ["softer rear springs", "リアスプリングを柔らかく"],
+        ["less preload", "プリロードを減らす"],
+        ["one step more rear wing", "リアウイングを1段増"],
+        ["one step less rear wing", "リアウイングを1段減"],
+        ["one step more front wing", "フロントウイングを1段増"],
+        ["one step less front wing", "フロントウイングを1段減"],
+        ["rear 1 mm higher", "リアを1mm上げる（レーキ増）"],
+        ["rear 1 mm lower", "リアを1mm下げる（レーキ減）"],
+        ["front 1-2 mm higher", "フロントを1〜2mm上げる"],
+        ["rear 1-2 mm higher", "リアを1〜2mm上げる"],
+        ["stiffer front springs", "フロントのヒーブ・スプリングを硬く"],
+        ["stiffer rear springs", "リアのサード・スプリングを硬く"],
+        ["less negative camber", "ネガティブキャンバーを0.2〜0.3減"],
+        ["more negative camber", "ネガティブキャンバーを0.2〜0.3増"],
+        ["2-4 kPa lower", "内圧を2〜4kPa下げる"],
+        ["2-4 kPa higher", "内圧を2〜4kPa上げる"],
+        ["softer dampers", "ダンパーを柔らかく"],
+        ["less bump", "バンプを弱く、またはリバウンドを強く"],
+        ["less rebound", "リバウンドを弱く、またはバンプを強く"],
+      ];
+      const inJapanese = (c) => (CHANGE.find(([en]) => c.startsWith(en)) || [0, c])[1];
+      const analyses = new Map();
+
+      // One wheel: temperatures across the tread, and what it did.
+      function wheelCard(c, k, name, range) {
+        const t = c.loaded_c[k],
+          left = k[0] === "l",
+          lock = c.lock_s[k],
+          spin = c.spin_s[k],
+          d = c.dampers[k];
+        const cells = t ? (left ? t : [t[2], t[1], t[0]]) : [];
+        const fact = (label, v, loud) =>
+          el("span", { className: loud ? "loud" : "" }, el("i", null, label), v);
+        const bar = d
+          ? el(
+              "div",
+              { className: "damper", title: "リバウンド（速・遅）｜バンプ（遅・速）の時間の割合" },
+              ["rebound_high", "rebound_low", "bump_low", "bump_high"].map((p) => {
+                const e = el("i", { className: p.endsWith("high") ? "fast" : "" });
+                e.style.flex = d[p];
+                return e;
+              }),
+            )
+          : null;
         return el(
           "div",
-          { className: "scroll" },
+          { className: "wheel" },
           el(
-            "table",
+            "h3",
             null,
-            el("tr", null, ...head.map((h) => el("th", null, h))),
-            ...rows.map((r) =>
+            name,
+            c.pressure_kpa[k] ? el("small", null, Math.round(c.pressure_kpa[k]) + " kPa") : null,
+          ),
+          cells.length
+            ? el(
+                "div",
+                { className: "tread", title: "荷重がかかったときの表面温度（左右は車の向き）" },
+                cells.map((v) => {
+                  const e = el("b", null, String(Math.round(v)));
+                  e.style.setProperty(
+                    "--heat",
+                    ((v - range[0]) / Math.max(1, range[1] - range[0])).toFixed(2),
+                  );
+                  return e;
+                }),
+              )
+            : null,
+          el(
+            "div",
+            { className: "did" },
+            fact("ロック", lock.toFixed(1) + "s", lock >= 0.15),
+            fact("空転", spin.toFixed(1) + "s", spin >= 0.3),
+          ),
+          bar,
+        );
+      }
+
+      function drawAnalysis(a) {
+        const c = a.chassis,
+          b = a.behaviour,
+          parts = [];
+        if (c) {
+          const all = Object.values(c.loaded_c).filter(Boolean).flat();
+          const range = [Math.min(...all), Math.max(...all)];
+          const card = (k, n) => wheelCard(c, k, n, range);
+          const rides = c.ride.map((r) => [
+            el(
+              "span",
+              null,
+              Math.round(r.from_kmh) + (r.to_kmh ? "–" + Math.round(r.to_kmh) : "+"),
+            ),
+            el("b", null, r.front_mm.toFixed(1)),
+            el("b", null, r.rear_mm.toFixed(1)),
+            el("span", null, signed(r.rear_mm - r.front_mm, 1)),
+          ]);
+          parts.push(
+            el(
+              "div",
+              { className: "plan" },
+              card("lf", "左前"),
               el(
-                "tr",
-                { className: r.me ? "me" : "" },
-                ...r.cells.map((c) => el("td", null, c ?? "--")),
+                "div",
+                { className: "middle" },
+                el(
+                  "div",
+                  { className: "rides" },
+                  ["km/h", "前mm", "後mm", "レーキ"].map((h) => el("i", null, h)),
+                  rides,
+                ),
+                el(
+                  "p",
+                  null,
+                  [
+                    c.front_brake ? "ブレーキ前 " + (c.front_brake * 100).toFixed(1) + "%" : null,
+                    "底付き 前" +
+                      c.touch_front_s.toFixed(1) +
+                      "s 後" +
+                      c.touch_rear_s.toFixed(1) +
+                      "s",
+                  ]
+                    .filter(Boolean)
+                    .join("　"),
+                ),
+              ),
+              card("rf", "右前"),
+              card("lr", "左後"),
+              b ? balanceBars(b) : el("div"),
+              card("rr", "右後"),
+            ),
+          );
+        } else if (b) parts.push(el("div", { className: "plan single" }, balanceBars(b)));
+        const found = a.findings.map((f) =>
+          el(
+            "li",
+            { title: f.evidence },
+            el("h3", null, AREA[f.area] || f.area),
+            f.options.map((o) =>
+              el(
+                "p",
+                null,
+                inJapanese(o.change),
+                o.items.length
+                  ? el("small", null, [...new Set(o.items.map((i) => i.value))].join("・"))
+                  : null,
               ),
             ),
           ),
         );
+        const tries = a.experiments
+          .filter((e) => e.lap_time_s !== null)
+          .map((e) =>
+            el(
+              "li",
+              { title: e.lap + "周目・前後" + e.laps_before + "/" + e.laps_after + "周" },
+              el("h3", null, e.control + " " + +e.from.toFixed(2) + "→" + +e.to.toFixed(2)),
+              el(
+                "p",
+                null,
+                "1周 " + signed(e.lap_time_s, 2) + "秒",
+                el(
+                  "small",
+                  null,
+                  [
+                    ["アンダー", e.understeer_s],
+                    ["オーバー", e.oversteer_s],
+                    ["空転", e.wheelspin_s],
+                  ]
+                    .filter(([, v]) => v !== null && Math.abs(v) >= 0.1)
+                    .map(([n, v]) => n + signed(v, 1))
+                    .join("　"),
+                ),
+              ),
+            ),
+          );
+        if (found.length)
+          parts.push(el("section", null, el("h2", null, "打ち手"), el("ol", null, found)));
+        if (tries.length)
+          parts.push(
+            el("section", null, el("h2", null, "走行中の変更の結果"), el("ol", null, tries)),
+          );
+        return parts.length ? el("div", { className: "diagnosis" }, parts) : null;
       }
 
-      async function show(id) {
-        current = id;
-        drawList();
-        const res = await fetch("/v1/sessions/" + encodeURIComponent(id));
-        if (!res.ok) {
-          $("main").replaceChildren(el("p", null, "見つかりません。"));
+      function balanceBars(b) {
+        const scale = Math.max(1, ...b.by_speed.flatMap((x) => [x.understeer_s, x.oversteer_s]));
+        const row = (name, x) => {
+          const bar = (v, cls) => {
+            const e = el("i", { className: cls });
+            e.style.width = (v / scale) * 100 + "%";
+            return e;
+          };
+          return [
+            el("b", null, x.understeer_s.toFixed(1)),
+            el("div", { className: "u" }, bar(x.understeer_s, "under")),
+            el("span", null, name),
+            el("div", null, bar(x.oversteer_s, "over")),
+            el("b", null, x.oversteer_s.toFixed(1)),
+          ];
+        };
+        return el(
+          "div",
+          { className: "sides", title: "1周あたりの秒数（入力と動きからの推定）" },
+          [el("i"), el("i", null, "アンダー"), el("i"), el("i", null, "オーバー"), el("i")],
+          ["低速", "中速", "高速"].map((n, i) => row(n, b.by_speed[i])),
+        );
+      }
+
+      const words = (s) => s.replace(/([a-z])([A-Z0-9])/g, "$1 $2");
+      function drawSetup() {
+        const stage = $("stage"),
+          setup = record.setup;
+        const id = record.id;
+        if (!analyses.has(id)) {
+          analyses.set(id, null);
+          json(sessionPath(id) + "/analysis").then((a) => {
+            analyses.set(id, a);
+            if (view === "setup" && record.id === id) drawSetup();
+          });
+        }
+        const found = analyses.get(id);
+        const diagnosis = found?.findings ? drawAnalysis(found) : null;
+        if (!setup?.items.length) {
+          if (diagnosis) return stage.replaceChildren(diagnosis);
+          stage.replaceChildren(
+            el("p", { className: "empty" }, "セットアップの記録がありません。"),
+          );
           return;
         }
-        const r = await res.json();
-        if (current !== id) return;
-        const fact = (label, value) =>
-          el("div", null, el("span", { className: "dim" }, label), el("b", null, value));
-        const out = [
-          el("h2", null, (KIND[r.kind] || r.kind) + " · " + (r.track || "--")),
+        const theirs = new Map((rival?.setup?.items || []).map((i) => [i.path, i.value]));
+        const value = (path, v) => {
+          const o = theirs.get(path);
+          return o !== undefined && o !== v
+            ? el("span", { className: "v diff" }, el("s", null, o), v)
+            : el("span", { className: "v" }, v ?? "");
+        };
+        const corner = new Map(),
+          groups = new Map();
+        for (const i of setup.items) {
+          const path = i.path.split("/"),
+            at = path.findIndex((p) => CORNERS.includes(p)),
+            name = path[path.length - 1].replace(/OMI$|IMO$/, "");
+          if (at >= 0) {
+            if (!corner.has(name)) corner.set(name, {});
+            corner.get(name)[path[at]] = i;
+          } else {
+            const g = path.slice(0, -1).join("・");
+            if (!groups.has(g)) groups.set(g, []);
+            groups.get(g).push([name, i]);
+          }
+        }
+        const sections = [];
+        if (corner.size) {
+          const cells = [el("span"), ...CORNER_NAMES.map((n) => el("span", { className: "h" }, n))];
+          for (const [name, by] of corner) {
+            cells.push(el("span", { className: "k", title: words(name) }, words(name)));
+            for (const c of CORNERS)
+              cells.push(by[c] ? value(by[c].path, by[c].value) : el("span"));
+          }
+          sections.push(
+            el(
+              "section",
+              { className: "wide" },
+              el("h2", null, "四輪"),
+              el("div", { className: "grid four" }, cells),
+            ),
+          );
+        }
+        for (const [g, items] of groups)
+          sections.push(
+            el(
+              "section",
+              null,
+              el("h2", null, words(g)),
+              el(
+                "div",
+                { className: "grid one" },
+                items.map(([name, i]) => [
+                  el("span", { className: "k", title: words(name) }, words(name)),
+                  value(i.path, i.value),
+                ]),
+              ),
+            ),
+          );
+        stage.replaceChildren(
+          ...[diagnosis, el("div", { className: "garage" }, sections)].filter(Boolean),
+        );
+      }
+
+      /* ---- The page ---- */
+      function draw() {
+        const setup = view === "setup";
+        $("stage").className = setup ? "setup" : "";
+        if (setup) drawSetup();
+        else if (view === "telemetry") drawLanes();
+        else drawRace();
+      }
+
+      function figures(r) {
+        const times = r.laps.map((l) => l.time_s).filter((t) => t > 0);
+        const good = r.laps.filter(clean);
+        const fuel = good.map((l) => l.fuel_used_l).filter((f) => f > 0);
+        return {
+          best: times.length ? Math.min(...times) : r.player?.best_lap_s,
+          average: mean(good.map((l) => l.time_s)),
+          fuel: mean(fuel),
+        };
+      }
+
+      function drawMain() {
+        const r = record,
+          [name, layout] = short(r.track),
+          f = figures(r),
+          o = rival && figures(rival);
+        const than = (a, b, digits) =>
+          o && a > 0 && b > 0 ? el("u", { className: "other" }, signed(a - b, digits)) : null;
+        const fact = (label, big, small) =>
+          el("div", null, el("i", null, label), el("b", null, big), small);
+        const p = r.player?.car.position,
+          began = positions(r)[0]?.[1];
+        const moved = p && began ? began - p : 0;
+        const bestLap = r.laps.find((l) => l.time_s === f.best)?.lap;
+        const weather = r.weather
+          ? [
+              { dry: "ドライ" }[r.weather.wetness] || r.weather.wetness,
+              r.weather.track_temp_c ? "路面" + Math.round(r.weather.track_temp_c) + "℃" : null,
+            ]
+          : [];
+        const compare = el(
+          "select",
+          { title: "比べるセッション" },
+          el("option", { value: "" }, "比べる…"),
+        );
+        compare.setAttribute("aria-label", "比べるセッション");
+        for (const s of sessions)
+          if (s.id !== r.id && s.track === r.track)
+            compare.append(
+              el(
+                "option",
+                { value: s.id, selected: s.id === rival?.id },
+                dayName(s.started_ms) + " " + hour(s.started_ms) + " " + (KIND[s.kind] || s.kind),
+              ),
+            );
+        compare.onchange = async () => {
+          rival = compare.value ? await load(compare.value) : null;
+          drawMain();
+        };
+        const tab = (id, text) => {
+          const b = el("button", { type: "button" }, text);
+          b.setAttribute("aria-pressed", view === id);
+          b.onclick = () => {
+            view = id;
+            focus = null;
+            drawMain();
+          };
+          return b;
+        };
+        $("main").replaceChildren(
           el(
             "div",
-            { className: "dim" },
-            new Date(r.started_ms).toLocaleString() + " · " + (r.car || "--") + " · " + r.id,
+            { className: "top" },
+            el(
+              "div",
+              { className: "name" },
+              el("h1", { title: r.track || "" }, name, layout ? el("small", null, layout) : null),
+              el(
+                "div",
+                { className: "meta" },
+                [
+                  KIND[r.kind] || r.kind,
+                  dayName(r.started_ms) + " " + hour(r.started_ms),
+                  r.car,
+                  ...weather,
+                ]
+                  .filter(Boolean)
+                  .join("・"),
+              ),
+            ),
+            el(
+              "div",
+              { className: "tools" },
+              view !== "telemetry" && compare.options.length > 1 ? compare : null,
+              el(
+                "div",
+                { className: "switch" },
+                tab("telemetry", "テレメトリ"),
+                tab("race", "レース"),
+                tab("setup", "セットアップ"),
+              ),
+            ),
           ),
-          r.note ? el("p", null, "📝 " + r.note) : null,
-        ];
-        const best = r.laps.map((l) => l.time_s).filter((t) => t > 0);
-        const clean = r.laps
-          .filter((l) => l.time_s > 0 && !l.pit && !l.caution)
-          .map((l) => l.time_s);
-        const fuel = r.laps
-          .filter((l) => l.fuel_used_l > 0 && !l.pit && !l.caution)
-          .map((l) => l.fuel_used_l);
-        const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
-        out.push(
           el(
             "div",
             { className: "facts" },
-            fact("順位", pos(r)),
-            fact("周回", String(r.laps_completed)),
-            fact("ベスト", lap(best.length ? Math.min(...best) : r.player?.best_lap_s)),
-            fact("平均", lap(mean(clean))),
-            fact("燃費", fuel.length ? mean(fuel).toFixed(2) + " L/周" : "--"),
-            fact("インシデント", (r.player?.incidents ?? 0) + "x"),
-            fact("時間", time(r.duration_s)),
+            view === "telemetry" && tele.a
+              ? telemetryFigures()
+              : [
+                  p
+                    ? fact(
+                        "順位",
+                        String(p),
+                        el(
+                          "u",
+                          null,
+                          "/" +
+                            r.player.cars_total +
+                            (moved ? (moved > 0 ? "　↑" : "　↓") + Math.abs(moved) : ""),
+                        ),
+                      )
+                    : null,
+                  fact(
+                    "ベスト",
+                    lapTime(f.best),
+                    than(f.best, o?.best, 3) || (bestLap ? el("u", null, bestLap + "周目") : null),
+                  ),
+                  fact("平均", lapTime(f.average), than(f.average, o?.average, 3)),
+                  fact(
+                    "燃費",
+                    f.fuel ? f.fuel.toFixed(2) : "−",
+                    than(f.fuel, o?.fuel, 2) || (f.fuel ? el("u", null, "L/周") : null),
+                  ),
+                  fact("インシデント", String(r.player?.incidents ?? 0), el("u", null, "x")),
+                  fact("周回", String(r.laps_completed)),
+                ],
           ),
+          el("div", { id: "stage" }),
         );
-        if (r.laps.length) {
-          out.push(
-            el("h3", null, "ラップ"),
-            chart(r.laps),
-            table(
-              ["周", "タイム", "燃料", "備考"],
-              r.laps.map((l) => ({
-                cells: [
-                  String(l.lap),
-                  lap(l.time_s),
-                  l.fuel_used_l ? l.fuel_used_l.toFixed(2) + " L" : null,
-                  [l.pit && "ピット", l.caution && "黄旗"].filter(Boolean).join("・") || "",
-                ],
-              })),
-            ),
-          );
+        if (view === "telemetry") drawTelemetrySide();
+        else {
+          drawResult();
+          drawLook(null);
         }
-        if (r.standings.length)
-          out.push(
-            el("h3", null, "結果"),
-            table(
-              ["順位", "車番", "ドライバー", "周回", "ベスト"],
-              r.standings.map((s) => ({
-                me: s.is_player,
-                cells: [
-                  s.car.position ? "P" + s.car.position : null,
-                  "#" + s.car.number,
-                  s.car.driver,
-                  String(s.laps_completed ?? 0),
-                  lap(s.best_lap_s),
-                ],
-              })),
-            ),
-          );
-        if (r.handling.length)
-          out.push(
-            el("h3", null, "挙動の傾向（秒/周）"),
-            table(
-              ["周", "アンダー", "オーバー", "空転", "後輪ロック", "ABS"],
-              r.handling.map((h) => {
-                const b = h.behaviour,
-                  sum = (p) => (p.entry + p.mid + p.exit).toFixed(1);
-                return {
-                  cells: [
-                    String(h.lap),
-                    sum(b.understeer),
-                    sum(b.oversteer),
-                    b.wheelspin_s.toFixed(1),
-                    b.rear_lock_s.toFixed(1),
-                    b.abs_s.toFixed(1),
-                  ],
-                };
-              }),
-            ),
-          );
-        if (r.adjustments.length)
-          out.push(
-            el("h3", null, "車内設定の変更"),
-            table(
-              ["時刻", "周", "項目", "変更"],
-              r.adjustments.map((a) => ({
-                cells: [
-                  time(a.session_time_s),
-                  a.lap === null ? null : String(a.lap),
-                  a.control,
-                  a.from.toFixed(1) + " → " + a.to.toFixed(1),
-                ],
-              })),
-            ),
-          );
-        if (r.events.length)
-          out.push(
-            el("h3", null, "イベント"),
-            table(
-              ["時刻", "内容"],
-              r.events.map((e) => ({ cells: [time(e.session_time_s), e.text] })),
-            ),
-          );
-        if (r.setup)
-          out.push(
-            el("h3", null, "セットアップ " + (r.setup.name || "")),
-            table(
-              ["項目", "値"],
-              r.setup.items.map((i) => ({ cells: [i.path, i.value] })),
-            ),
-          );
-        $("main").replaceChildren(...out.filter(Boolean));
-        $("main").scrollTop = 0;
+        draw();
+      }
+
+      const load = async (id) => {
+        const res = await fetch("/v1/sessions/" + encodeURIComponent(id));
+        return res.ok ? res.json() : null;
+      };
+
+      let wanted = null;
+      async function show(id) {
+        wanted = id;
+        const r = await load(id);
+        if (wanted !== id) return;
+        rival = null;
+        focus = null;
+        record = r;
+        drawList();
+        if (r) {
+          const t = await openTelemetry(r);
+          if (wanted !== id) return;
+          tele = t;
+          await compareLaps();
+          if (wanted !== id) return;
+          drawMain();
+        } else $("main").replaceChildren(el("p", { className: "empty" }, "見つかりません。"));
       }
 
       $("filter").oninput = drawList;
-      window.onhashchange = () => show(decodeURIComponent(location.hash.slice(1)));
+      const hash = () => decodeURIComponent(location.hash.slice(1));
+      onhashchange = () => show(hash());
+      onkeydown = (ev) => {
+        const step = { ArrowUp: -1, ArrowDown: 1 }[ev.key];
+        if (!step || ev.target.tagName === "SELECT" || !record) return;
+        const list = shown(),
+          i = list.findIndex((s) => s.id === record.id);
+        const next = list[i + step];
+        if (next) {
+          location.hash = next.id;
+          ev.preventDefault();
+        }
+      };
+      onresize = () => {
+        if (!record || view === "setup") return;
+        draw();
+        drawMap();
+      };
       fetch("/v1/sessions")
         .then((r) => r.json())
         .then((list) => {
           sessions = list;
           drawList();
-          const id = decodeURIComponent(location.hash.slice(1)) || list[0]?.id;
+          const id = hash() || list[0]?.id;
           if (id) show(id);
+          else
+            $("main").replaceChildren(
+              el("p", { className: "empty" }, "走ると、ここに記録が残ります。"),
+            );
         });
     </script>
   </body>

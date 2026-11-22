@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use vr_core::{SessionKind, Setup, Weather};
 
+use crate::chassis::Chassis;
 use crate::handling::HandlingLap;
 use crate::report::*;
 use crate::{Event, RaceApi, RaceState, StandingsParams};
@@ -45,6 +46,9 @@ pub struct SessionRecord {
     pub adjustments: Vec<Adjustment>,
     #[serde(default)]
     pub handling: Vec<HandlingLap>,
+    /// Where the game tells what the wheels do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chassis: Option<Chassis>,
     /// Written by the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -151,6 +155,7 @@ impl SessionRecord {
             setup: state.setup_now().cloned(),
             adjustments: state.adjustments().to_vec(),
             handling: state.handling_tracker().laps().cloned().collect(),
+            chassis: state.chassis(),
             note: None,
         })
     }
@@ -206,6 +211,14 @@ impl SessionRecord {
         if self.setup.is_none() {
             self.setup.clone_from(&old.setup);
         }
+        if self.chassis.is_none() {
+            self.chassis.clone_from(&old.chassis);
+        }
+        // A telemetry file knows the player's car only.
+        if old.standings.len() > self.standings.len() {
+            self.standings.clone_from(&old.standings);
+            self.player.clone_from(&old.player);
+        }
     }
 
     pub fn best_lap_s(&self) -> Option<f64> {
@@ -240,8 +253,13 @@ impl SessionRecord {
 
 fn merge_laps(new: &mut Vec<LapRecord>, old: &[LapRecord]) {
     for l in old {
-        if !new.iter().any(|n| n.lap == l.lap) {
-            new.push(l.clone());
+        match new.iter_mut().find(|n| n.lap == l.lap) {
+            Some(n) => {
+                n.position = n.position.or(l.position);
+                n.caution |= l.caution;
+                n.fuel_used_l = n.fuel_used_l.or(l.fuel_used_l);
+            }
+            None => new.push(l.clone()),
         }
     }
     new.sort_by_key(|l| l.lap);

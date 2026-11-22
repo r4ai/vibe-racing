@@ -2,8 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use vr_core::{Poll, SourceError, TelemetrySource};
-use vr_engine::{RaceState, SessionRecord};
+use vr_engine::{LapTrace, RaceState, SessionRecord};
 
 /// The directory sessions are kept in: `$VR_SESSIONS`, or next to the
 /// discovery file.
@@ -22,6 +23,30 @@ pub fn sessions_dir() -> PathBuf {
 pub struct SessionStore {
     dir: PathBuf,
 }
+
+/// A lap that was recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TraceLine {
+    pub lap: i32,
+    pub time_s: f64,
+    pub pit: bool,
+}
+
+impl TraceLine {
+    /// From `007_92345ms_pit.json`.
+    fn of(name: &str) -> Option<Self> {
+        let (lap, rest) = name.strip_suffix(".json")?.split_once('_')?;
+        let (ms, rest) = rest.split_once("ms")?;
+        Some(Self {
+            lap: lap.parse().ok()?,
+            time_s: ms.parse::<u64>().ok()? as f64 / 1000.0,
+            pit: rest == "_pit",
+        })
+    }
+}
+
+/// A session read from a file, with its laps.
+pub type ReadSession = (SessionRecord, Vec<LapTrace>);
 
 /// Why a session could not be found.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -78,6 +103,71 @@ impl SessionStore {
         }
         self.write(&r)?;
         Ok(r.id)
+    }
+
+    /// What stops cost on the track: of the latest session that shows it,
+    /// with the same car if there is one.
+    pub fn pit_loss(&self, track: &str, car: &str) -> Option<f64> {
+        let mut there: Vec<SessionRecord> = self
+            .read_all("")
+            .into_iter()
+            .filter(|r| r.track.as_deref() == Some(track))
+            .collect();
+        there.sort_by_key(|r| (r.car.as_deref() == Some(car), r.started_ms));
+        there.iter().rev().find_map(vr_engine::pit_loss_of)
+    }
+
+    /// The directory of the laps of a session.
+    fn trace_dir(&self, id: &str) -> PathBuf {
+        self.path(id).with_extension("laps")
+    }
+
+    /// Keeps a lap; one recorded before under the same number goes.
+    pub fn save_trace(&self, id: &str, t: &LapTrace) -> anyhow::Result<()> {
+        let dir = self.trace_dir(id);
+        std::fs::create_dir_all(&dir)?;
+        for (old, path) in self.trace_files(id) {
+            if old.lap == t.lap {
+                std::fs::remove_file(path)?;
+            }
+        }
+        // The list is made from the names alone.
+        let name = format!(
+            "{:03}_{}ms{}.json",
+            t.lap,
+            (t.time_s * 1000.0).round() as u64,
+            if t.pit { "_pit" } else { "" }
+        );
+        std::fs::write(dir.join(name), serde_json::to_vec(t)?)?;
+        Ok(())
+    }
+
+    fn trace_files(&self, id: &str) -> Vec<(TraceLine, PathBuf)> {
+        let Ok(dir) = std::fs::read_dir(self.trace_dir(id)) else {
+            return Vec::new();
+        };
+        let mut all: Vec<_> = dir
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                Some((TraceLine::of(&name)?, e.path()))
+            })
+            .collect();
+        all.sort_by_key(|(t, _)| t.lap);
+        all
+    }
+
+    /// The laps of a session that were recorded.
+    pub fn traces(&self, id: &str) -> Vec<TraceLine> {
+        self.trace_files(id).into_iter().map(|(t, _)| t).collect()
+    }
+
+    pub fn trace(&self, id: &str, lap: i32) -> Option<LapTrace> {
+        let (_, path) = self
+            .trace_files(id)
+            .into_iter()
+            .find(|(t, _)| t.lap == lap)?;
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     }
 
     /// All sessions, newest first. Files that cannot be read are left out.
@@ -141,6 +231,10 @@ impl SessionStore {
     pub fn delete(&self, key: &str) -> anyhow::Result<SessionRecord> {
         let r = self.find(key)?;
         std::fs::remove_file(self.path(&r.id))?;
+        let laps = self.trace_dir(&r.id);
+        if laps.is_dir() {
+            std::fs::remove_dir_all(laps)?;
+        }
         Ok(r)
     }
 }
@@ -149,15 +243,19 @@ impl SessionStore {
 pub fn read_sessions(
     source: &mut dyn TelemetrySource,
     state: &mut RaceState,
-) -> Result<Vec<SessionRecord>, SourceError> {
+) -> Result<Vec<ReadSession>, SourceError> {
     let mut out = Vec::new();
+    let mut laps = Vec::new();
     let mut extras_at: Option<f64> = None;
     loop {
         match source.poll(std::time::Duration::ZERO)? {
             Poll::Frame(f) => {
                 let t = f.session.time_s;
                 state.ingest(*f);
-                out.extend(state.take_finished());
+                for r in state.take_finished() {
+                    out.push((r, std::mem::take(&mut laps)));
+                }
+                laps.extend(state.take_traces());
                 // Once a minute is enough for what changes rarely.
                 if extras_at.is_none_or(|e| !(0.0..60.0).contains(&(t - e))) {
                     extras_at = Some(t);
@@ -170,6 +268,6 @@ pub fn read_sessions(
             Poll::Disconnected => break,
         }
     }
-    out.extend(SessionRecord::of(state));
+    out.extend(SessionRecord::of(state).map(|r| (r, laps)));
     Ok(out)
 }

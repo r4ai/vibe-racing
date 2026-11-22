@@ -1,0 +1,89 @@
+# What the driver asks of the radio in their own words: when to be quiet, what
+# to look out for, what to keep in mind. Checked by value (`~`: contains).
+# See docs/architecture.md for the fields.
+
+- id: quiet
+  world: { start_s: 620 }
+  calls:
+    - id: brakes
+      say: ブレーキ踏んでるときは話しかけないで。
+      behavior: setting
+      settings: [hold~brake, hold_calls?]
+      points: [ブレーキ中は話さないと受ける]
+    - id: corners-too
+      say: コーナー中もやめて。ストレートだけにして。
+      behavior: setting
+      settings: [hold~lat_g|steer|throttle]
+      points: [コーナー中も話さない、またはストレートだけ話すと受ける]
+    - id: back
+      say: やっぱりいつ話してもいいよ。
+      behavior: setting
+      settings: [hold=off, hold_calls?, quiet?]
+      points: [いつでも話すと受ける]
+    - id: three-laps
+      say: あと3周は集中したいから、急ぎじゃない連絡はいらない。
+      behavior: setting
+      settings: [quiet~lap]
+      points: [3周のあいだ急がない連絡をしないと受ける]
+    - id: fewer
+      say: もうちょっと無線減らして。
+      behavior: setting
+      settings: ["interval>8"]
+      points: [連絡を減らすと受ける]
+    - id: still-answers
+      say: 前との差は？
+      facts: [gap_ahead]
+      points: [前の車との差（秒）]
+
+- id: watch
+  world: { start_s: 620 }
+  calls:
+    - id: behind
+      say: 後ろが1秒切ったら教えて。
+      behavior: setting
+      settings: [when~gap_behind]
+      points: [後ろが1秒を切ったら知らせると受ける]
+    - id: fuel-every-five
+      say: 5周ごとに燃料どうなってるか言って。
+      behavior: setting
+      settings: [when~lap]
+      points: [5周ごとに燃料を伝えると受ける]
+    - id: cancel
+      say: さっきの後ろのやつ、もういいや。
+      behavior: setting
+      settings: ["forget=1"]
+      points: [後ろの見張りをやめると受ける]
+    - id: what
+      say: 今なに見張ってくれてるんだっけ？
+      points: [5周ごとの燃料の連絡だけであること]
+    - id: two-things
+      say: イエロー出たらすぐ教えて、あとセーフティカー出てピット入れそうなら言って。
+      behavior: setting
+      settings: [when~yellow]
+      points: [イエローとコーションの連絡を受ける]
+
+- id: orders
+  world: { start_s: 620 }
+  calls:
+    - id: no-position
+      say: これから順位は言わなくていいよ。
+      behavior: setting
+      settings: [note~順位]
+      points: [順位は言わないと受ける]
+    - id: kept
+      say: 今どんな状況？
+      facts: [gap_ahead]
+      points: [前後の差や燃料などの状況, 順位（何位・何番手）を言っていないこと]
+    - id: short
+      say: 返事は全部ひとことで頼む。
+      behavior: setting
+      settings: [note~短|ひとこと|一言]
+      points: [短く答えると受ける]
+    - id: short-kept
+      say: 燃料足りる？
+      points: [燃料が足りないこと, 一言で短いこと]
+    - id: plan-off
+      say: 裏で作戦考えるのは止めていいよ。
+      behavior: setting
+      settings: [planning=off]
+      points: [作戦の立案を止めると受ける]

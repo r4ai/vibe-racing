@@ -104,6 +104,16 @@ pub struct Behaviour {
     pub abs_s: f64,
     /// Largest angle between where the car points and where it goes.
     pub max_slip_deg: f64,
+    /// In slow, medium and fast corners.
+    #[serde(default)]
+    pub by_speed: [Balance; 3],
+}
+
+/// Seconds per lap of either side.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Balance {
+    pub understeer_s: f64,
+    pub oversteer_s: f64,
 }
 
 impl Behaviour {
@@ -115,6 +125,10 @@ impl Behaviour {
             rear_lock_s: self.rear_lock_s + o.rear_lock_s,
             abs_s: self.abs_s + o.abs_s,
             max_slip_deg: self.max_slip_deg.max(o.max_slip_deg),
+            by_speed: std::array::from_fn(|i| Balance {
+                understeer_s: self.by_speed[i].understeer_s + o.by_speed[i].understeer_s,
+                oversteer_s: self.by_speed[i].oversteer_s + o.by_speed[i].oversteer_s,
+            }),
         }
     }
 
@@ -126,6 +140,10 @@ impl Behaviour {
             rear_lock_s: self.rear_lock_s * k,
             abs_s: self.abs_s * k,
             max_slip_deg: self.max_slip_deg,
+            by_speed: self.by_speed.map(|b| Balance {
+                understeer_s: b.understeer_s * k,
+                oversteer_s: b.oversteer_s * k,
+            }),
         }
     }
 
@@ -408,9 +426,11 @@ impl HandlingTracker {
             self.recent.pop_front();
         }
 
+        let class = crate::chassis::speed_class(now.speed);
         let same_way = now.steer * now.yaw > 0.0;
         if !same_way && now.yaw.abs() > COUNTER_YAW && now.steer.abs() > MIN_STEER_RAD {
             step.oversteer.add(phase, dt);
+            step.by_speed[class].oversteer_s += dt;
             return;
         }
         let bin = (now.speed / SPEED_BIN) as u32;
@@ -430,6 +450,7 @@ impl HandlingTracker {
             && now.speed - then.speed < SPEED_RISE
         {
             step.understeer.add(phase, dt);
+            step.by_speed[class].understeer_s += dt;
         }
     }
 

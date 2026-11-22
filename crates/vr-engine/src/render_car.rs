@@ -8,9 +8,14 @@ use vr_core::{CarTelemetry, Control, Tyre};
 use crate::EventKind;
 use crate::advice::{Place, fmt_value};
 use crate::archive::{SessionRecord, fmt_utc};
+use crate::chassis::{Chassis, Corners};
+use crate::garage::{Experiment, SetupAnalysis};
+use crate::handling::Balance;
+use crate::live::{LIVE_KEYS, LiveReport};
 use crate::render::{event_to_text, fmt_duration, fmt_lap, meta_line};
 use crate::report::*;
 use crate::state::{kind_label, warning_label};
+use crate::strategy::{Basis, StrategyReport};
 
 fn opt(v: Option<f64>, unit: &str, digits: usize) -> String {
     v.map(|v| format!("{v:.digits$}{unit}"))
@@ -319,6 +324,374 @@ impl SetupReport {
     }
 }
 
+fn basis(b: Basis) -> &'static str {
+    match b {
+        Basis::Own => "own",
+        Basis::Field => "field",
+        Basis::Both => "own+field",
+        Basis::Past => "earlier sessions",
+        Basis::Unknown => "unknown",
+    }
+}
+
+impl StrategyReport {
+    pub fn to_text(&self) -> String {
+        let mut out = format!("{}\n", meta_line(&self.meta));
+        if !self.missing.is_empty() {
+            let _ = writeln!(
+                out,
+                "{}missing: {}",
+                if self.plans.is_empty() {
+                    "no plan yet, "
+                } else {
+                    ""
+                },
+                self.missing.join(", ")
+            );
+        }
+        let Some(lap) = self.lap else { return out };
+        let _ = writeln!(
+            out,
+            "lap {lap}/{} | stops done {} | tyres {} laps old{}",
+            self.laps_total.map_or("--".into(), |l| l.to_string()),
+            self.stops_done,
+            self.tyre_age,
+            match self.fuel_to_end {
+                Some(true) => " | fuel reaches the end",
+                Some(false) => " | fuel does not reach the end",
+                None => "",
+            }
+        );
+        if let Some(f) = &self.fade {
+            let s = |v: Option<f64>| v.map_or("--".into(), |v| format!("{v:+.2}s"));
+            let _ = writeln!(
+                out,
+                "fade per lap (tyres less fuel): {:+.2}s used ({}) | own {} over {} laps | field {} | new tyres {} at {} stops",
+                f.used_s_per_lap,
+                basis(f.basis),
+                s(f.own_s_per_lap),
+                f.own_laps,
+                s(f.field_s_per_lap),
+                s(f.fresh_gain_s),
+                f.fresh_gain_stops,
+            );
+        }
+        if let Some(l) = self.pit_loss.seconds {
+            let _ = writeln!(
+                out,
+                "a stop costs {l:.1}s ({}, {} stops)",
+                basis(self.pit_loss.basis),
+                self.pit_loss.stops
+            );
+        }
+        if let Some((a, b)) = self.fuel_window {
+            let _ = writeln!(out, "fuel window for a single stop: end of lap {a} to {b}");
+        }
+        if !self.plans.is_empty() {
+            out.push_str("plans (stop at the end of lap):\n");
+            for p in &self.plans {
+                let laps: Vec<String> = p.stops.iter().map(i32::to_string).collect();
+                let _ = writeln!(
+                    out,
+                    "  {}: +{:.1}s",
+                    if laps.is_empty() {
+                        "no stop".into()
+                    } else {
+                        laps.join(", ")
+                    },
+                    p.behind_best_s
+                );
+            }
+        }
+        if let Some(r) = &self.rejoin_now {
+            let car = |c: &Option<CarRef>, s: Option<f64>| match (c, s) {
+                (Some(c), Some(s)) => format!("#{} {} {s:.1}s", c.number, c.driver),
+                _ => "nobody".into(),
+            };
+            let _ = writeln!(
+                out,
+                "stopping now rejoins P{} | ahead {} | behind {}{}",
+                r.position,
+                car(&r.ahead, r.ahead_s),
+                car(&r.behind, r.behind_s),
+                if r.traffic { " | TRAFFIC" } else { "" }
+            );
+        }
+        if !self.rivals.is_empty() {
+            out.push_str("rivals (gap + is ahead; net: once both made as many stops):\n");
+        }
+        for r in &self.rivals {
+            let sum = |v: &[f64]| {
+                v.iter()
+                    .map(|g| format!("{g:+.1}"))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            };
+            let mut line = format!(
+                "  #{} {} {:+.1}s | net {:+.1}s | stops {} | tyres {} laps",
+                r.car.number, r.car.driver, r.gap_s, r.net_gap_s, r.stops, r.tyre_age
+            );
+            if let Some(f) = r.fade_s_per_lap {
+                let _ = write!(line, " | fade {f:+.2}s");
+            }
+            if let Some(p) = r.pace_delta_s {
+                let _ = write!(line, " | pace {p:+.2}s vs you");
+            }
+            if r.in_pit {
+                line.push_str(" | IN PIT");
+            } else if r.just_stopped {
+                line.push_str(" | just stopped");
+            }
+            if !r.undercut_gain_s.is_empty() {
+                let _ = write!(
+                    line,
+                    " | undercut gains {}s in 1-4 laps{}",
+                    sum(&r.undercut_gain_s),
+                    r.undercut_laps
+                        .map_or(", not enough".into(), |n| format!(", enough after {n}"))
+                );
+            }
+            if let Some(n) = r.overcut_laps {
+                let _ = write!(line, " | overcut after {n} laps");
+            }
+            if !r.threat_gain_s.is_empty() {
+                let _ = write!(
+                    line,
+                    " | its stop gains {}s in 1-4 laps{}",
+                    sum(&r.threat_gain_s),
+                    r.threat_laps
+                        .map_or(", no danger".into(), |n| format!(", passes after {n}"))
+                );
+            }
+            let _ = writeln!(out, "{line}");
+        }
+        if !self.calls.is_empty() {
+            out.push_str("calls:\n");
+            for c in &self.calls {
+                let _ = writeln!(out, "  {}", c.text());
+            }
+        }
+        out
+    }
+}
+
+impl LiveReport {
+    pub fn to_text(&self) -> String {
+        let mut out = format!("{}\n", meta_line(&self.meta));
+        for (key, unit) in LIVE_KEYS {
+            let value = self.values.get(*key);
+            let _ = writeln!(
+                out,
+                "{key} {}{}{unit}",
+                value.map_or("--".into(), f64::to_string),
+                if unit.is_empty() { "" } else { " | " }
+            );
+        }
+        out
+    }
+}
+
+fn signed(v: Option<f64>) -> String {
+    v.map_or("--".into(), |v| format!("{v:+.1}s"))
+}
+
+fn experiments_text(out: &mut String, all: &[Experiment]) {
+    if all.is_empty() {
+        return;
+    }
+    out.push_str("what the changes did (up to 3 laps after against before):\n");
+    for e in all {
+        let _ = writeln!(
+            out,
+            "  lap {} {} {} -> {}: {}",
+            e.lap,
+            e.control,
+            fmt_value(e.from),
+            fmt_value(e.to),
+            if e.laps_after == 0 || e.laps_before == 0 {
+                "no clean laps on both sides yet".to_string()
+            } else {
+                format!(
+                    "lap time {} | understeer {} | oversteer {} | wheelspin {} | rear locking {} ({} laps after)",
+                    e.lap_time_s.map_or("--".into(), |v| format!("{v:+.2}s")),
+                    signed(e.understeer_s),
+                    signed(e.oversteer_s),
+                    signed(e.wheelspin_s),
+                    signed(e.rear_lock_s),
+                    e.laps_after
+                )
+            }
+        );
+    }
+}
+
+fn by_speed_text(out: &mut String, b: &[Balance; 3], sign: bool) {
+    let one = |v: f64| {
+        if sign {
+            format!("{v:+.1}")
+        } else {
+            format!("{v:.1}")
+        }
+    };
+    let parts: Vec<String> = ["slow", "medium", "fast"]
+        .iter()
+        .zip(b)
+        .map(|(n, b)| {
+            format!(
+                "{n} under {} over {}",
+                one(b.understeer_s),
+                one(b.oversteer_s)
+            )
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "  by corner speed (<120, 120-180, >180 km/h): {}",
+        parts.join(" | ")
+    );
+}
+
+impl Chassis {
+    fn to_text(&self) -> String {
+        let mut out = format!("measured at the wheels over {} laps:\n", self.laps);
+        let four = |c: &Corners<f64>, scale: f64, digits: usize| {
+            c.all()
+                .iter()
+                .map(|(n, v)| format!("{n} {:.*}", digits, **v * scale))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let _ = writeln!(
+            out,
+            "  locking s/lap: {} (deepest slip %: {})",
+            four(&self.lock_s, 1.0, 2),
+            four(&self.deepest_lock, 100.0, 0)
+        );
+        let _ = writeln!(out, "  wheelspin s/lap: {}", four(&self.spin_s, 1.0, 2));
+        if let Some(f) = self.front_brake {
+            let _ = writeln!(out, "  brake pressure at the front: {:.1}%", f * 100.0);
+        }
+        for r in &self.ride {
+            let _ = writeln!(
+                out,
+                "  ride height {:.0}{} km/h: front {:.1} rear {:.1} mm (rake {:+.1})",
+                r.from_kmh,
+                r.to_kmh.map_or("+".into(), |t| format!("-{t:.0}")),
+                r.front_mm,
+                r.rear_mm,
+                r.rear_mm - r.front_mm
+            );
+        }
+        let _ = writeln!(
+            out,
+            "  touching the ground s/lap: front {:.1} rear {:.1}",
+            self.touch_front_s, self.touch_rear_s
+        );
+        for ((n, t), (_, p)) in self.loaded_c.all().iter().zip(self.pressure_kpa.all()) {
+            if let Some([o, m, i]) = t {
+                let _ = writeln!(
+                    out,
+                    "  {n} loaded: outer {o:.0} middle {m:.0} inner {i:.0} C{}",
+                    p.map_or(String::new(), |p| format!(" | {p:.0} kPa hot"))
+                );
+            }
+        }
+        for (n, d) in self.dampers.all() {
+            if let Some(d) = d {
+                let _ = writeln!(
+                    out,
+                    "  {n} damper %: rebound slow {:.0} fast {:.0} | bump slow {:.0} fast {:.0}",
+                    d.rebound_low * 100.0,
+                    d.rebound_high * 100.0,
+                    d.bump_low * 100.0,
+                    d.bump_high * 100.0
+                );
+            }
+        }
+        out
+    }
+}
+
+impl SetupAnalysis {
+    pub fn to_text(&self) -> String {
+        let dash = |s: &Option<String>| s.clone().unwrap_or_else(|| "--".into());
+        let mut out = format!(
+            "{} | {} | {} | setup {}\n",
+            self.session,
+            dash(&self.track),
+            dash(&self.car),
+            dash(&self.setup)
+        );
+        match &self.behaviour {
+            None => out.push_str("no laps at pace to judge the balance\n"),
+            Some(b) => {
+                let _ = writeln!(
+                    out,
+                    "balance, mean of {} laps at pace, seconds per lap:",
+                    self.laps
+                );
+                let _ = writeln!(
+                    out,
+                    "  understeer: entry {:.1} mid {:.1} exit {:.1} | oversteer: entry {:.1} mid {:.1} exit {:.1}",
+                    b.understeer.entry,
+                    b.understeer.mid,
+                    b.understeer.exit,
+                    b.oversteer.entry,
+                    b.oversteer.mid,
+                    b.oversteer.exit
+                );
+                by_speed_text(&mut out, &b.by_speed, false);
+            }
+        }
+        match &self.chassis {
+            Some(c) => out.push_str(&c.to_text()),
+            None => out.push_str(
+                "nothing measured at the wheels (import the game's telemetry file of this run)\n",
+            ),
+        }
+        if self.findings.is_empty() {
+            out.push_str("findings: none\n");
+        }
+        for (i, f) in self.findings.iter().enumerate() {
+            let _ = writeln!(out, "{}. {}: {}", i + 1, f.area.label(), f.evidence);
+            for o in &f.options {
+                let items: Vec<String> = o
+                    .items
+                    .iter()
+                    .map(|i| format!("{} = {}", i.path, i.value))
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "   - {}{} | risk: {}",
+                    o.change,
+                    if items.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", items.join(", "))
+                    },
+                    o.risk
+                );
+            }
+        }
+        experiments_text(&mut out, &self.experiments);
+        for c in &self.comparisons {
+            let s = |v: Option<f64>| v.map_or("--".into(), |v| format!("{v:+.2}s"));
+            let _ = writeln!(
+                out,
+                "against {}: best {} | clean laps {}",
+                c.session,
+                s(c.best_s),
+                s(c.clean_s)
+            );
+            by_speed_text(&mut out, &c.by_speed, true);
+            for (path, there, here) in &c.changed {
+                let _ = writeln!(out, "  {path}: {there} -> {here}");
+            }
+        }
+        out
+    }
+}
+
 impl HandlingReport {
     pub fn to_text(&self) -> String {
         let mut out = format!("{}\n", meta_line(&self.meta));
@@ -348,6 +721,7 @@ impl HandlingReport {
                     "  wheelspin {:.1} | rear locking {:.1} | ABS {:.1} | largest slip angle {:.0}deg",
                     b.wheelspin_s, b.rear_lock_s, b.abs_s, b.max_slip_deg
                 );
+                by_speed_text(&mut out, &b.by_speed, false);
             }
         }
         if !self.zones.is_empty() {
@@ -369,6 +743,7 @@ impl HandlingReport {
             controls_text(&self.controls)
         );
         adjustments_text(&mut out, &self.adjustments);
+        experiments_text(&mut out, &self.experiments);
         if self.advice.is_empty() {
             out.push_str("suggestions: none from the data\n");
             return out;

@@ -18,6 +18,10 @@ pub struct Graded {
 impl Graded {
     /// `None`: the judges differ, or the number check contradicts them.
     pub fn grade(&self) -> Option<Grade> {
+        // Checked by value: no judge can talk it away.
+        if self.record.settings_met == Some(false) {
+            return Some(Grade::Wrong);
+        }
         let g = consensus(&self.verdicts)?;
         let stated = self.record.facts_stated.iter().all(|s| *s);
         let checked = !self.record.facts_stated.is_empty();
@@ -78,7 +82,14 @@ pub struct Summary {
     pub transcript_p50: Option<f64>,
     /// Calls that should be answered and never were.
     pub unanswered: usize,
+    /// Answers that began later than `SLOW_S`, and how many of them the
+    /// driver was told to wait for.
+    pub slow: usize,
+    pub announced: usize,
 }
+
+/// Silence longer than this makes the driver ask again.
+pub const SLOW_S: f64 = 5.0;
 
 pub fn summarize(rows: &[&Graded]) -> Summary {
     let count = |g: Grade| rows.iter().filter(|r| r.grade() == Some(g)).count();
@@ -92,6 +103,10 @@ pub fn summarize(rows: &[&Graded]) -> Summary {
     let informed: Vec<f64> = answerable
         .iter()
         .filter_map(|r| r.record.informed_s)
+        .collect();
+    let slow: Vec<&&&Graded> = answerable
+        .iter()
+        .filter(|r| r.record.answer_audio_s().is_some_and(|s| s > SLOW_S))
         .collect();
     let first_audio: Vec<f64> = answerable
         .iter()
@@ -111,6 +126,8 @@ pub fn summarize(rows: &[&Graded]) -> Summary {
             .iter()
             .filter(|r| r.record.heard.is_empty())
             .count(),
+        slow: slow.len(),
+        announced: slow.iter().filter(|r| r.record.announced()).count(),
     }
 }
 
@@ -120,14 +137,14 @@ fn secs(v: Option<f64>) -> String {
 
 pub fn table(runs: &BTreeMap<String, Vec<Graded>>) -> String {
     let mut out = String::from(
-        "| config | calls | good | incomplete | wrong | disputed | no answer | informed p50 | p90 | first audio p50 | heard text p50 |\n\
-         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| config | calls | good | incomplete | wrong | disputed | no answer | informed p50 | p90 | first audio p50 | heard text p50 | announced |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for (name, rows) in runs {
         let s = summarize(&rows.iter().collect::<Vec<_>>());
         let _ = writeln!(
             out,
-            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}/{} |",
             s.calls,
             s.good,
             s.incomplete,
@@ -138,6 +155,8 @@ pub fn table(runs: &BTreeMap<String, Vec<Graded>>) -> String {
             secs(s.informed_p90),
             secs(s.first_audio_p50),
             secs(s.transcript_p50),
+            s.announced,
+            s.slow,
         );
     }
     out
@@ -230,12 +249,13 @@ pub fn problems(rows: &[Graded]) -> String {
             .collect();
         let _ = writeln!(
             out,
-            "{}/{} #{} {:?} facts={:?}\n  said:  {}\n  heard: {:?}\n  reply: {}\n  tools: {:?} errors: {:?}",
+            "{}/{} #{} {:?} facts={:?} settings={:?}\n  said:  {}\n  heard: {:?}\n  reply: {}\n  tools: {:?} errors: {:?}",
             x.stint,
             x.call,
             x.trial,
             grades,
             x.facts_stated,
+            x.settings,
             x.said,
             x.transcript,
             x.spoken(),
@@ -307,6 +327,8 @@ pub mod tests {
                 tokens: None,
                 primer_tokens: None,
                 session_cost: None,
+                settings: vec![],
+                settings_met: None,
             },
             verdicts: grades
                 .iter()
@@ -339,6 +361,11 @@ pub mod tests {
         r.record.facts_stated = vec![false];
         r.record.behavior = Behavior::AnswerOrAsk;
         assert_eq!(r.grade(), Some(Grade::Good));
+        let mut wrong = graded("s", "a", Some(5.0), GOOD);
+        wrong.record.settings_met = Some(false);
+        assert_eq!(wrong.grade(), Some(Grade::Wrong));
+        wrong.record.settings_met = Some(true);
+        assert_eq!(wrong.grade(), Some(Grade::Good));
         let split = graded("s", "a", Some(5.0), &[Grade::Good, Grade::Wrong]);
         assert_eq!(split.grade(), None);
     }
@@ -363,6 +390,26 @@ pub mod tests {
         assert!(table(&runs).contains("| x | 4 | 1 | 1 | 1 | 1 | 1 | 6.0s |"));
         let p = problems(&rows);
         assert!(p.contains("s/b") && !p.contains("s/a "), "{p}");
+    }
+
+    #[test]
+    fn slow_answers_should_be_announced() {
+        // The answer begins a second before the driver is informed.
+        let at = |s: f64| graded("s", "a", Some(s + 1.0), GOOD);
+        let mut told = at(8.0);
+        told.record.heard.insert(
+            0,
+            Heard {
+                text: vr_radio::engine::STANDBY.into(),
+                start_s: 2.0,
+                end_s: 3.0,
+            },
+        );
+        assert_eq!(told.record.first_audio_s(), Some(2.0));
+        assert_eq!(told.record.answer_audio_s(), Some(8.0));
+        let rows = [at(SLOW_S), at(SLOW_S + 0.1), told];
+        let s = summarize(&rows.iter().collect::<Vec<_>>());
+        assert_eq!((s.announced, s.slow), (1, 2));
     }
 
     #[test]

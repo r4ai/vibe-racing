@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::directive::MAX_VOLUME;
+use crate::rules::Rules;
 use crate::stt::SttBackend;
 use crate::watch::Proactive;
 use crate::wheel::Binding;
@@ -40,6 +41,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Which events the engineer calls about by itself.
     pub proactive: Proactive,
+    /// When to be quiet, what to look out for, what to keep in mind.
+    pub rules: Rules,
 }
 
 /// `settings.json` in the user's configuration directory.
@@ -119,6 +122,12 @@ mod tests {
             proactive: Proactive {
                 lap: true,
                 flag: false,
+                ..Default::default()
+            },
+            rules: Rules {
+                interval_s: 60,
+                hold_calls: None,
+                notes: vec!["短く".into()],
                 ..Default::default()
             },
         }

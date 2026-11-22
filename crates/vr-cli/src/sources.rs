@@ -48,6 +48,14 @@ impl SourceArgs {
         }
     }
 
+    /// Where the game leaves telemetry files behind.
+    pub fn recordings(&self) -> Option<PathBuf> {
+        match self.game() {
+            Game::Iracing => Some(vr_iracing::telemetry_dir(&dirs::document_dir()?)),
+            Game::Replay | Game::Synthetic => None,
+        }
+    }
+
     pub fn source_kind(&self, live: bool) -> SourceKind {
         match self.game() {
             Game::Iracing if live => SourceKind::Live,

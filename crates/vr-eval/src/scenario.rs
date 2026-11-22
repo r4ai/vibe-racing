@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use vr_replay::SynthConfig;
+use vr_replay::{Balance, SynthConfig};
 
 use crate::facts::Fact;
 
@@ -15,6 +15,9 @@ use crate::facts::Fact;
 pub struct Stint {
     pub id: String,
     pub world: WorldSpec,
+    /// The engineer calls by itself about race events.
+    #[serde(default)]
+    pub proactive: bool,
     pub calls: Vec<Call>,
 }
 
@@ -41,6 +44,33 @@ pub struct WorldSpec {
     pub rain: Option<(f64, f64)>,
     pub rain_loss_s: f64,
     pub incident_at: Option<f64>,
+    /// How the player's car misbehaves.
+    pub balance: Option<BalanceSpec>,
+    /// Session time the player's car is damaged, and the seconds of repairs.
+    pub damage: Option<(f64, f64)>,
+    /// Sessions driven before, the latest one first.
+    pub past: Vec<PastSpec>,
+}
+
+/// Seconds per lap (see `vr_replay::Balance`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BalanceSpec {
+    pub understeer_mid_s: f64,
+    pub oversteer_exit_s: f64,
+    pub rear_lock_s: f64,
+    pub wheelspin_s: f64,
+}
+
+/// A race of an earlier day.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PastSpec {
+    pub days_ago: u32,
+    pub laps: i32,
+    /// Starting place: 0 is the pole.
+    pub player_idx: usize,
+    pub fuel_per_lap_l: f64,
 }
 
 impl Default for WorldSpec {
@@ -64,6 +94,9 @@ impl Default for WorldSpec {
             rain: c.rain,
             rain_loss_s: c.rain_loss_s,
             incident_at: c.incident_at,
+            balance: None,
+            damage: None,
+            past: Vec::new(),
         }
     }
 }
@@ -86,6 +119,13 @@ impl WorldSpec {
             rain: self.rain,
             rain_loss_s: self.rain_loss_s,
             incident_at: self.incident_at,
+            balance: self.balance.map(|b| Balance {
+                understeer_mid_s: b.understeer_mid_s,
+                oversteer_exit_s: b.oversteer_exit_s,
+                rear_lock_s: b.rear_lock_s,
+                wheelspin_s: b.wheelspin_s,
+            }),
+            damage: self.damage,
             ..SynthConfig::default()
         }
     }
@@ -109,6 +149,19 @@ pub enum Behavior {
     /// The driver is upset: steadies them in a few words, then answers
     /// with facts.
     Calm,
+    /// Changes a setting of the radio.
+    Setting,
+    /// The driver says nothing and something happened: the engineer calls.
+    Call,
+    /// Nothing worth a call happened.
+    Quiet,
+}
+
+impl Behavior {
+    /// Nobody asked anything.
+    pub fn listening(self) -> bool {
+        matches!(self, Self::Call | Self::Quiet)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -124,6 +177,7 @@ pub struct Call {
     pub id: String,
     /// `<pause 1.6>` is a silence of 1.6 s. Empty: the button alone.
     /// What the driver means; the judges read this.
+    #[serde(default)]
     pub say: String,
     /// What a transcriber made of it (cut, misheard, repeated words): typed
     /// in text mode instead of `say`.
@@ -152,6 +206,17 @@ pub struct Call {
     pub points: Vec<String>,
     #[serde(default)]
     pub barge_in: Option<BargeIn>,
+    /// Settings of the radio after the call, e.g. `volume<100`. Any other
+    /// change counts as wrong.
+    #[serde(default)]
+    pub settings: Vec<String>,
+    /// The driver says nothing until this session time.
+    #[serde(default)]
+    pub listen_until: Option<f64>,
+    /// Session time of what the engineer should call about: times are
+    /// measured from it.
+    #[serde(default)]
+    pub event_at: Option<f64>,
 }
 
 fn default_voice() -> String {
@@ -240,11 +305,25 @@ pub fn load(path: &Path) -> Result<Vec<Stint>> {
             );
             ensure!(!c.points.is_empty(), "{}/{} has no points", s.id, c.id);
             ensure!(
-                !c.say.is_empty() || c.duration_s > 0.0,
+                c.behavior.listening() == c.listen_until.is_some(),
+                "{}/{}: `call` and `quiet` need listen_until, others must not have it",
+                s.id,
+                c.id
+            );
+            ensure!(
+                !c.behavior.listening() || s.proactive,
+                "{}/{}: the engineer of this stint does not call",
+                s.id,
+                c.id
+            );
+            ensure!(
+                !c.say.is_empty() || c.duration_s > 0.0 || c.listen_until.is_some(),
                 "{}/{} is empty",
                 s.id,
                 c.id
             );
+            crate::setting::check_syntax(&c.settings)
+                .with_context(|| format!("{}/{}", s.id, c.id))?;
         }
     }
     Ok(stints)
@@ -260,15 +339,28 @@ mod tests {
 
     #[test]
     fn both_sets_load() {
-        for name in ["dev.yaml", "heldout.yaml", "hard.yaml"] {
+        for name in [
+            "dev.yaml",
+            "heldout.yaml",
+            "hard.yaml",
+            "features.yaml",
+            "features-heldout.yaml",
+            "rules.yaml",
+            "strategy.yaml",
+        ] {
             let stints = load(&dir().join(name)).unwrap();
-            assert!(stints.len() >= 5, "{name}");
+            assert!(stints.len() >= 3, "{name}");
         }
     }
 
-    /// The held-out set must not repeat what the radio was tuned on.
+    /// The held-out sets must not repeat what the radio was tuned on.
     #[test]
     fn held_out_words_and_voices_are_new() {
+        new_to("dev.yaml", "heldout.yaml");
+        new_to("features.yaml", "features-heldout.yaml");
+    }
+
+    fn new_to(known: &str, held_out: &str) {
         let calls = |name: &str| -> Vec<Call> {
             load(&dir().join(name))
                 .unwrap()
@@ -276,10 +368,10 @@ mod tests {
                 .flat_map(|s| s.calls)
                 .collect()
         };
-        let dev = calls("dev.yaml");
+        let dev = calls(known);
         let said: BTreeSet<_> = dev.iter().map(|c| c.words()).collect();
         let voices: BTreeSet<_> = dev.iter().map(|c| c.voice.clone()).collect();
-        for c in calls("heldout.yaml").iter().filter(|c| !c.say.is_empty()) {
+        for c in calls(held_out).iter().filter(|c| !c.say.is_empty()) {
             assert!(!said.contains(&c.words()), "{}", c.id);
             assert!(!voices.contains(&c.voice), "{}", c.id);
         }
@@ -320,5 +412,21 @@ mod tests {
         assert!(typo.is_err());
         let empty = check("[{id: s, world: {}, calls: [{id: a, say: '', points: [p]}]}]");
         assert!(empty.unwrap_err().contains("is empty"));
+        let one = |c: &str| check(&format!("[{{id: s, world: {{}}, calls: [{c}]}}]"));
+        let call = one("{id: a, behavior: call, listen_until: 9, points: [p]}");
+        assert!(call.unwrap_err().contains("does not call"));
+        let call = one("{id: a, behavior: call, points: [p]}");
+        assert!(call.unwrap_err().contains("listen_until"));
+        let call = one("{id: a, say: x, listen_until: 9, points: [p]}");
+        assert!(call.unwrap_err().contains("listen_until"));
+        let call = one("{id: a, say: x, settings: [volume], points: [p]}");
+        assert!(call.unwrap_err().contains("s/a"));
+        assert!(
+            check(
+                "[{id: s, world: {}, proactive: true, \
+                 calls: [{id: a, behavior: quiet, listen_until: 9, points: [p]}]}]"
+            )
+            .is_ok()
+        );
     }
 }

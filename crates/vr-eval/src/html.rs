@@ -70,6 +70,7 @@ fn row(g: &Graded) -> Value {
         "speech_s": r.speech_s, "transcript_s": r.transcript_s, "first_token_s": r.first_token_s,
         "first_audio_s": r.first_audio_s(), "informed_s": r.informed_s,
         "grade": grade_name(g.grade()), "verdicts": verdicts,
+        "settings": r.settings, "announced": r.announced(),
         "tokens": r.tokens, "primer_tokens": r.primer_tokens,
     })
 }

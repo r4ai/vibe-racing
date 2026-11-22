@@ -117,7 +117,7 @@ impl Synth for Voicevox {
         let resp = self
             .agent
             .post(format!("{}/audio_query", self.base_url))
-            .query("text", text)
+            .query("text", crate::aloud::aloud(text))
             .query("speaker", &speaker)
             .send_empty()
             .with_context(|| self.unreachable())?;
@@ -214,7 +214,7 @@ mod tests {
             }
         });
         let v = Voicevox::new(format!("{}/", server.url), 1.25);
-        assert_eq!(v.synthesize("前 0.6", 3).unwrap(), b"RIFFwav");
+        assert_eq!(v.synthesize("前0.6", 3).unwrap(), b"RIFFwav");
         v.set_speed(1.5);
         v.synthesize("後", 3).unwrap();
 
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(reqs[0].method, "POST");
         assert_eq!(
             reqs[0].target,
-            "/audio_query?text=%E5%89%8D%200.6&speaker=3"
+            "/audio_query?text=%E5%89%8D%E3%82%B3%E3%83%B3%E3%83%9E6&speaker=3"
         );
         assert_eq!(reqs[1].target, "/synthesis?speaker=3");
         let sent: Value = serde_json::from_slice(&reqs[1].body).unwrap();

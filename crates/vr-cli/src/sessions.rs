@@ -32,6 +32,12 @@ pub enum SessionsCmd {
     },
     /// The garage setup of a session.
     Setup { session: String },
+    /// What a run tells about the setup: balance, what the wheels did, what to
+    /// change and what earlier changes did.
+    Analyse {
+        /// Default: the newest run in which the wheels were measured.
+        session: Option<String>,
+    },
     /// Two sessions side by side, with what differs in the setup.
     Compare { a: String, b: String },
     /// Write a note on a session (empty removes it).
@@ -54,7 +60,7 @@ pub enum SessionsCmd {
         #[arg(required = true)]
         files: Vec<PathBuf>,
         /// Samples per second to read.
-        #[arg(long, default_value_t = 30.0)]
+        #[arg(long, default_value_t = 60.0)]
         hz: f64,
     },
     /// The directory sessions are kept in.
@@ -131,6 +137,20 @@ fn dispatch(store: &SessionStore, cmd: SessionsCmd, fmt: Format) -> anyhow::Resu
                 }
             }
         }
+        SessionsCmd::Analyse { session } => {
+            let all = store.list();
+            let r = match session {
+                Some(key) => store.find(&key)?,
+                None => newest_measured(&all)
+                    .ok_or_else(|| anyhow::anyhow!("no sessions yet"))?
+                    .clone(),
+            };
+            let a = vr_engine::analyse(&r, &all);
+            match fmt {
+                Format::Json => println!("{}", serde_json::to_string(&a)?),
+                Format::Text => print!("{}", a.to_text()),
+            }
+        }
         SessionsCmd::Compare { a, b } => {
             let (a, b) = (store.find(&a)?, store.find(&b)?);
             match fmt {
@@ -175,13 +195,34 @@ fn dispatch(store: &SessionStore, cmd: SessionsCmd, fmt: Format) -> anyhow::Resu
     Ok(())
 }
 
-fn import(store: &SessionStore, file: &std::path::Path, hz: f64) -> anyhow::Result<Vec<String>> {
+/// The newest session in which the wheels were measured, else the newest.
+/// Only of the car and track of the newest one: another car's setup is of no
+/// use.
+fn newest_measured(all: &[SessionRecord]) -> Option<&SessionRecord> {
+    let newest = all.first()?;
+    all.iter()
+        .filter(|r| r.track == newest.track && r.car == newest.car)
+        .find(|r| r.chassis.is_some() && r.laps_completed >= 3)
+        .or(Some(newest))
+}
+
+pub fn import(
+    store: &SessionStore,
+    file: &std::path::Path,
+    hz: f64,
+) -> anyhow::Result<Vec<String>> {
     let mut src = vr_iracing::IbtSource::open(file, hz)?;
     let caps = vr_core::TelemetrySource::capabilities(&src);
     let mut state = RaceState::new("iracing", SourceKind::Replay, caps);
     read_sessions(&mut src, &mut state)?
         .into_iter()
-        .map(|r| store.save(r))
+        .map(|(r, laps)| {
+            let id = store.save(r)?;
+            for lap in &laps {
+                store.save_trace(&id, lap)?;
+            }
+            Ok(id)
+        })
         .collect()
 }
 

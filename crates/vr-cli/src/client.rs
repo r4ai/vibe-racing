@@ -71,21 +71,36 @@ impl HttpClient {
     }
 
     /// Stream events as they happen (blocking).
-    pub fn stream_events(&self, mut on_event: impl FnMut(Event) -> bool) -> anyhow::Result<()> {
+    pub fn stream_events(&self, on_event: impl FnMut(Event) -> bool) -> anyhow::Result<()> {
+        self.stream("/v1/events/stream", on_event)
+    }
+
+    /// Stream the live values (blocking).
+    pub fn stream_live(
+        &self,
+        hz: f64,
+        on_values: impl FnMut(LiveReport) -> bool,
+    ) -> anyhow::Result<()> {
+        self.stream(&format!("/v1/live/stream?hz={hz}"), on_values)
+    }
+
+    fn stream<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        mut on_item: impl FnMut(T) -> bool,
+    ) -> anyhow::Result<()> {
         use std::io::BufRead;
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(None)
             .build()
             .into();
-        let resp = agent
-            .get(format!("{}/v1/events/stream", self.base))
-            .call()?;
+        let resp = agent.get(format!("{}{path}", self.base)).call()?;
         let reader = std::io::BufReader::new(resp.into_body().into_reader());
         for line in reader.lines() {
             let line = line?;
             if let Some(data) = line.strip_prefix("data:")
-                && let Ok(e) = serde_json::from_str::<Event>(data.trim())
-                && !on_event(e)
+                && let Ok(item) = serde_json::from_str::<T>(data.trim())
+                && !on_item(item)
             {
                 break;
             }
@@ -104,6 +119,14 @@ impl RaceApi for HttpClient {
     fn gaps(&self, p: &GapParams) -> ApiResult<GapReport> {
         self.get("/v1/gaps", p)
     }
+    fn strategy(&self) -> ApiResult<StrategyReport> {
+        self.get("/v1/strategy", &())
+    }
+
+    fn live(&self) -> ApiResult<LiveReport> {
+        self.get("/v1/live", &())
+    }
+
     fn fuel(&self) -> ApiResult<FuelReport> {
         self.get("/v1/fuel", &())
     }

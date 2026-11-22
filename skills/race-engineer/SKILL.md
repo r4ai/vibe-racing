@@ -45,11 +45,21 @@ description: シムレース走行中のドライバーの無線（「前との�
 | タイヤ／損傷／OTS・P2P／水温・油温／ピット作業 | `vr car`                                           |
 | 曲がらない・滑る／BB・TC・ABS をどうする       | `vr handling`（`references/setup.md`）             |
 | セットアップを見たい                           | `vr setup`                                         |
+| 作戦／いつ入る／アンダーカット／タイヤの持ち   | `vr strategy`（`references/strategy.md`）          |
+| 走行後のセットアップの分析／前回との違い       | `vr sessions analyse`（`references/setup.md`）     |
 | 上に無いデータ（ゲームの生の値）               | `vr channels <英単語>`                             |
 | 大会設定・ドライバー・予選結果など             | `vr info WeekendInfo` / `vr info SessionInfo`      |
 | 前回のレース／過去のベスト／比較               | `vr sessions list` / `show last` / `compare 2 1`   |
 
 機械処理には `-f json`。全量は `vr snapshot -f json`（大きい）。
+
+## 頼まれる前に
+
+ドライバーは走りながら全部は見られない。次は、聞かれる前に考えておく。
+
+- 作戦: 最速の案と次点、外れたときの第二案、警戒する車・狙う車（`vr strategy`）。変わったときと、2 周以内に決めることだけ言う
+- 指示: 「〜は言わなくていい」「〜したら教えて」は、その後ずっと守る
+- 変更の結果: 車内の設定を変えたら、2〜3 周後に良くなったかを数字で伝える
 
 ## 返答スタイル
 
@@ -59,4 +69,4 @@ description: シムレース走行中のドライバーの無線（「前との�
 - 聞かれていないことは、安全・戦略に直結するとき（イエロー、燃料不足、後ろの急接近、ペナルティ）だけ一言
 - マークダウン・表・箇条書き・前置き（「確認します」）は使わない
 
-参照: 言い回しは `references/radio-style.md`、コマンドと出力は `references/commands.md`、セットアップの提案は `references/setup.md`、用語は `references/glossary.md`。
+参照: 言い回しは `references/radio-style.md`、コマンドと出力は `references/commands.md`、作戦は `references/strategy.md`、セットアップの提案は `references/setup.md`、用語は `references/glossary.md`。

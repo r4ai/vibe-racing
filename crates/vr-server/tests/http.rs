@@ -329,6 +329,54 @@ fn past_sessions_have_a_page() {
 }
 
 #[test]
+fn laps_of_past_sessions() {
+    let (state, _) = collected(None);
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let id = store
+        .save(SessionRecord::of(&state.read().unwrap()).unwrap())
+        .unwrap();
+    let frames = vr_replay::synth_frames(
+        vr_replay::SynthConfig {
+            laps: 3,
+            balance: Some(Default::default()),
+            ..Default::default()
+        },
+        None,
+    );
+    let mut st = RaceState::new("synthetic", SourceKind::Replay, Capabilities::ALL);
+    frames.into_iter().for_each(|f| st.ingest(f));
+    for lap in st.take_traces() {
+        store.save_trace(&id, &lap).unwrap();
+    }
+    let s = Server::start_with(state, Some(store));
+    let (code, v) = s.get(&format!("/v1/sessions/{id}/analysis"));
+    assert_eq!((code, &v["session"]), (200, &id.clone().into()));
+    assert!(v["findings"].is_array() && v["chassis"].is_null());
+    assert_eq!(s.get("/v1/sessions/nope/analysis").0, 404);
+    let (code, v) = s.get(&format!("/v1/sessions/{id}/laps"));
+    assert_eq!((code, v.as_array().unwrap().len()), (200, 3));
+    assert_eq!((&v[1]["lap"], &v[1]["pit"]), (&2.into(), &false.into()));
+    let (_, v) = s.get(&format!("/v1/sessions/{id}/laps/2"));
+    assert_eq!(v["speed"].as_array().unwrap().len(), TRACE_POINTS);
+    // A steady speed: no corners.
+    let compare = format!("/v1/sessions/{id}/laps/2/compare?lap=3");
+    assert_eq!(s.get(&compare), (200, serde_json::json!([])));
+    assert_eq!(s.get(&format!("{compare}&session={id}")).0, 200);
+    for missing in [
+        "laps/9",
+        "laps/2/compare?lap=9",
+        "laps/2/compare?lap=3&session=nope",
+    ] {
+        assert_eq!(s.get(&format!("/v1/sessions/{id}/{missing}")).0, 404);
+    }
+    assert_eq!(
+        s.get("/v1/sessions/nope/laps"),
+        (200, serde_json::json!([]))
+    );
+}
+
+#[test]
 fn sse_streams_published_events() {
     let s = Server::start(new_state());
     let url = format!("{}/v1/events/stream", s.url);
@@ -366,6 +414,52 @@ fn sse_streams_published_events() {
         }
     }
     assert_eq!(got, Some(ev));
+}
+
+#[test]
+fn live_values_are_streamed_while_they_change() {
+    let (state, _) = collected(None);
+    let s = Server::start(state.clone());
+    let live: LiveReport = ureq::get(format!("{}/v1/live", s.url))
+        .call()
+        .unwrap()
+        .body_mut()
+        .read_json()
+        .unwrap();
+    assert!(live.values.contains_key("lap"));
+    let strategy: StrategyReport = ureq::get(format!("{}/v1/strategy", s.url))
+        .call()
+        .unwrap()
+        .body_mut()
+        .read_json()
+        .unwrap();
+    assert!(strategy.lap.is_some());
+
+    let url = format!("{}/v1/live/stream?hz=50", s.url);
+    let (tx, rx) = std::sync::mpsc::channel::<LiveReport>();
+    std::thread::spawn(move || {
+        let resp = ureq::get(&url).call().unwrap();
+        for line in std::io::BufReader::new(resp.into_body().into_reader()).lines() {
+            let Ok(line) = line else { return };
+            if let Some(d) = line.strip_prefix("data:")
+                && tx.send(serde_json::from_str(d.trim()).unwrap()).is_err()
+            {
+                return;
+            }
+        }
+    });
+    let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(first.values, live.values);
+    // The same frame is not sent twice.
+    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    let mut frame = state.read().unwrap().frame().unwrap().clone();
+    frame.session.time_s += 1.0;
+    state.write().unwrap().ingest(frame);
+    let next = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        next.values["session_time"],
+        first.values["session_time"] + 1.0
+    );
 }
 
 #[test]

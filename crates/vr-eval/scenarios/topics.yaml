@@ -1,0 +1,71 @@
+# What calls are about, for choosing the decision model and the word lists of the radio.
+# topics: handling, car, past, strategy. long: more than a look at the data.
+- { say: 前との差は }
+- { say: 後ろ来てる？ }
+- { say: 燃料足りる }
+- { say: あと何周 }
+- { say: 今何位 }
+- { say: ペースどう }
+- { say: 了解ありがとう }
+- { say: 音量もうちょい上げて }
+- { say: ピットいつ入る, topics: [strategy] }
+- { say: アンダーカットできる？, topics: [strategy] }
+- { say: イエロー出てる }
+- { say: 雨降ってきそう }
+- { say: 前のやつのラップは }
+- { say: さっきの周何秒落とした }
+- { say: オーバーテイクシステムあと何回 }
+- { say: スタートからの順位の変動教えて }
+- { say: うるさいから黙ってて }
+- { say: トップとの差どれくらい }
+- { say: 1周前のタイム }
+- { say: プッシュした方がいい？ }
+- { say: コーナーの真ん中で全然曲がらない, topics: [handling] }
+- { say: 立ち上がりでケツが出る, topics: [handling] }
+- { say: ブレーキバイアスどうしたらいい, topics: [handling] }
+- { say: トラコン上げるべき？, topics: [handling] }
+- { say: フロントがすぐロックする, topics: [handling] }
+- { say: リアが不安定すぎる, topics: [handling] }
+- { say: ビビりいくつにすればいい, topics: [handling] }
+- { say: セットアップのリアウイング何度, topics: [handling] }
+- { say: ターンインで頭が入らん, topics: [handling] }
+- { say: 縁石乗ると跳ねて怖い, topics: [handling] }
+- { say: アクセル踏むとホイールスピンする, topics: [handling] }
+- { say: もうちょい安定させたいんだけど何変えればいい, topics: [handling] }
+- { say: 高速コーナーで外に膨らむ, topics: [handling] }
+- { say: スタビ硬くした方がいいかな, topics: [handling] }
+- { say: タイヤ持つ？, topics: [car, strategy] }
+- { say: タイヤの減り左右で違う？, topics: [car] }
+- { say: ぶつかったけど車大丈夫？, topics: [car] }
+- { say: ダメージどれくらい, topics: [car] }
+- { say: 水温高くない？, topics: [car] }
+- { say: 修理に何秒かかる, topics: [car] }
+- { say: なんか警告灯ついてる, topics: [car] }
+- { say: 内圧上がりすぎてない？, topics: [car] }
+- { say: フロントタイヤが終わってる気がする滑る, topics: [car, handling] }
+- { say: 前回のレースのベストは, topics: [past] }
+- { say: 昨日より速い？, topics: [past] }
+- { say: 予選のタイムいくつだった, topics: [past] }
+- { say: この前スパ走った時の燃費どれくらいだっけ, topics: [past] }
+- { say: 練習の時と比べてどう, topics: [past] }
+- { say: 先週のレース何位だった, topics: [past] }
+- { say: 前のレースのセットアップと何が違う, topics: [past, handling] }
+- { say: 過去のレース全部見て俺の弱点まとめて, topics: [past], long: true }
+- { say: このコースのレコードをネットで調べて, long: true }
+- { say: ギットハブにイシュー作っといて, long: true }
+- { say: このレースの全ラップ分析してどこで遅いか教えて, long: true }
+- { say: 今の話メモに書いといて, long: true }
+- { say: 最近五レースの平均順位と傾向まとめて, topics: [past], long: true }
+- { say: ネットで今週の天気予報調べて, long: true }
+- { say: 前走ってるやつ誰 }
+- { say: 何リッター入れればいい }
+- { say: 後ろ引き離してる？ }
+- { say: 作戦どうする, topics: [strategy] }
+- { say: もう一周引っ張った方がいい？, topics: [strategy] }
+- { say: 後ろが先に止まったらどうなる, topics: [strategy] }
+- { say: 今止まったら何位で戻れる, topics: [strategy] }
+- { say: 一回で行くか二回にするか, topics: [strategy] }
+- { say: ラップタイムがどんどん落ちてきた、いつまで我慢する, topics: [strategy] }
+- { say: ブレーキ中は話しかけないで }
+- { say: 後ろが一秒切ったら教えて }
+- { say: もうちょっと無線減らして }

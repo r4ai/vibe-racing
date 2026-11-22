@@ -1,0 +1,198 @@
+# Development set for what the radio does beyond the race: the car, its setup,
+# earlier sessions, its own settings, calls of its own, long look-ups.
+# See docs/architecture.md for the fields.
+
+- id: car
+  world: { start_s: 700, damage: [640, 35] }
+  calls:
+    - id: tyres
+      say: タイヤあとどれくらい残ってる？
+      voice: vv:13
+      facts: [tyre_tread]
+      points: [タイヤの残り（％）。前回の交換時点の値であることに触れるのは可]
+    - id: damage
+      say: さっき当たったやつ、直すのに何秒かかる？
+      voice: gemini:Charon
+      noise: { snr_db: 18 }
+      facts: [repair_s]
+      points: [必須の修理にかかる秒数]
+    - id: p2p
+      say: オーバーテイク、あと何回使える？
+      voice: vv:2
+      facts: [p2p]
+      points: [プッシュトゥパス（OTS）の残り]
+    - id: temperatures
+      say: 水温と油温、大丈夫？
+      voice: gemini:Kore
+      points: [水温, 油温]
+    - id: still-the-race
+      say: 前との差は？
+      voice: vv:13
+      facts: [gap_ahead]
+      points: [前の車との差（秒）]
+
+- id: understeer
+  world: { start_s: 720, player_pit_lap: null, balance: { understeer_mid_s: 3.5 } }
+  calls:
+    - id: mid-corner
+      say: コーナーの真ん中で全然曲がらないんだけど、データではどう？
+      voice: vv:13
+      points:
+        - データでもコーナー中盤のアンダーが出ていること（handling の数字か傾向）
+    - id: controls
+      say: いまのブレーキバイアスとトラコンの値は？
+      voice: gemini:Charon
+      facts: [brake_bias, traction_control]
+      points: [ブレーキバイアスの値, トラクションコントロールの値]
+    - id: next-setup
+      say: 次のセッション、セットアップはどこをどう変えるべき？
+      voice: gemini:Kore
+      points:
+        - handling の suggestions にある変更（フロントのアンチロールバーを柔らかくする方向など）。真実の suggestions と逆向きの提案は誤り
+    - id: current-wing
+      say: リアウイングって今何度だっけ？
+      voice: vv:2
+      points: [リアウイングの角度（setup の値）]
+
+- id: loose-rear
+  world: { start_s: 720, player_pit_lap: null, balance: { rear_lock_s: 1.0, wheelspin_s: 1.6 } }
+  calls:
+    - id: brake-bias
+      say: ブレーキ踏むとケツが暴れる。バイアスどっちに動かせばいい？
+      voice: vv:13
+      noise: { snr_db: 15 }
+      points: [ブレーキバイアスを前寄り（数値を上げる方向）に動かすこと]
+    - id: traction
+      say: 立ち上がりで空転するんだけど、トラコンは上げる、下げる？
+      voice: gemini:Charon
+      points: [トラコンの介入を強める方向であること]
+    - id: feedback
+      say: 上げたらだいぶ良くなった、ありがとう。
+      voice: vv:13
+      behavior: ack
+      points: [短く受けるだけにする]
+    - id: position
+      say: で、今何位？
+      voice: vv:2
+      facts: [position]
+      points: [現在の順位]
+
+- id: last-time
+  world:
+    {
+      start_s: 620,
+      past:
+        [
+          { days_ago: 1, laps: 6, player_idx: 5, fuel_per_lap_l: 2.9 },
+          { days_ago: 8, laps: 5, player_idx: 1, fuel_per_lap_l: 2.4 },
+        ],
+    }
+  calls:
+    - id: best
+      say: 前のレースのベストラップいくつだった？
+      voice: vv:13
+      facts: [past_best]
+      points: [直近の過去セッション（1 日前）のベストラップ]
+    - id: result
+      say: 昨日は何位で終わったんだっけ？
+      voice: gemini:Kore
+      points: [1 日前のレースの最終順位]
+    - id: consumption
+      say: 燃費、前回と比べてどう？
+      voice: gemini:Charon
+      noise: { snr_db: 20 }
+      points: [今回の 1 周の燃料消費, 前回（1 日前）の 1 周の燃料消費か、その差や大小]
+    - id: not-the-past
+      say: 一周前のタイムは？
+      voice: vv:2
+      facts: [last_lap]
+      points: [今のレースの直近のラップタイム]
+
+- id: radio-settings
+  world: { start_s: 620 }
+  calls:
+    - id: too-loud
+      say: ちょっと声がうるさいな。
+      voice: vv:13
+      behavior: setting
+      settings: [volume<100]
+      points: [音量を下げたと伝える]
+    - id: exact
+      say: 音量五十にして。
+      voice: gemini:Charon
+      behavior: setting
+      settings: [volume=50]
+      points: [音量を 50 にしたと伝える]
+    - id: no-positions
+      say: 順位が変わったっていう連絡はもういらない。
+      voice: vv:2
+      behavior: setting
+      settings: [event.position=off]
+      points: [順位の連絡を止めたと伝える]
+    - id: faster
+      say: もうちょっと早口でしゃべって。
+      voice: gemini:Kore
+      behavior: setting
+      settings: [speed>1.2]
+      points: [話す速さを上げたと伝える]
+    - id: ask-volume
+      say: いま音量いくつ？
+      voice: vv:13
+      points: [現在の音量が 50 であること]
+    - id: laps-too
+      say: ラップタイムは毎周教えて。
+      voice: gemini:Charon
+      behavior: setting
+      settings: [event.lap=on]
+      points: [毎周のラップタイムを伝えると受ける]
+    - id: nothing-to-change
+      say: 後ろとの差は？
+      voice: vv:2
+      facts: [gap_behind]
+      points: [後ろの車との差（秒）]
+
+- id: own-calls
+  proactive: true
+  world: { start_s: 320, yellow: [365, 520], incident_at: null, damage: [470, 22] }
+  calls:
+    - id: yellow
+      behavior: call
+      event_at: 365
+      listen_until: 395
+      points: [イエロー（黄旗）が出たこと]
+    - id: nothing
+      behavior: quiet
+      listen_until: 415
+      points: [知らせるほどの出来事が無いので黙っている]
+    - id: ask-in-between
+      say: イエローどこまで続きそう？まだ出てる？
+      voice: vv:13
+      facts: [yellow]
+      points:
+        [いまもイエローが出ていること。いつまで続くかはデータでは分からないこと（触れなくても可）]
+    - id: damaged
+      behavior: call
+      event_at: 470
+      listen_until: 500
+      points: [車が損傷したこと、または修理が必要なこと]
+
+- id: long
+  world: { start_s: 900, tyre_deg_s: 0.15, lap_noise_s: 0.6, mistake_one_in: 6 }
+  calls:
+    - id: all-laps
+      say: ここまでの全部のラップを見て、どの周で一番損したか、細かく分析して。
+      voice: vv:13
+      points: [自車の一番遅かった周（ピットの周を除く判断は可）とそのタイム、または損の大きさ]
+    - id: interrupted
+      say: トップのやつのラップ、全部詳しく分析してまとめて。
+      voice: gemini:Charon
+      points: [x]
+      barge_in:
+        after_s: 2.5
+        say: やっぱいいや、後ろとの差だけ教えて。
+        facts: [gap_behind]
+        points: [後ろの車との差（秒）。前の質問の答えは求められていない]
+    - id: by-number
+      say: 二番の車の最近のラップどう？カーナンバー2。
+      voice: gemini:Kore
+      points: [カーナンバー 2 の車の直近のラップタイム]

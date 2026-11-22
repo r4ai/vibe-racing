@@ -12,7 +12,8 @@ use vr_eval::judge::{BATCH, Case, Grade, JUDGES, Judge, Verdict, codex_model, ne
 use vr_eval::report::{self, Graded};
 use vr_eval::run::{Record, Runner};
 use vr_eval::{calibrate, scenario};
-use vr_radio::config::Config;
+use vr_radio::config::{Config, DECISIONS_URL, DEFAULT_DECIDE_MODEL};
+use vr_radio::decide::Decisions;
 use vr_radio::stt;
 
 /// End-to-end evaluation of the voice radio.
@@ -103,6 +104,21 @@ enum Cmd {
         /// Session time; the stint's start by default.
         #[arg(long)]
         at: Option<f64>,
+    },
+    /// Whether the radio tells what a call is about, with its words alone and
+    /// with decision models.
+    Topics {
+        #[arg(long, default_value = "crates/vr-eval/scenarios/topics.yaml")]
+        set: PathBuf,
+        /// OpenRouter decision model (repeatable); the radio's by default.
+        #[arg(long)]
+        model: Vec<String>,
+        /// Asks the models about every call.
+        #[arg(long)]
+        no_words: bool,
+        /// Lists what went wrong.
+        #[arg(long)]
+        problems: bool,
     },
     /// One stint in its own process (used by `run`).
     #[command(hide = true)]
@@ -212,6 +228,12 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Topics {
+            set,
+            model,
+            no_words,
+            problems,
+        } => topics(set, model, !no_words, *problems, key.as_deref()),
         Cmd::Stint {
             name,
             set,
@@ -242,6 +264,7 @@ fn main() -> Result<()> {
                 cfg,
                 port: *port,
                 text: *text,
+                sessions: std::env::var_os("VR_SESSIONS").map(PathBuf::from),
             };
             let rt = tokio::runtime::Runtime::new()?;
             let records = rt.block_on(runner.stint(spec))?;
@@ -255,6 +278,38 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn topics(
+    set: &Path,
+    models: &[String],
+    words: bool,
+    problems: bool,
+    key: Option<&str>,
+) -> Result<()> {
+    let set = vr_eval::topics::load(set)?;
+    let print = |name: &str, s: &vr_eval::topics::Score| {
+        println!("{name}: {}", s.line());
+        if problems {
+            println!(
+                "  missed {:?}\n  extra {:?}\n  long {:?}",
+                s.missed, s.extra, s.long_wrong
+            );
+        }
+    };
+    print("words only", &vr_eval::topics::score(&set, true, None));
+    let key = key.context("the decision models need OPENROUTER_API_KEY")?;
+    let default = [DEFAULT_DECIDE_MODEL.to_string()];
+    let models = if models.is_empty() {
+        &default[..]
+    } else {
+        models
+    };
+    for m in models {
+        let d = Decisions::new(DECISIONS_URL, key, m);
+        print(m, &vr_eval::topics::score(&set, words, Some(&d)));
+    }
+    Ok(())
 }
 
 /// The OpenRouter key of the voices, the transcriber and the judges.
@@ -303,6 +358,12 @@ fn run(
                 continue;
             }
             let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+            // Never the sessions of the user.
+            let sessions = std::path::absolute(
+                cli.dir
+                    .join("sessions")
+                    .join(format!("{name}-{trial}-{}-{port}", s.id)),
+            )?;
             let mut args = vec!["--cwd".to_string(), workspace.to_string_lossy().into()];
             if radio.iter().any(|a| a.starts_with("--cwd")) {
                 args.clear();
@@ -327,6 +388,7 @@ fn run(
                     .arg("--")
                     .args(&args)
                     .env("VR_SERVER", format!("http://127.0.0.1:{port}"))
+                    .env("VR_SESSIONS", &sessions)
                     .env("PATH", &path)
                     // A nested agent must not think it runs inside another.
                     .env_remove("CLAUDECODE")

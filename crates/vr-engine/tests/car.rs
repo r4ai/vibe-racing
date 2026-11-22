@@ -735,3 +735,126 @@ fn a_moment_without_laps_does_not_lose_them() {
     assert_eq!(l.last().unwrap().time_s, Some(101.5));
     assert_eq!(l.len(), 4);
 }
+
+/// The generated race shows the balance it was made with.
+#[test]
+fn generated_balance_is_seen() {
+    use vr_replay::{Balance, SynthConfig, synth_frames};
+    let mean = |balance| {
+        let mut st = RaceState::new("test", SourceKind::Live, Capabilities::ALL);
+        let cfg = SynthConfig {
+            player_pit_lap: None,
+            balance: Some(balance),
+            ..Default::default()
+        };
+        for f in synth_frames(cfg, Some(620.0)) {
+            st.ingest(f);
+        }
+        st.handling(&HandlingParams::default()).unwrap()
+    };
+    let none = mean(Balance::default()).mean.unwrap();
+    assert!(
+        none.understeer.total() + none.oversteer.total() < 0.2,
+        "{none:?}"
+    );
+    assert!(none.wheelspin_s + none.rear_lock_s < 0.2, "{none:?}");
+
+    let all = Balance {
+        understeer_mid_s: 3.0,
+        oversteer_exit_s: 1.0,
+        rear_lock_s: 0.8,
+        wheelspin_s: 1.2,
+    };
+    let r = mean(all);
+    let m = r.mean.unwrap();
+    let near = |a: f64, b: f64| (a - b).abs() <= 0.6;
+    assert!(near(m.understeer.mid, 3.0), "{m:?}");
+    assert!(
+        near(m.oversteer.exit, 1.0) && m.oversteer.exit > 0.5,
+        "{m:?}"
+    );
+    assert!(near(m.rear_lock_s, 0.8) && m.rear_lock_s > 0.4, "{m:?}");
+    assert!(near(m.wheelspin_s, 1.2) && m.wheelspin_s > 0.8, "{m:?}");
+    let bias = r.advice.iter().find(|a| a.target == "brake_bias").unwrap();
+    assert!(bias.change.starts_with("forward"), "{bias:?}");
+}
+
+/// Round a circle with a radius of 100 m, 4 pi seconds a lap.
+fn circle(s: &mut Sim, seconds: f64, mut each: impl FnMut(&mut Frame, f64)) {
+    let lap_s = 4.0 * std::f64::consts::PI;
+    let n = (seconds / DT).round() as usize;
+    for _ in 0..n {
+        s.t += DT;
+        let laps = s.t / lap_s;
+        let c = &mut s.frame.cars[0];
+        c.lap = Some(laps as i32 + 1);
+        c.lap_dist_pct = Some(laps.fract());
+        let p = s.p();
+        p.speed_mps = Some(50.0);
+        p.gear = Some(3);
+        p.throttle = Some(0.5);
+        p.car.yaw_rate_rps = Some(0.5);
+        p.car.velocity_x_mps = Some(50.0);
+        p.car.velocity_y_mps = Some(0.0);
+        p.car.steering_rad = Some(0.1);
+        p.car.lat_accel_mps2 = Some(25.0);
+        s.frame.session.time_s = s.t;
+        s.frame.timestamp_ms += 16;
+        let t = s.t;
+        each(&mut s.frame, t);
+        s.st.ingest(s.frame.clone());
+    }
+}
+
+#[test]
+fn a_lap_is_recorded_place_by_place() {
+    let mut s = Sim::new();
+    // Begins within a lap: that one is not whole.
+    circle(&mut s, 30.0, |_, _| {});
+    let laps = s.st.take_traces();
+    assert_eq!(laps.len(), 1);
+    assert!(s.st.take_traces().is_empty());
+    let l = &laps[0];
+    assert_eq!((l.lap, l.pit), (2, false));
+    let lap_s = 4.0 * std::f64::consts::PI;
+    assert!((l.time_s - lap_s).abs() < 0.001, "{}", l.time_s);
+    assert!((l.length_m - 628.3).abs() < 0.5, "{}", l.length_m);
+    for n in [
+        l.t_ms.len(),
+        l.speed.len(),
+        l.x.len(),
+        l.y.len(),
+        l.rpm.len(),
+    ] {
+        assert_eq!(n, TRACE_POINTS);
+    }
+    assert_eq!(
+        (l.t_ms[0], l.speed[500], l.throttle[500], l.gear[500]),
+        (0, 1800, 50, 3)
+    );
+    assert_eq!((l.steer[500], l.lat[500], l.brake[500]), (57, 255, 0));
+    assert!((f64::from(l.t_ms[500]) - lap_s * 500.0).abs() <= 1.0);
+    // The circle, in decimetres, starting to the right.
+    assert_eq!((l.x[0], l.y[0]), (0, 0));
+    let width = l.x.iter().max().unwrap() - l.x.iter().min().unwrap();
+    let height = l.y.iter().max().unwrap();
+    assert!((width - 2000).abs() <= 3, "{width}");
+    assert!((height - 2000).abs() <= 3, "{height}");
+    assert!(l.x[10] > 0 && l.x[999] < 0 && l.x[999] > -10);
+}
+
+#[test]
+fn laps_with_a_jump_or_a_stop_at_the_pits() {
+    let mut s = Sim::new();
+    // Towed within lap 3, through the pit lane in lap 4.
+    circle(&mut s, 70.0, |f, t| {
+        let lap = f.cars[0].lap.unwrap();
+        if lap == 3 && (30.0..30.5).contains(&t) {
+            f.cars[0].lap_dist_pct = Some(0.1);
+        }
+        f.cars[0].on_pit_road = lap == 4 && (45.0..46.0).contains(&t);
+    });
+    let laps = s.st.take_traces();
+    let got: Vec<_> = laps.iter().map(|l| (l.lap, l.pit)).collect();
+    assert_eq!(got, [(2, false), (4, true), (5, false)]);
+}

@@ -35,6 +35,12 @@ cargo run -q -p vr-cli -- serve --game synthetic --speed 10
 cargo run -q -p vr-radio -- --ask "前との差は？"
 ```
 
+マイクとスピーカー無しで走らせ続ける（標準入力の 1 行が質問、`# 20` で 20 秒待つ）。見張り・黙る条件・作戦会議の確認用:
+
+```powershell
+cargo run -q -p vr-radio --example drive
+```
+
 音声無線の応答を評価する手順は [vr-eval](../crates/vr-eval/docs/architecture.md)。
 
 画面を状態ごとに PNG へ描画する（ウィンドウ・デバイス不要）:

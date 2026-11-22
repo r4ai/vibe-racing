@@ -19,7 +19,9 @@ use crate::context::{Commands, ContextSource};
 use crate::directive::Setting;
 use crate::engine::{self, Command, Deps, Event, Outcome};
 use crate::hotkey::{self, Captured};
+use crate::live::Feed;
 use crate::resident::{self, ResidentEvent};
+use crate::rules::{Rules, Scope};
 use crate::settings::Settings;
 use crate::stt::{self, SttBackend};
 use crate::voicevox::{self, Synth, Voice, Voicevox};
@@ -60,6 +62,18 @@ pub enum Message {
     /// Whether the engineer calls by itself.
     Proactive(bool),
     ProactiveGroup(Group, bool),
+    /// Seconds between calls that can wait.
+    Interval(u16),
+    Hold(Scope, HoldChoice),
+    /// Edits a condition of the driver's own.
+    HoldDraft(Scope, String),
+    /// Laps between looks at the strategy.
+    Planning(PlanChoice),
+    NoteDraft(String),
+    AddNote,
+    /// Drops a standing order or a watch, by its number.
+    DropNote(usize),
+    DropWatch(usize),
     Scrolled(bool),
     ScrollToEnd,
     Settings(bool),
@@ -84,6 +98,74 @@ pub enum Message {
     Minimize,
     Close,
     Chrome(crate::chrome::ChromeEvent),
+}
+
+/// When to keep quiet, for those who do not write conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldChoice {
+    Never,
+    Brakes,
+    Corners,
+    Straights,
+    Custom,
+}
+
+impl HoldChoice {
+    const ALL: [Self; 5] = [
+        Self::Never,
+        Self::Brakes,
+        Self::Corners,
+        Self::Straights,
+        Self::Custom,
+    ];
+
+    /// The condition; `None` where there is none to choose.
+    fn condition(self) -> Option<&'static str> {
+        match self {
+            Self::Never | Self::Custom => None,
+            Self::Brakes => Some(crate::rules::HOLD_CALLS),
+            Self::Corners => Some("brake > 10 or abs(lat_g) > 0.8"),
+            Self::Straights => Some("throttle < 95 or abs(lat_g) > 0.5"),
+        }
+    }
+
+    fn of(condition: Option<&str>) -> Self {
+        let Some(c) = condition else {
+            return Self::Never;
+        };
+        Self::ALL
+            .into_iter()
+            .find(|h| h.condition() == Some(c))
+            .unwrap_or(Self::Custom)
+    }
+}
+
+impl std::fmt::Display for HoldChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Never => "いつでも話す",
+            Self::Brakes => "ブレーキ中は待つ",
+            Self::Corners => "ブレーキ中とコーナーは待つ",
+            Self::Straights => "ストレートだけ",
+            Self::Custom => "条件を書く",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanChoice(pub u16);
+
+impl PlanChoice {
+    const ALL: [u16; 6] = [0, 1, 2, 3, 5, 10];
+}
+
+impl std::fmt::Display for PlanChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            0 => f.write_str("しない"),
+            n => write!(f, "{n}周ごと"),
+        }
+    }
 }
 
 /// Agents that can be picked without knowing their command.
@@ -260,6 +342,11 @@ pub struct App {
     microphone: Option<bool>,
     speakers: Option<bool>,
     telemetry: Option<bool>,
+    note_draft: String,
+    /// Conditions being written, where they cannot be read yet too.
+    hold_drafts: [Option<String>; 2],
+    /// The engineer's notes on the strategy.
+    plan: Option<String>,
 }
 
 impl App {
@@ -283,6 +370,9 @@ impl App {
             microphone: None,
             speakers: None,
             telemetry: None,
+            note_draft: String::new(),
+            hold_drafts: [None, None],
+            plan: None,
             config,
             settings,
             settings_path,
@@ -378,13 +468,16 @@ impl App {
             },
             Event::Chunk {
                 turn: 3,
-                text: "第 2 セクター、ローカルイエロー。前の車に気をつけて。".into(),
+                text: "第2セクター、ローカルイエロー。前の車に気をつけて。".into(),
             },
             Event::TurnDone {
                 turn: 3,
                 outcome: Outcome::Answered,
                 ms: 1900,
             },
+            Event::Plan(Some(
+                "15周目に入る。9号車 Hart が2.0秒後ろ、先に入られたら2周以内に応じる。".into(),
+            )),
             Event::TurnStarted { turn: 2 },
             Event::Transcript {
                 turn: 2,
@@ -401,6 +494,16 @@ impl App {
             app.apply(e);
         }
         app
+    }
+
+    /// A key and a wheel button, for snapshots.
+    pub fn assign_sample(&mut self) {
+        self.hotkey = Some(Ok("F9".into()));
+        self.settings.wheel = Some(wheel::Binding {
+            device: "VID_346E&PID_0006".into(),
+            name: "MOZA R9".into(),
+            button: 40,
+        });
     }
 
     /// Feeds an engine event, as the running app does.
@@ -483,8 +586,22 @@ impl App {
             }
             Setting::Proactive(on) => self.settings.proactive.enabled = on,
             Setting::Event(group, on) => self.settings.proactive.set(group, on),
+            // The rules come as a whole.
+            Setting::Interval(_)
+            | Setting::Hold(..)
+            | Setting::HoldMax(_)
+            | Setting::Note(_)
+            | Setting::Forgot(_)
+            | Setting::Watch(_)
+            | Setting::Planning(_) => return,
         }
         self.save();
+    }
+
+    /// Changes the rules from the settings sheet.
+    fn rules(&mut self, change: impl FnOnce(&mut Rules)) {
+        change(&mut self.settings.rules);
+        self.send(Command::SetRules(self.settings.rules.clone()));
     }
 
     fn speed(&mut self, percent: u16) {
@@ -504,7 +621,12 @@ impl App {
 
     fn save(&mut self) {
         if let Some(path) = &self.settings_path
-            && let Err(e) = self.settings.save(path)
+            && let Err(e) = (Settings {
+                // What the engineer set for this race is not a setting.
+                rules: self.settings.rules.lasting(),
+                ..self.settings.clone()
+            })
+            .save(path)
         {
             self.error(format!("設定を保存できません: {e:#}"));
         }
@@ -670,7 +792,53 @@ impl App {
                 self.send(Command::SetProactive(self.settings.proactive));
                 self.save();
             }
+            Message::Interval(s) => self.rules(|r| r.interval_s = s),
+            Message::Hold(scope, choice) => {
+                let draft = &mut self.hold_drafts[usize::from(scope == Scope::Calls)];
+                *draft = None;
+                if choice == HoldChoice::Custom {
+                    let now = self.settings.rules.hold(scope);
+                    *draft = Some(now.unwrap_or_default().to_string());
+                } else {
+                    let when = choice.condition().map(str::to_string);
+                    self.rules(|r| r.set_hold(scope, when));
+                    self.save();
+                }
+            }
+            Message::HoldDraft(scope, text) => {
+                if text.parse::<crate::expr::Expr>().is_ok() {
+                    let when = Some(text.clone());
+                    self.rules(|r| r.set_hold(scope, when));
+                    self.save();
+                }
+                self.hold_drafts[usize::from(scope == Scope::Calls)] = Some(text);
+            }
+            Message::Planning(n) => {
+                self.rules(|r| r.planning = n.0);
+                self.save();
+            }
+            Message::NoteDraft(text) => self.note_draft = text,
+            Message::AddNote => {
+                let note = std::mem::take(&mut self.note_draft);
+                if !note.trim().is_empty() {
+                    self.rules(|r| r.note(&note));
+                    self.save();
+                }
+            }
+            Message::DropNote(i) => {
+                self.rules(|r| {
+                    r.forget(&format!("n{}", i + 1));
+                });
+                self.save();
+            }
+            Message::DropWatch(i) => {
+                self.rules(|r| {
+                    r.forget(&format!("w{}", i + 1));
+                });
+                self.save();
+            }
             Message::Settings(open) => {
+                self.hold_drafts = [None, None];
                 self.settings_open = open;
                 self.set_capture(Capture::None);
             }
@@ -718,7 +886,7 @@ impl App {
                 Captured::Key(key) => self.assign_key(key),
                 Captured::Cancel => self.set_capture(Capture::None),
                 Captured::NeedsModifier => {
-                    self.capture_hint = Some("文字キーは Ctrl・Alt・Win と組み合わせてください");
+                    self.capture_hint = Some("文字キーはCtrl・Alt・Winと組み合わせてください");
                 }
             },
             Message::Wheel(e) => {
@@ -778,6 +946,14 @@ impl App {
             Event::Speakers(ok) => self.speakers = Some(ok),
             Event::Telemetry(ok) => self.telemetry = Some(ok),
             Event::Setting(s) => self.changed(s),
+            Event::Rules(r) => {
+                let keep = r.lasting() != self.settings.rules.lasting();
+                self.settings.rules = r;
+                if keep {
+                    self.save();
+                }
+            }
+            Event::Plan(p) => self.plan = p,
             Event::CallStarted { turn, about } => {
                 self.previewing = false;
                 self.turns.push(TurnView {
@@ -984,9 +1160,13 @@ fn show_window() -> Task<Message> {
 
 fn context(cfg: &Config) -> Option<Arc<dyn ContextSource>> {
     let commands = cfg.context_commands();
-    (!commands.is_empty()).then(|| {
-        let cwd = cfg.agent_cwd();
-        Arc::new(Commands { commands, cwd }) as Arc<dyn ContextSource>
+    (!commands.is_empty() || cfg.topics).then(|| {
+        Arc::new(Commands {
+            commands,
+            topics: cfg.topics,
+            decide: cfg.decide(),
+            cwd: cfg.agent_cwd(),
+        }) as Arc<dyn ContextSource>
     })
 }
 
@@ -1026,6 +1206,12 @@ pub fn deps(
         watch: None,
         proactive: SETTINGS.get().map(|(s, _)| s.proactive).unwrap_or_default(),
         timing: Timing::default(),
+        rules: SETTINGS
+            .get()
+            .map(|(s, _)| s.rules.clone())
+            .unwrap_or_default(),
+        live: None,
+        standby: (cfg.standby > 0.0).then(|| Duration::from_secs_f64(cfg.standby)),
     }
 }
 
@@ -1058,6 +1244,7 @@ pub async fn start_engine(
 
     let mut deps = deps(cfg, recorder, output, voicevox);
     deps.watch = Follow::start(&cfg.watch, cfg.agent_cwd());
+    deps.live = Feed::start(&cfg.live, cfg.agent_cwd());
     tokio::spawn(engine::run(deps, cmd_rx, ev_tx));
     voices
 }

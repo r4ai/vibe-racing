@@ -21,15 +21,17 @@ pub enum Group {
     Weather,
     Session,
     Adjustment,
+    Strategy,
 }
 
 impl Group {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Flag,
         Self::Position,
         Self::Incident,
         Self::Fuel,
         Self::Weather,
+        Self::Strategy,
         Self::Pit,
         Self::Session,
         Self::Lap,
@@ -47,6 +49,7 @@ impl Group {
             Self::Weather => "天候",
             Self::Session => "セッション",
             Self::Adjustment => "車内調整",
+            Self::Strategy => "作戦",
         }
     }
 
@@ -61,6 +64,7 @@ impl Group {
             Self::Weather => "weather",
             Self::Session => "session",
             Self::Adjustment => "adjustment",
+            Self::Strategy => "strategy",
         }
     }
 
@@ -76,6 +80,7 @@ impl Group {
             "weather_changed" => Self::Weather,
             "phase_changed" | "session_changed" => Self::Session,
             "adjustment" => Self::Adjustment,
+            "strategy" => Self::Strategy,
             _ => return None,
         })
     }
@@ -103,6 +108,7 @@ pub struct Proactive {
     pub weather: bool,
     pub session: bool,
     pub adjustment: bool,
+    pub strategy: bool,
 }
 
 impl Default for Proactive {
@@ -118,6 +124,7 @@ impl Default for Proactive {
             weather: true,
             session: true,
             adjustment: false,
+            strategy: true,
         }
     }
 }
@@ -134,6 +141,7 @@ impl Proactive {
             Group::Weather => &mut self.weather,
             Group::Session => &mut self.session,
             Group::Adjustment => &mut self.adjustment,
+            Group::Strategy => &mut self.strategy,
         }
     }
 
@@ -147,8 +155,18 @@ impl Proactive {
 
     /// Whether the driver wants to hear about `e`.
     pub fn wants(self, e: &RaceEvent) -> bool {
-        self.enabled && e.group().is_some_and(|g| self.get(g))
+        // What the driver asked to be told is told.
+        e.kind == WATCH || self.enabled && e.group().is_some_and(|g| self.get(g))
     }
+}
+
+/// Kind of the events the driver's own watches make.
+pub const WATCH: &str = "watch";
+
+/// What a strategy event is about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Advice {
+    pub call: String,
 }
 
 /// One line of `vr watch -f json`; other fields are ignored.
@@ -159,6 +177,8 @@ pub struct RaceEvent {
     pub text: String,
     #[serde(default)]
     pub flag: Option<String>,
+    #[serde(default)]
+    pub advice: Option<Advice>,
 }
 
 impl RaceEvent {
@@ -176,10 +196,42 @@ impl RaceEvent {
         Group::of(&self.kind)
     }
 
+    pub fn advice(&self) -> &str {
+        self.advice.as_ref().map_or("", |a| a.call.as_str())
+    }
+
+    /// Something the driver asked to be told about.
+    pub fn watch(text: String) -> Self {
+        Self {
+            kind: WATCH.into(),
+            text,
+            flag: None,
+            advice: None,
+        }
+    }
+
+    /// Something the engineer's own plan looked out for.
+    pub fn planned(text: String) -> Self {
+        Self {
+            kind: "strategy".into(),
+            ..Self::watch(text)
+        }
+    }
+
+    /// Worth telling for so long.
+    fn lasts(&self) -> Duration {
+        match self.kind.as_str() {
+            // A lap's work.
+            "strategy" => Duration::from_secs(45),
+            _ => Duration::ZERO,
+        }
+    }
+
     /// Does not wait for its turn.
     pub fn urgent(&self) -> bool {
         match self.kind.as_str() {
-            "incident" | "damage" | "fuel_low" => true,
+            "incident" | "damage" | "fuel_low" | WATCH => true,
+            "strategy" => matches!(self.advice(), "box_this_lap" | "answer" | "fuel_stop"),
             "flag_raised" => matches!(
                 self.flag.as_deref(),
                 Some(
@@ -245,6 +297,19 @@ impl Queue {
         self.waiting.retain(|(_, e)| wanted.wants(e));
     }
 
+    pub fn set_interval(&mut self, d: Duration) {
+        self.timing.min_interval = d;
+    }
+
+    /// Drops what can wait.
+    pub fn keep_urgent(&mut self) {
+        self.waiting.retain(|(_, e)| e.urgent());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_empty()
+    }
+
     /// Puts back what could not be told after all.
     pub fn restore(&mut self, mut events: Vec<Dated>) {
         events.append(&mut self.waiting);
@@ -259,7 +324,8 @@ impl Queue {
             min_interval,
         } = self.timing;
         let since = |t: Instant| now.saturating_duration_since(t);
-        self.waiting.retain(|(t, _)| since(*t) <= max_age);
+        self.waiting
+            .retain(|(t, e)| since(*t) <= max_age.max(e.lasts()));
         let (first, _) = self.waiting.first()?;
         let ripe = since(*first) >= coalesce;
         let urgent = self.waiting.iter().any(|(_, e)| e.urgent());
@@ -332,6 +398,7 @@ mod tests {
             kind: kind.into(),
             text: kind.into(),
             flag: flag.map(str::to_string),
+            advice: None,
         }
     }
 
@@ -345,7 +412,8 @@ mod tests {
             Some(RaceEvent {
                 kind: "flag_raised".into(),
                 text: "yellow flag".into(),
-                flag: Some("yellow".into())
+                flag: Some("yellow".into()),
+                advice: None,
             })
         );
         let e = RaceEvent::parse(
@@ -353,6 +421,14 @@ mod tests {
         );
         assert_eq!(e.unwrap().kind, "position_changed");
         assert_eq!(RaceEvent::parse("watching events from"), None);
+        let e = RaceEvent::parse(
+            r#"{"seq":5,"type":"strategy","advice":{"call":"answer","car":{},"within_laps":2},"text":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!((e.advice(), e.group()), ("answer", Some(Group::Strategy)));
+        assert!(e.urgent());
+        let e = RaceEvent::parse(r#"{"type":"strategy","advice":{"call":"plan"},"text":"x"}"#);
+        assert!(!e.unwrap().urgent());
     }
 
     #[test]
@@ -423,7 +499,7 @@ mod tests {
         assert_eq!(
             on,
             [
-                "flag", "position", "incident", "fuel", "weather", "pit", "session"
+                "flag", "position", "incident", "fuel", "weather", "strategy", "pit", "session"
             ]
         );
         assert!(p.enabled);

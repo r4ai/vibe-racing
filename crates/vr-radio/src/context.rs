@@ -9,31 +9,85 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::child;
+use crate::decide::Decide;
+use crate::{child, topic};
 
 /// Data later than this is not worth waiting for: the agent looks it up.
 const TIMEOUT: Duration = Duration::from_millis(1500);
 /// A runaway command must not flood the prompt.
 const MAX_BYTES: usize = 16 * 1024;
 
+/// What a question needs beyond the usual data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct More {
+    pub data: Option<String>,
+    /// The answer will take its time.
+    pub long: bool,
+}
+
 pub trait ContextSource: Send + Sync + 'static {
     /// The data as text, `None` when there is none. Blocking.
     fn fetch(&self) -> Option<String>;
+
+    /// More, for what the driver said. Blocking.
+    fn fetch_for(&self, _text: &str) -> More {
+        More::default()
+    }
+
+    /// The driver begins to speak. Blocking.
+    fn prepare(&self) {}
 }
 
 /// Runs commands at the same time and joins what they print.
 pub struct Commands {
     pub commands: Vec<String>,
+    /// Also those for what the question is about.
+    pub topics: bool,
+    /// Asked when the words do not tell what the question is about.
+    pub decide: Option<Arc<dyn Decide>>,
     pub cwd: PathBuf,
 }
 
 impl ContextSource for Commands {
     fn fetch(&self) -> Option<String> {
+        self.output(&self.commands)
+    }
+
+    fn fetch_for(&self, text: &str) -> More {
+        if !self.topics {
+            return More::default();
+        }
+        let found = topic::read(text)
+            .or_else(|| match self.decide.as_ref()?.decide(text) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    tracing::warn!("{e:#}");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let mut commands = topic::commands(&found, text);
+        commands.retain(|c| !self.commands.contains(c));
+        More {
+            data: self.output(&commands),
+            long: found.long,
+        }
+    }
+
+    fn prepare(&self) {
+        if let Some(d) = self.decide.as_ref().filter(|_| self.topics) {
+            d.warm_up();
+        }
+    }
+}
+
+impl Commands {
+    fn output(&self, commands: &[String]) -> Option<String> {
         let parts: Vec<String> = std::thread::scope(|s| {
-            let threads: Vec<_> = self
-                .commands
+            let threads: Vec<_> = commands
                 .iter()
                 .map(|c| s.spawn(move || run(c, &self.cwd, TIMEOUT)))
                 .collect();
@@ -83,6 +137,8 @@ mod tests {
     fn commands(list: &[&str]) -> Commands {
         Commands {
             commands: list.iter().map(|c| c.to_string()).collect(),
+            topics: true,
+            decide: None,
             cwd: std::env::temp_dir(),
         }
     }
@@ -105,6 +161,37 @@ mod tests {
         assert_eq!(commands(&[]).fetch(), None);
         let text = commands(&["vr-no-such-program", "rustc --version"]).fetch();
         assert!(text.unwrap().starts_with("$ rustc --version"));
+    }
+
+    struct FakeDecide(anyhow::Result<topic::Found>);
+    impl Decide for FakeDecide {
+        fn decide(&self, _: &str) -> anyhow::Result<topic::Found> {
+            match &self.0 {
+                Ok(f) => Ok(f.clone()),
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+            }
+        }
+    }
+
+    #[test]
+    fn the_decision_counts_only_when_the_words_do_not_tell() {
+        let long = || topic::Found {
+            topics: Vec::new(),
+            long: true,
+        };
+        let with = |d, topics| Commands {
+            decide: Some(Arc::new(FakeDecide(d))),
+            topics,
+            ..commands(&[])
+        };
+        let unclear = "ケツが出る";
+        assert!(with(Ok(long()), true).fetch_for(unclear).long);
+        assert!(!with(Ok(long()), false).fetch_for(unclear).long);
+        assert!(!with(Ok(long()), true).fetch_for("前との差は").long);
+        let failed = with(Err(anyhow::anyhow!("offline")), true);
+        assert_eq!(failed.fetch_for(unclear), More::default());
+        assert_eq!(commands(&[]).fetch_for(unclear), More::default());
+        assert!(commands(&[]).fetch_for("コースレコード調べて").long);
     }
 
     #[test]

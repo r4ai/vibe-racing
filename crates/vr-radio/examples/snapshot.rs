@@ -37,7 +37,10 @@ fn redraw(ui: &mut Simulator<'_, Message>) {
 
 /// Renders `app`, optionally clicking the text `click` first.
 fn render(name: &str, app: &App, theme: &Theme, click: Option<&str>) {
-    let size = Size::new(1040.0, 680.0);
+    render_at(Size::new(1040.0, 680.0), name, app, theme, click);
+}
+
+fn render_at(size: Size, name: &str, app: &App, theme: &Theme, click: Option<&str>) {
     let mut ui = Simulator::with_size(settings(), size, app.view());
     redraw(&mut ui);
     if let Some(label) = click
@@ -75,8 +78,35 @@ fn main() {
     render("recording", &recording, &theme, None);
 
     let mut settings_open = App::sample();
+    settings_open.assign_sample();
     let _ = settings_open.update(Message::Settings(true));
     render("settings", &settings_open, &theme, None);
+
+    // Everything in the sheet, with rules the driver asked for.
+    let mut rules = vr_radio::rules::Rules::default();
+    rules.set_hold(
+        vr_radio::rules::Scope::All,
+        Some("brake > 5 or abs(lat_g) > 1.2".into()),
+    );
+    rules.note("順位は聞かれたときだけ言う");
+    for (when, say) in [
+        ("gap_behind < 1", Some("後ろ{gap_behind}秒".to_string())),
+        ("stop_in == 0", None),
+    ] {
+        rules.watch(vr_radio::rules::Watch {
+            when: when.into(),
+            planned: say.is_none(),
+            act: say.is_none().then(|| "ボックスと言う".into()),
+            say,
+            ..Default::default()
+        });
+    }
+    settings_open.handle(Event::Rules(rules));
+    let _ = settings_open.update(Message::Capture(vr_radio::app::Capture::Wheel));
+    render("settings-capture", &settings_open, &theme, None);
+    let _ = settings_open.update(Message::Settings(true));
+    let tall = Size::new(1040.0, 1800.0);
+    render_at(tall, "settings-all", &settings_open, &theme, None);
 
     // Right after the start: nothing can be used yet.
     let mut starting = App::new();

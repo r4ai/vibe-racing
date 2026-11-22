@@ -1,0 +1,38 @@
+# What calls are about, for choosing the decision model and the word lists of the radio.
+# topics: handling, car, past. long: more than a look at the data.
+# Held out: the word lists and thresholds were not chosen on these.
+- { say: フロントに追いつけそう？ }
+- { say: どんくらい離れた }
+- { say: ガス欠にならない？ }
+- { say: 残り時間は }
+- { say: 俺いま五番手だっけ }
+- { say: セーフティカー出た？ }
+- { say: ボックスボックス, topics: [strategy] }
+- { say: マイク切って }
+- { say: 声がちっちゃい }
+- { say: 直近三周のタイム読んで }
+- { say: 後ろ誰 }
+- { say: ブルーフラッグ出てる？ }
+- { say: 給油の量教えて }
+- { say: 最終ラップは何周目 }
+- { say: 高速でフラフラする, topics: [handling] }
+- { say: ブレーキ踏むと後ろが回りそうになる, topics: [handling] }
+- { say: 曲がり始めが鈍い, topics: [handling] }
+- { say: エンジンブレーキ弱めたい, topics: [handling] }
+- { say: アンチロールいじった方がいい？, topics: [handling] }
+- { say: 出口で外に逃げていく, topics: [handling] }
+- { say: 前輪が効かなくなってきた, topics: [handling] }
+- { say: この車ピーキーすぎる, topics: [handling] }
+- { say: ゴムまだいける？, topics: [car] }
+- { say: 壁に擦ったけどどこか壊れてない？, topics: [car] }
+- { say: オーバーヒートしてない？, topics: [car] }
+- { say: 直すのにピットで何秒いる, topics: [car] }
+- { say: 左前だけ減ってない？, topics: [car] }
+- { say: 二日前のレースと比べて速い？, topics: [past] }
+- { say: こないだのスパは何位で終わった, topics: [past] }
+- { say: 自己ベストっていつ出した, topics: [past] }
+- { say: 前の枠の燃費は, topics: [past] }
+- { say: 俺の走り全部振り返ってレポート作って, long: true }
+- { say: 公式サイトでこのレースのルール確認して, long: true }
+- { say: この現象バグ報告しておいて, long: true }
+- { say: 今までの全レースの結果を表にして, topics: [past], long: true }

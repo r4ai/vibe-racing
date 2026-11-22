@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use vr_core::{Flag, SessionKind, SessionPhase};
 
+use crate::strategy::StrategyCall;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     /// Monotonic sequence number; pass the last seen value as `since` to page.
@@ -73,6 +75,10 @@ pub enum EventKind {
     /// The car needs repairs, or runs too hot or short of pressure.
     Damage {
         warning: vr_core::Warning,
+    },
+    /// The stops: something to act on.
+    Strategy {
+        advice: StrategyCall,
     },
     /// The driver changed an in-car setting.
     Adjustment {

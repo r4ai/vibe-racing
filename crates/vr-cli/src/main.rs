@@ -2,6 +2,7 @@
 
 mod client;
 mod doctor;
+mod inbox;
 mod logging;
 mod sessions;
 mod skill;
@@ -77,6 +78,9 @@ enum Cmd {
         /// Do not keep sessions (`vr sessions`).
         #[arg(long)]
         no_sessions: bool,
+        /// Do not read the telemetry files the game leaves behind.
+        #[arg(long)]
+        no_import: bool,
     },
     /// Everything a race engineer needs in one call: position, gaps, pace, fuel, flags, events.
     Brief,
@@ -103,6 +107,8 @@ enum Cmd {
     },
     /// Fuel level, consumption per lap, laps remaining and fuel to finish.
     Fuel,
+    /// Pit strategy: fade, cost of a stop, plans, undercuts, rivals.
+    Strategy,
     /// Lap history (yours by default).
     Laps {
         /// Car number (default: you).
@@ -122,6 +128,12 @@ enum Cmd {
     },
     /// Stream events as they happen (one per line) until interrupted.
     Watch,
+    /// What changes from moment to moment (speed, pedals, gaps...), as numbers.
+    Live {
+        /// Keep printing, so often per second (one JSON object per line).
+        #[arg(long)]
+        hz: Option<f64>,
+    },
     /// Full normalized telemetry frame plus metadata (large; prefer `brief`).
     Snapshot,
     /// Your car: tyres, damage, engine, pit service, push-to-pass, in-car settings.
@@ -222,6 +234,8 @@ render! {
     InfoReport => |r| r.value.is_some(),
     SetupReport => |r| r.setup.is_some() || !r.controls.is_empty(),
     HandlingReport => |r| r.meta.session_time_s.is_some(),
+    StrategyReport => |r| r.lap.is_some(),
+    LiveReport => |r| !r.values.is_empty(),
 }
 
 impl Render for SnapshotReport {
@@ -257,6 +271,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             record_hz,
             if_needed,
             no_sessions,
+            no_import,
         } => {
             if if_needed && let Some(c) = client::find_server(server) {
                 eprintln!("already served by {}", c.base());
@@ -264,10 +279,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             // Demo races are not the driver's.
             let keep = !no_sessions && cli.src.game() == sources::Game::Iracing;
-            serve(&cli.src, port, record.map(|p| (p, record_hz)), keep)
+            let record = record.map(|p| (p, record_hz));
+            serve(&cli.src, port, record, keep, !no_import)
         }
         Cmd::Record { out, hz } => record(&cli.src, out, hz),
         Cmd::Watch => watch(&cli.src, server, fmt),
+        Cmd::Live { hz: Some(hz) } => live(&cli.src, server, hz),
         Cmd::Doctor => doctor::run(server, fmt),
         Cmd::Skill { cmd } => skill::run(cmd),
         Cmd::Sessions { cmd } => sessions::run(cmd, fmt),
@@ -296,6 +313,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     }),
                 ),
                 Cmd::Fuel => emit(fmt, api.fuel()),
+                Cmd::Strategy => emit(fmt, api.strategy()),
+                Cmd::Live { .. } => emit(fmt, api.live()),
                 Cmd::Laps { car, last } => emit(
                     fmt,
                     api.laps(&LapsParams {
@@ -334,6 +353,7 @@ fn serve(
     port: u16,
     record: Option<(PathBuf, f64)>,
     keep: bool,
+    import: bool,
 ) -> anyhow::Result<ExitCode> {
     let factory = src.factory(1.0)?;
     let state: SharedState = Arc::new(RwLock::new(RaceState::new(
@@ -351,6 +371,9 @@ fn serve(
     };
     let collector =
         vr_server::spawn_collector(factory, state.clone(), tx.clone(), cfg, stop.clone())?;
+    if let Some(dir) = src.recordings().filter(|_| keep && import) {
+        inbox::spawn(dir, store.clone(), state.clone(), stop.clone());
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -442,6 +465,47 @@ fn print_event(fmt: Format, e: &Event) {
         Format::Text => println!("{}", render::event_to_text(e)),
         Format::Json => println!("{}", serde_json::to_string(e).unwrap_or_default()),
     }
+}
+
+/// One line per sample; the reader ends it by closing the pipe.
+fn live(src: &SourceArgs, server: Option<&str>, hz: f64) -> anyhow::Result<ExitCode> {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let mut print = move |r: &vr_engine::LiveReport| -> bool {
+        serde_json::to_string(r)
+            .is_ok_and(|line| writeln!(out, "{line}").is_ok() && out.flush().is_ok())
+    };
+    if !src.explicit()
+        && let Some(c) = client::find_server(server)
+    {
+        c.stream_live(hz, |r| print(&r))?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut factory = src.factory(1.0)?;
+    let mut st = RaceState::new(
+        src.game_id(),
+        src.source_kind(true),
+        vr_core::Capabilities::ALL,
+    );
+    let mut s = factory().map_err(|e| anyhow::Error::new(NoData(e.to_string())))?;
+    let every = Duration::from_secs_f64(1.0 / hz.clamp(0.1, 60.0));
+    let mut last: Option<std::time::Instant> = None;
+    loop {
+        match s.poll(Duration::from_millis(250))? {
+            Poll::Frame(f) => {
+                st.ingest(*f);
+                if last.is_none_or(|t| t.elapsed() >= every) {
+                    last = Some(std::time::Instant::now());
+                    if !print(&st.live()?) {
+                        break;
+                    }
+                }
+            }
+            Poll::Idle => {}
+            Poll::Disconnected => break,
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn watch(src: &SourceArgs, server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {

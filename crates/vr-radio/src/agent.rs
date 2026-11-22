@@ -432,7 +432,8 @@ pub mod fake {
     use super::*;
 
     /// Records prompts; replies `reply` split into chunks after a tool call.
-    /// A prompt containing "slow" waits until it is cancelled.
+    /// A prompt containing "slow" waits until it is cancelled. `@key@text`
+    /// is the reply to prompts containing the key, instead of the others.
     pub fn agent(
         reply: &'static [&'static str],
         prompts: Arc<Mutex<Vec<String>>>,
@@ -503,11 +504,26 @@ pub mod fake {
                             ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
                         )),
                     ))?;
+                    let keyed = |c: &&'static str| -> Option<(&'static str, &'static str)> {
+                        c.strip_prefix('@')?.split_once('@')
+                    };
+                    let mine: Vec<&str> = reply
+                        .iter()
+                        .filter_map(keyed)
+                        .filter(|(key, _)| text.contains(key))
+                        .map(|(_, reply)| reply)
+                        .collect();
+                    let plain = reply.iter().filter(|c| keyed(c).is_none()).copied();
+                    let reply = if mine.is_empty() {
+                        plain.collect()
+                    } else {
+                        mine
+                    };
                     for chunk in reply {
                         cx.send_notification(SessionNotification::new(
                             sid.clone(),
                             SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                ContentBlock::Text(TextContent::new(*chunk)),
+                                ContentBlock::Text(TextContent::new(chunk)),
                             )),
                         ))?;
                     }

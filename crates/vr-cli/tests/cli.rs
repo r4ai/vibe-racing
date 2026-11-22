@@ -103,6 +103,20 @@ fn every_query_command_emits_json() {
     let f = json(&run(&disc, &with_syn(&["fuel", "-f", "json"])));
     assert_eq!(f["fuel"]["basis"], "history");
 
+    let s = json(&run(&disc, &with_syn(&["strategy", "-f", "json"])));
+    assert!(s["lap"].is_i64() && s["rivals"].is_array());
+    let l = json(&run(&disc, &with_syn(&["live", "-f", "json"])));
+    assert_eq!(l["values"]["position"], 4.0);
+    let stream = run(
+        &disc,
+        &["live", "--hz", "2", "--game", "synthetic", "--speed", "0"],
+    );
+    let lines: Vec<serde_json::Value> = stdout(&stream)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(lines[0]["values"]["speed"].is_f64());
+
     let l = json(&run(
         &disc,
         &with_syn(&["laps", "--last", "3", "-f", "json"]),
@@ -128,6 +142,13 @@ fn text_forms_of_other_commands() {
         (&["standings", "--top", "3"], "standings:"),
         (&["gap"], "ahead: P3"),
         (&["fuel"], "L/lap (avg"),
+        (&["strategy"], "tyres "),
+        (
+            &["live"],
+            "
+position 4 | in class
+",
+        ),
         (&["laps", "--last", "2"], "laps for #23 You"),
         (&["events", "--limit", "3"], "last_seq="),
         (&["snapshot"], "\"frame\""),
@@ -536,6 +557,11 @@ fn sessions_can_be_managed() {
         lines[0].starts_with("1. 20260102-000000-race-spa | 2026-01-02 00:00 UTC | race | Spa")
     );
     assert!(lines[0].contains("2 laps | best 1:57.250"), "{list}");
+    let analysed = stdout(&run(&disc, &["sessions", "analyse"]));
+    assert!(
+        analysed.contains("nothing measured at the wheels"),
+        "{analysed}"
+    );
     let one = |args: &[&str]| stdout(&run(&disc, &[&["sessions", "list"], args].concat()));
     assert_eq!(one(&["--limit", "1"]).lines().count(), 1);
     assert_eq!(one(&["--track", "SPA"]).lines().count(), 2);

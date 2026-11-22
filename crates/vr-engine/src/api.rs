@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::RaceState;
 use crate::handling::{Behaviour, HandlingLap};
+use crate::live::LiveReport;
 use crate::report::*;
 use crate::state::{car_ref, is_multi_class};
+use crate::strategy::StrategyReport;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StandingsParams {
@@ -87,6 +89,8 @@ pub trait RaceApi {
     fn info(&self, p: &InfoParams) -> ApiResult<InfoReport>;
     fn setup(&self) -> ApiResult<SetupReport>;
     fn handling(&self, p: &HandlingParams) -> ApiResult<HandlingReport>;
+    fn strategy(&self) -> ApiResult<StrategyReport>;
+    fn live(&self) -> ApiResult<LiveReport>;
 }
 
 /// Thread-safe handle used by long-running collectors.
@@ -368,6 +372,14 @@ impl RaceApi for RaceState {
         })
     }
 
+    fn strategy(&self) -> ApiResult<StrategyReport> {
+        Ok(self.strategy_report())
+    }
+
+    fn live(&self) -> ApiResult<LiveReport> {
+        Ok(crate::live::live(self))
+    }
+
     fn handling(&self, p: &HandlingParams) -> ApiResult<HandlingReport> {
         let n = p.last.unwrap_or(3).max(1);
         let tracker = self.handling_tracker();
@@ -390,6 +402,13 @@ impl RaceApi for RaceState {
             controls: self.controls(),
             adjustments: self.adjustments().to_vec(),
             advice: advice.unwrap_or_default(),
+            experiments: {
+                let idx = self.frame().and_then(|f| f.player_car_idx);
+                let laps = idx.map(|i| self.car_laps(i)).unwrap_or_default();
+                let all: Vec<HandlingLap> = tracker.laps().cloned().collect();
+                let fade = crate::strategy::fade_of(&laps).unwrap_or(0.0);
+                crate::garage::experiments(self.adjustments(), &laps, &all, fade)
+            },
         })
     }
 }
@@ -418,4 +437,6 @@ delegate_locked! {
     info(p: &InfoParams) -> InfoReport;
     setup() -> SetupReport;
     handling(p: &HandlingParams) -> HandlingReport;
+    live() -> LiveReport;
+    strategy() -> StrategyReport;
 }

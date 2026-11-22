@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use vr_core::Flag;
-use vr_engine::{Brief, StandingsReport};
+use vr_engine::{Brief, StandingsReport, StrategyReport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +28,22 @@ pub enum Fact {
     NameAhead,
     CarsBehind,
     Yellow,
+    /// Least tread of the tyres, in percent.
+    TyreTread,
+    /// Push-to-pass uses left.
+    P2p,
+    BrakeBias,
+    TractionControl,
+    /// Mandatory repairs.
+    RepairS,
+    /// Best lap of the previous session.
+    PastBest,
+    /// Lap to stop on, of any plan about as good as the best.
+    StopLap,
+    /// Seconds a stop costs.
+    PitLoss,
+    /// Place after a stop now.
+    Rejoin,
 }
 
 /// The telemetry at one moment.
@@ -37,6 +53,10 @@ pub struct Sample {
     pub t: f64,
     pub brief: Brief,
     pub standings: StandingsReport,
+    #[serde(default)]
+    pub past_best_s: Option<f64>,
+    #[serde(default)]
+    pub strategy: Option<StrategyReport>,
 }
 
 impl Sample {
@@ -84,6 +104,14 @@ pub enum Value {
     Words(Vec<String>),
 }
 
+/// A plan that loses less is as good as the best.
+const AS_GOOD_S: f64 = 1.0;
+
+fn control(b: &Brief, id: &str) -> Option<f64> {
+    let controls = &b.car.as_ref()?.controls;
+    controls.iter().find(|c| c.id == id).map(|c| c.value)
+}
+
 impl Fact {
     pub fn value(self, s: &Sample) -> Option<Value> {
         let b = &s.brief;
@@ -129,6 +157,39 @@ impl Fact {
                 let position = p.car.position? as usize;
                 Value::Number((p.cars_total - position) as f64, 0.0)
             }
+            Fact::TyreTread => {
+                let t = &b.car.as_ref()?.tyres;
+                let all = [&t.lf, &t.rf, &t.lr, &t.rr];
+                let least = all
+                    .iter()
+                    .flat_map(|t| t.tread.iter().flatten())
+                    .copied()
+                    .reduce(f64::min)?;
+                Value::Number(least * 100.0, 1.0)
+            }
+            Fact::P2p => Value::Number(f64::from(b.car.as_ref()?.p2p_count?), 0.0),
+            Fact::BrakeBias => Value::Number(control(b, "brake_bias")?, 0.05),
+            Fact::TractionControl => Value::Number(control(b, "traction_control")?, 0.0),
+            Fact::RepairS => Value::Number(b.car.as_ref()?.pit.repair_left_s?, 1.0),
+            Fact::PastBest => lap(s.past_best_s)?,
+            Fact::StopLap => {
+                let plans = &s.strategy.as_ref()?.plans;
+                let best = plans.first()?.stops.len();
+                let stops: Vec<f64> = plans
+                    .iter()
+                    .filter(|p| p.behind_best_s < AS_GOOD_S && p.stops.len() == best)
+                    .filter_map(|p| p.stops.first())
+                    .map(|l| f64::from(*l))
+                    .collect();
+                let lo = stops.iter().copied().reduce(f64::min)?;
+                let hi = stops.iter().copied().reduce(f64::max)?;
+                Value::Number((lo + hi) / 2.0, (hi - lo) / 2.0)
+            }
+            Fact::PitLoss => Value::Number(s.strategy.as_ref()?.pit_loss.seconds?, 0.6),
+            Fact::Rejoin => {
+                let r = s.strategy.as_ref()?.rejoin_now.as_ref()?;
+                Value::Number(f64::from(r.position), 0.0)
+            }
             Fact::Yellow => {
                 let on = b
                     .session
@@ -149,8 +210,8 @@ impl Fact {
     /// A count of something else is not this fact: `4位` is not `残り4周`.
     fn unit(self) -> Unit {
         match self {
-            Fact::Position => Unit::Position,
-            Fact::LapsLeft | Fact::FuelLaps => Unit::Laps,
+            Fact::Position | Fact::Rejoin => Unit::Position,
+            Fact::LapsLeft | Fact::FuelLaps | Fact::StopLap => Unit::Laps,
             Fact::FuelAdd | Fact::FuelPerLap => Unit::Litres,
             Fact::CarsBehind => Unit::Cars,
             _ => Unit::Seconds,

@@ -10,13 +10,14 @@ use shadcn_iced::trace::{self, trace, trace_line};
 use shadcn_iced::typography::muted_text;
 
 use super::{
-    AgentChoice, AgentStatus, App, Capture, Message, Phase, Readiness, SCROLLER, TurnView,
-    VoiceState, latency,
+    AgentChoice, AgentStatus, App, Capture, HoldChoice, Message, Phase, PlanChoice, Readiness,
+    SCROLLER, TurnView, VoiceState, latency,
 };
 use crate::agent::ToolState;
 use crate::chrome;
 use crate::directive::{MAX_VOLUME, SPEED};
 use crate::engine::Outcome;
+use crate::rules::Scope;
 use crate::stt::{self, SttBackend};
 use crate::watch::Group;
 
@@ -204,17 +205,31 @@ impl App {
             .variant(button::Variant::Outline)
             .width(Length::Fill)
             .on_press_maybe(phase.busy().then_some(Message::Cancel));
-        let hotkey: Element<'_, Message> = match self.hotkey() {
-            Some(key) => row![kbd(key), muted("を押している間も話せます", 12.0)]
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .into(),
-            None => muted("ホットキーは使えません", 12.0).into(),
-        };
-        let mut keys = column![hotkey].spacing(6).align_x(Alignment::Center);
-        if let Some(wheel) = &self.settings.wheel {
-            keys = keys.push(muted(wheel.to_string(), 12.0));
+        // The same button, wherever it is pressed.
+        let wheel = self.settings.wheel.as_ref().map(|w| w.to_string());
+        let mut keys = row![].spacing(6).align_y(Alignment::Center);
+        if let Some(key) = self.hotkey() {
+            keys = keys.push(kbd(key));
         }
+        if self.hotkey().is_some() && wheel.is_some() {
+            keys = keys.push(muted("または", 12.0));
+        }
+        if let Some(w) = wheel {
+            keys = keys.push(kbd(w));
+        }
+        let keys = column![
+            keys,
+            muted(
+                if self.hotkey().is_none() && self.settings.wheel.is_none() {
+                    "キーとハンドルは設定で割り当て"
+                } else {
+                    "を押している間も話せます"
+                },
+                12.0
+            ),
+        ]
+        .spacing(4)
+        .align_x(Alignment::Center);
 
         let volume = row![
             icon_button(if self.muted {
@@ -239,9 +254,16 @@ impl App {
         if let Some(ms) = self.turns.iter().rev().find_map(|t| t.audio_ms) {
             info = info.push(fact(
                 "応答",
-                format!("{:.1} 秒で読み上げ開始", ms as f64 / 1000.0),
+                format!("{:.1}秒で読み上げ開始", ms as f64 / 1000.0),
             ));
         }
+
+        let rules = &self.settings.rules;
+        let kept = (rules.notes.len(), rules.watches.len());
+        if kept != (0, 0) {
+            info = info.push(fact("約束", format!("指示 {}・見張り {}", kept.0, kept.1)));
+        }
+        let has_info = has_info || kept != (0, 0);
 
         let mut panel = column![
             Space::new().height(Length::FillPortion(1)),
@@ -430,7 +452,22 @@ impl App {
             .align_y(Alignment::Center),
         );
 
+        // Always in sight: what the engineer has in mind.
+        let plan = self.plan.as_ref().map(|p| {
+            column![
+                container(
+                    row![
+                        container(muted("作戦", 12.0)).padding(Padding::new(0.0).top(2)),
+                        text(p).size(14)
+                    ]
+                    .spacing(12)
+                )
+                .padding(Padding::new(12.0).left(LOG_PADDING).right(LOG_PADDING)),
+                separator(),
+            ]
+        });
         column![
+            plan,
             container(content).height(Length::Fill),
             container(bottom).padding(Padding::new(LOG_PADDING).top(0).bottom(16)),
         ]
@@ -462,6 +499,8 @@ impl App {
             .into()
         };
         let content = column![
+            self.talk_settings(),
+            separator(),
             switch(!self.muted)
                 .label("回答を読み上げる")
                 .on_toggle(|on| Message::Muted(!on)),
@@ -471,11 +510,10 @@ impl App {
             separator(),
             self.proactive_settings(),
             separator(),
+            self.rule_settings(),
+            separator(),
             field("エージェント", self.agent_settings()),
             field("文字起こし", self.stt_settings()),
-            separator(),
-            field("押して話すキー", self.key_settings()),
-            field("ハンドルのボタン", self.wheel_settings()),
             separator(),
             self.resident_settings(),
         ]
@@ -538,6 +576,102 @@ impl App {
         col.into()
     }
 
+    /// How the engineer talks: how often, when not, and what it keeps in mind.
+    fn rule_settings(&self) -> Element<'_, Message> {
+        let r = &self.settings.rules;
+        let interval = row![
+            slider(0.0..=180.0, f32::from(r.interval_s), |v| {
+                Message::Interval(v.round() as u16)
+            })
+            .step(2.0)
+            .on_release(Message::SaveSettings)
+            .width(Length::Fill),
+            muted(format!("{}秒", r.interval_s), 13.0).width(42),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        let mut plan = select(Some(PlanChoice(r.planning)), Message::Planning).width(Length::Fill);
+        for n in PlanChoice::ALL {
+            plan = plan.option(PlanChoice(n), PlanChoice(n).to_string());
+        }
+        column![
+            field("自動連絡の間隔", interval),
+            field("自動連絡のタイミング", self.hold_settings(Scope::Calls)),
+            field("回答のタイミング", self.hold_settings(Scope::All)),
+            field("裏での作戦立案", plan),
+            field("覚えている指示", self.note_settings()),
+            field("見張り", self.watch_settings()),
+        ]
+        .spacing(16)
+        .into()
+    }
+
+    fn hold_settings(&self, scope: Scope) -> Element<'_, Message> {
+        let draft = &self.hold_drafts[usize::from(scope == Scope::Calls)];
+        let when = self.settings.rules.hold(scope);
+        let choice = match draft {
+            Some(_) => HoldChoice::Custom,
+            None => HoldChoice::of(when),
+        };
+        let mut col = column![
+            select(Some(choice), move |c| Message::Hold(scope, c))
+                .options(HoldChoice::ALL)
+                .width(Length::Fill)
+        ]
+        .spacing(8);
+        if choice == HoldChoice::Custom {
+            let shown = draft.as_deref().or(when).unwrap_or_default();
+            col = col.push(
+                input("brake > 10 or abs(lat_g) > 0.8", shown)
+                    .on_input(move |t| Message::HoldDraft(scope, t)),
+            );
+            if let Err(e) = shown.parse::<crate::expr::Expr>() {
+                col = col.push(muted(e, 12.0));
+            }
+        }
+        col.into()
+    }
+
+    /// A line of text that can be dropped.
+    fn droppable<'a>(&self, text: String, drop: Message) -> Element<'a, Message> {
+        row![
+            container(iced::widget::text(text).size(13)).width(Length::Fill),
+            icon_button(lucide::X)
+                .variant(button::Variant::Ghost)
+                .size(button::Size::IconSm)
+                .on_press(drop),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    fn note_settings(&self) -> Element<'_, Message> {
+        let mut col = column![].spacing(4);
+        for (i, n) in self.settings.rules.notes.iter().enumerate() {
+            col = col.push(self.droppable(n.clone(), Message::DropNote(i)));
+        }
+        col.push(
+            input("例: 順位は聞かれたときだけ言う", &self.note_draft)
+                .on_input(Message::NoteDraft)
+                .on_submit(Message::AddNote),
+        )
+        .into()
+    }
+
+    fn watch_settings(&self) -> Element<'_, Message> {
+        let watches = &self.settings.rules.watches;
+        if watches.is_empty() {
+            return muted("無線で「後ろが1秒切ったら教えて」のように頼めます", 12.0).into();
+        }
+        let mut col = column![].spacing(4);
+        for (i, w) in watches.iter().enumerate() {
+            let by = if w.planned { "（作戦）" } else { "" };
+            col = col.push(self.droppable(format!("{w}{by}"), Message::DropWatch(i)));
+        }
+        col.into()
+    }
+
     fn agent_settings(&self) -> Element<'_, Message> {
         let connected = self.agent_draft.trim() == self.config.agent;
         let label = match &self.agent {
@@ -574,10 +708,10 @@ impl App {
     fn stt_settings(&self) -> Element<'_, Message> {
         let note = match self.config.stt {
             SttBackend::Windows => {
-                "キー不要・通信なし。レース用語の精度は API より低めです".to_string()
+                "キー不要・通信なし。レース用語の精度はAPIより低めです".to_string()
             }
             SttBackend::Api if !self.has_stt_key && stt::is_openrouter(&self.config.stt_url) => {
-                "API キーがありません（環境変数か .env の OPENROUTER_API_KEY）".to_string()
+                "APIキーがありません（環境変数か.envの OPENROUTER_API_KEY）".to_string()
             }
             SttBackend::Api => self.config.stt_url.clone(),
         };
@@ -591,24 +725,114 @@ impl App {
         .into()
     }
 
-    /// The current assignment, and the button that waits for a new one.
-    fn assign_row<'a>(
+    /// The key and the button of the wheel, which do the same: one card, so
+    /// that they do not look like two functions.
+    fn talk_settings(&self) -> Element<'_, Message> {
+        let (key, works) = match &self.hotkey {
+            Some(Ok(key)) => (key.clone(), true),
+            Some(Err(e)) => (format!("無効: {e}"), false),
+            None => ("なし".into(), false),
+        };
+        let wheel = self.settings.wheel.as_ref();
+        let mut wheel_row = self.talk_row(
+            lucide::GAMEPAD_2,
+            "ハンドル",
+            wheel.map_or("なし".into(), |b| b.to_string()),
+            wheel.is_some(),
+            "ボタンを押してください",
+            Capture::Wheel,
+        );
+        if wheel.is_some() && self.capture != Capture::Wheel {
+            wheel_row = wheel_row.push(
+                icon_button(lucide::X)
+                    .variant(button::Variant::Ghost)
+                    .size(button::Size::IconSm)
+                    .on_press(Message::ClearWheel),
+            );
+        }
+        let title = row![
+            icon(lucide::MIC).size(16),
+            text("押して話す")
+                .size(15)
+                .font(shadcn_iced::font::semibold()),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let mut card = column![
+            title,
+            muted("どちらを押しても同じです。離すと送ります", 12.0),
+            self.talk_row(
+                lucide::KEYBOARD,
+                "キーボード",
+                key,
+                works,
+                "キーを押してください（Escで中止）",
+                Capture::Key,
+            ),
+            wheel_row,
+        ]
+        .spacing(10);
+        if let Some(hint) = self.capture_hint {
+            card = card.push(muted(hint, 12.0));
+        }
+        container(card)
+            .padding(14)
+            .width(Length::Fill)
+            .style(|t: &Theme| {
+                let p = palette(t);
+                container::Style {
+                    background: Some(Background::Color(alpha(p.foreground, 0.03))),
+                    border: Border {
+                        color: p.border,
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
+    /// One way to press it: what is assigned, and the button that waits for
+    /// another one.
+    fn talk_row<'a>(
         &self,
+        symbol: shadcn_iced::icon::Icon,
+        name: &'static str,
         current: String,
+        assigned: bool,
         waiting: &'static str,
         capture: Capture,
     ) -> iced::widget::Row<'a, Message> {
         let active = self.capture == capture;
-        let (label, next) = if active {
-            ("やめる", Capture::None)
+        let (label, next) = match (active, assigned) {
+            (true, _) => ("やめる", Capture::None),
+            (false, true) => ("変更", capture),
+            (false, false) => ("割り当て", capture),
+        };
+        let value: Element<'a, Message> = if active {
+            text(waiting).size(13).into()
+        } else if assigned && capture == Capture::Key {
+            kbd(current)
+        } else if assigned {
+            text(current).size(13).into()
         } else {
-            ("割り当て", capture)
+            muted(current, 13.0).into()
         };
         row![
-            container(text(if active { waiting.to_string() } else { current }).size(14))
-                .width(Length::Fill),
+            container(
+                row![icon(symbol).size(14), muted(name, 13.0)]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+            )
+            .width(96),
+            container(value).width(Length::Fill),
             button(label)
-                .variant(button::Variant::Outline)
+                .variant(if active {
+                    button::Variant::Default
+                } else {
+                    button::Variant::Outline
+                })
                 .size(button::Size::Sm)
                 .on_press(Message::Capture(next)),
         ]
@@ -616,41 +840,9 @@ impl App {
         .align_y(Alignment::Center)
     }
 
-    fn key_settings(&self) -> Element<'_, Message> {
-        let current = match &self.hotkey {
-            Some(Ok(key)) => key.clone(),
-            Some(Err(e)) => format!("無効: {e}"),
-            None => "未設定".into(),
-        };
-        let mut col =
-            column![self.assign_row(current, "キーを押してください（Esc で中止）", Capture::Key)]
-                .spacing(6);
-        if let Some(hint) = self.capture_hint {
-            col = col.push(muted(hint, 12.0));
-        }
-        col.into()
-    }
-
-    fn wheel_settings(&self) -> Element<'_, Message> {
-        let current = match &self.settings.wheel {
-            Some(b) => b.to_string(),
-            None => "未設定".into(),
-        };
-        let mut row = self.assign_row(current, "ボタンを押してください", Capture::Wheel);
-        if self.settings.wheel.is_some() && self.capture != Capture::Wheel {
-            row = row.push(
-                icon_button(lucide::X)
-                    .variant(button::Variant::Ghost)
-                    .size(button::Size::IconSm)
-                    .on_press(Message::ClearWheel),
-            );
-        }
-        row.into()
-    }
-
     fn resident_settings(&self) -> Element<'_, Message> {
         if !crate::resident::SUPPORTED {
-            return muted("常駐は Windows で使えます", 12.0).into();
+            return muted("常駐はWindowsで使えます", 12.0).into();
         }
         column![
             switch(self.settings.close_to_tray)
@@ -773,7 +965,10 @@ pub(super) fn turn_view(t: &TurnView) -> Element<'_, Message> {
         } else if t.reply.trim().is_empty() {
             muted("（回答なし）", 16.0).into()
         } else {
-            text(t.reply.trim()).size(17).line_height(1.6).into()
+            text(crate::text::joined(t.reply.trim()))
+                .size(17)
+                .line_height(1.6)
+                .into()
         };
         block = block.push(answer);
     }

@@ -2,7 +2,8 @@
 
 use vr_core::{
     CarExtra, CarState, CarTelemetry, Control, Flag, Frame, PitState, PlayerTelemetry, SessionKind,
-    SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather,
+    SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather, Wheel,
+    Wheels,
 };
 
 use crate::layout::VarView;
@@ -248,6 +249,35 @@ fn tyre(v: &VarView<'_>, corner: &str) -> Tyre {
     }
 }
 
+/// Only in the telemetry files, not in shared memory.
+fn wheel(v: &VarView<'_>, corner: &str) -> Wheel {
+    let of = |what: &str| v.f64(&format!("{corner}{what}"));
+    let [l, m, r] = ["tempL", "tempM", "tempR"].map(of);
+    Wheel {
+        speed_mps: of("speed"),
+        pressure_kpa: of("pressure"),
+        surface_c: if corner.starts_with('L') {
+            [l, m, r]
+        } else {
+            [r, m, l]
+        },
+        ride_height_m: of("rideHeight"),
+        // Some cars have third springs ("SH") instead.
+        shock_mps: of("shockVel").or_else(|| of("SHshockVel")),
+        brake_bar: of("brakeLinePress"),
+    }
+}
+
+fn wheels(v: &VarView<'_>) -> Option<Wheels> {
+    v.f64("LFspeed")?;
+    Some(Wheels {
+        lf: wheel(v, "LF"),
+        rf: wheel(v, "RF"),
+        lr: wheel(v, "LR"),
+        rr: wheel(v, "RR"),
+    })
+}
+
 fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
     let delta = |name: &str| {
         v.bool(&format!("{name}_OK"))
@@ -306,6 +336,7 @@ fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
         delta_to_optimal_s: delta("LapDeltaToOptimalLap"),
         alongside: alongside(v.i32("CarLeftRight")),
         team_incidents: v.i32("PlayerCarTeamIncidentCount"),
+        wheels: wheels(v),
     }
 }
 
@@ -755,6 +786,41 @@ DriverInfo:
         let (_, b) = h.latest_buf().unwrap();
         let data = &img.bytes[b.offset as usize..b.offset as usize + h.buf_len as usize];
         build_frame(&vt.view(data), &si, 7, 1234)
+    }
+
+    #[test]
+    fn wheels_are_there_in_telemetry_files_only() {
+        let names = [
+            "LFspeed",
+            "LFpressure",
+            "LFtempL",
+            "LFtempR",
+            "RFtempL",
+            "RFtempR",
+            "LFrideHeight",
+            "LFSHshockVel",
+            "LRshockVel",
+            "LRbrakeLinePress",
+        ];
+        let vars = names.map(|name| Var {
+            name,
+            ty: 4,
+            count: 1,
+        });
+        let mut img = Image::new(&vars, YAML);
+        for (i, name) in names.into_iter().enumerate() {
+            img.set_f32(name, 0, 1.0 + i as f32);
+        }
+        let w = build(&img).player.unwrap().car.wheels.unwrap();
+        assert_eq!((w.lf.speed_mps, w.lf.pressure_kpa), (Some(1.0), Some(2.0)));
+        assert_eq!(w.lf.surface_c, [Some(3.0), None, Some(4.0)]);
+        assert_eq!(w.rf.surface_c, [Some(6.0), None, Some(5.0)]);
+        assert_eq!((w.lf.ride_height_m, w.lf.shock_mps), (Some(7.0), Some(8.0)));
+        assert_eq!((w.lr.shock_mps, w.lr.brake_bar), (Some(9.0), Some(10.0)));
+        assert_eq!(w.rr, Wheel::default());
+        // Shared memory.
+        let img = Image::new(&vars[1..], YAML);
+        assert_eq!(build(&img).player.unwrap().car.wheels, None);
     }
 
     #[test]

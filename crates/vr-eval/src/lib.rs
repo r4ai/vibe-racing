@@ -8,4 +8,6 @@ pub mod judge;
 pub mod report;
 pub mod run;
 pub mod scenario;
+pub mod setting;
+pub mod topics;
 pub mod world;

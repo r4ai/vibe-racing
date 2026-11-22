@@ -13,7 +13,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use vr_engine::*;
 
-use crate::SessionStore;
+use crate::{SessionStore, TraceLine};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -67,6 +67,10 @@ pub fn router(app: AppState) -> Router {
         .route("/", get(|| async { Html(include_str!("sessions.html")) }))
         .route("/v1/sessions", get(sessions))
         .route("/v1/sessions/{id}", get(session))
+        .route("/v1/sessions/{id}/analysis", get(analysis))
+        .route("/v1/sessions/{id}/laps", get(laps))
+        .route("/v1/sessions/{id}/laps/{lap}", get(lap))
+        .route("/v1/sessions/{id}/laps/{lap}/compare", get(compare))
         .route("/v1/health", get(health))
         .route(
             "/v1/brief",
@@ -93,6 +97,10 @@ pub fn router(app: AppState) -> Router {
             get(|State(a): State<AppState>| async move { r(a.state.fuel()) }),
         )
         .route(
+            "/v1/strategy",
+            get(|State(a): State<AppState>| async move { r(a.state.strategy()) }),
+        )
+        .route(
             "/v1/laps",
             get(
                 |State(a): State<AppState>, Query(p): Query<LapsParams>| async move {
@@ -109,6 +117,11 @@ pub fn router(app: AppState) -> Router {
             ),
         )
         .route("/v1/events/stream", get(stream))
+        .route(
+            "/v1/live",
+            get(|State(a): State<AppState>| async move { r(a.state.live()) }),
+        )
+        .route("/v1/live/stream", get(live_stream))
         .route(
             "/v1/snapshot",
             get(|State(a): State<AppState>| async move { r(a.state.snapshot()) }),
@@ -207,6 +220,54 @@ async fn session(State(a): State<AppState>, Path(id): Path<String>) -> R<Session
     .await
 }
 
+async fn analysis(State(a): State<AppState>, Path(id): Path<String>) -> R<SetupAnalysis> {
+    with_store(a.sessions, move |store| {
+        let all = store.list();
+        let r = all
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| ApiError::NotFound(format!("no session {id}")))?;
+        Ok(analyse(r, &all))
+    })
+    .await
+}
+
+async fn laps(State(a): State<AppState>, Path(id): Path<String>) -> R<Vec<TraceLine>> {
+    with_store(a.sessions, move |store| Ok(store.traces(&id))).await
+}
+
+fn find_lap(store: &SessionStore, id: &str, lap: i32) -> ApiResult<LapTrace> {
+    store
+        .trace(id, lap)
+        .ok_or_else(|| ApiError::NotFound(format!("lap {lap} of {id} was not recorded")))
+}
+
+async fn lap(State(a): State<AppState>, Path((id, lap)): Path<(String, i32)>) -> R<LapTrace> {
+    with_store(a.sessions, move |store| find_lap(&store, &id, lap)).await
+}
+
+/// The lap a lap is compared with; of the same session by default.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompareParams {
+    pub session: Option<String>,
+    pub lap: i32,
+}
+
+async fn compare(
+    State(a): State<AppState>,
+    Path((id, lap)): Path<(String, i32)>,
+    Query(p): Query<CompareParams>,
+) -> R<Vec<Corner>> {
+    with_store(a.sessions, move |store| {
+        let with = p.session.as_deref().unwrap_or(&id);
+        Ok(compare_laps(
+            &find_lap(&store, &id, lap)?,
+            &find_lap(&store, with, p.lap)?,
+        ))
+    })
+    .await
+}
+
 async fn health(State(a): State<AppState>) -> Json<Health> {
     let st = a.state.read().expect("state lock");
     let meta = st.meta();
@@ -227,6 +288,43 @@ async fn stream(
     let s = BroadcastStream::new(a.events.subscribe()).filter_map(|e| {
         let e = e.ok()?;
         Some(Ok(SseEvent::default().event("race").json_data(&e).ok()?))
+    });
+    Sse::new(s).keep_alive(KeepAlive::default())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveParams {
+    /// Samples per second.
+    pub hz: Option<f64>,
+}
+
+const LIVE_HZ: f64 = 10.0;
+const MAX_LIVE_HZ: f64 = 60.0;
+
+/// The live values, as long as they change.
+async fn live_stream(
+    State(a): State<AppState>,
+    Query(p): Query<LiveParams>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let hz = p.hz.unwrap_or(LIVE_HZ);
+    let hz = if hz.is_finite() {
+        hz.clamp(0.1, MAX_LIVE_HZ)
+    } else {
+        LIVE_HZ
+    };
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs_f64(1.0 / hz));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last = None;
+    let s = tokio_stream::wrappers::IntervalStream::new(interval).filter_map(move |_| {
+        let frames = a.state.read().ok()?.frames_ingested();
+        if last.replace(frames) == Some(frames) {
+            return None;
+        }
+        let live = a.state.live().ok()?;
+        Some(Ok(SseEvent::default()
+            .event("live")
+            .json_data(&live)
+            .ok()?))
     });
     Sse::new(s).keep_alive(KeepAlive::default())
 }
