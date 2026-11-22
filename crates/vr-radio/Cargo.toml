@@ -23,16 +23,24 @@ tracing-subscriber.workspace = true
 ureq = { workspace = true, features = ["rustls"] }
 agent-client-protocol = { version = "5.4.0", features = ["process"] }
 iced = { version = "0.14.0", features = ["tokio"] }
-# Unreleased main: Japanese IME input in text inputs (r4ai/shadcn-iced#89).
-shadcn-iced = { git = "https://github.com/r4ai/shadcn-iced", rev = "261c9b96bf0f6bd1a433fd38d6be6ecf8b5b5e4b" }
+# Unreleased main: Japanese IME input in text inputs (r4ai/shadcn-iced#89),
+# long selects over their trigger (r4ai/shadcn-iced#95).
+shadcn-iced = { git = "https://github.com/r4ai/shadcn-iced", rev = "3e02f7675ddfba7ecd7a10f834c72a347984b8cb" }
 rodio = { version = "0.23.0", default-features = false, features = ["playback", "recording", "wav"] }
 global-hotkey = "0.10.0"
 raw-window-handle = "0.6.2"
 
 [target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.21.3", default-features = false }
 windows-sys = { workspace = true, features = [
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

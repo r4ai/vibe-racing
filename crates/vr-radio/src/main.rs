@@ -1,9 +1,10 @@
-use clap::Parser;
-use global_hotkey::GlobalHotKeyManager;
-use global_hotkey::hotkey::HotKey;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches};
 use shadcn_iced::prelude::*;
-use vr_radio::app::{self, App, CONFIG, HOTKEY};
+use vr_radio::app::{self, App, CONFIG, HOTKEY, SETTINGS};
 use vr_radio::config::Config;
+use vr_radio::settings::{self, Settings};
+use vr_radio::{hotkey, resident};
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -13,22 +14,36 @@ fn main() -> iced::Result {
         )
         .with_writer(std::io::stderr)
         .init();
-    let config = Config::parse();
+    let matches = Config::command().get_matches();
+    let mut config = Config::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut path = config.settings.clone().or_else(settings::default_path);
+    let saved = match path.as_deref().map(Settings::load) {
+        Some(Ok(s)) => s,
+        Some(Err(e)) => {
+            // Never overwrite a file that could not be read.
+            tracing::warn!("settings ignored: {e:#}");
+            path = None;
+            Settings::default()
+        }
+        None => Settings::default(),
+    };
+    saved.apply(&mut config, |id| {
+        matches
+            .value_source(id)
+            .is_some_and(|s| s != ValueSource::DefaultValue)
+    });
     if let Some(question) = config.ask.clone() {
         let code = ask_once(config, question);
         std::process::exit(code);
     }
 
-    // The manager must live on the event-loop thread for the whole run.
-    let manager = GlobalHotKeyManager::new();
-    let status = match (&manager, config.hotkey.parse::<HotKey>()) {
-        (Ok(m), Ok(key)) => m
-            .register(key)
-            .map(|()| config.hotkey.clone())
-            .map_err(|e| e.to_string()),
-        (Err(e), _) => Err(e.to_string()),
-        (_, Err(e)) => Err(format!("{}: {e}", config.hotkey)),
-    };
+    if !resident::first_instance() {
+        tracing::info!("already running: showing its window");
+        return Ok(());
+    }
+
+    // Registered on the event-loop thread, which receives the key messages.
+    let status = hotkey::bind(&config.hotkey);
     if let Err(e) = &status {
         tracing::warn!("push-to-talk hotkey unavailable: {e}");
     }
@@ -37,7 +52,9 @@ fn main() -> iced::Result {
     let family = config.font.clone().filter(|f| !f.is_empty());
     let family = family.map_or(vr_radio::fonts::FAMILY, |f| Box::leak(f.into_boxed_str()));
     shadcn_iced::font::set_sans(family);
+    let visible = !(config.tray && resident::SUPPORTED);
     let _ = CONFIG.set(config);
+    let _ = SETTINGS.set((saved, path));
 
     let result = iced::application(App::boot, App::update, App::view)
         .title("VR Radio")
@@ -46,6 +63,9 @@ fn main() -> iced::Result {
         .window(iced::window::Settings {
             size: iced::Size::new(1040.0, 680.0),
             min_size: Some(iced::Size::new(760.0, 520.0)),
+            visible,
+            // The app decides: quit, or stay in the tray.
+            exit_on_close_request: false,
             // Native frame; on Windows `chrome` hides only the caption.
             ..Default::default()
         })
@@ -54,7 +74,7 @@ fn main() -> iced::Result {
         .font(vr_radio::fonts::FILES[1])
         .font(vr_radio::fonts::FILES[2])
         .run();
-    drop(manager);
+    hotkey::unbind();
     result
 }
 

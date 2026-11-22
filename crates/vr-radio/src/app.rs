@@ -1,25 +1,34 @@
 //! The window (iced + shadcn-iced): conversation, latency, settings.
 
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_client_protocol::AcpAgent;
+use clap::Parser;
 use iced::futures::{SinkExt, Stream};
-use iced::{Subscription, Task};
+use iced::{Subscription, Task, window};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-use crate::agent::{self, ToolState, Turn};
+use crate::agent::{AgentLink, ToolState, Turn};
 use crate::audio::{Mic, NoMic, Output, Recorder, Speakers};
 use crate::config::{self, Config};
+use crate::context::{Commands, ContextSource};
 use crate::engine::{self, Command, Deps, Event, Outcome};
-use crate::stt::OpenAiTranscriber;
-use crate::voicevox::{Voice, Voicevox};
+use crate::hotkey::{self, Captured};
+use crate::resident::{self, ResidentEvent};
+use crate::settings::Settings;
+use crate::stt::{self, SttBackend};
+use crate::voicevox::{Synth, Voice, Voicevox};
+use crate::wheel::{self, ButtonEvent};
 
 /// Settings for the engine subscription (`Subscription::run` takes a `fn`).
 pub static CONFIG: OnceLock<Config> = OnceLock::new();
 /// Result of registering the global push-to-talk key.
 pub static HOTKEY: OnceLock<Result<String, String>> = OnceLock::new();
+/// Saved choices and the file they are kept in.
+pub static SETTINGS: OnceLock<(Settings, Option<PathBuf>)> = OnceLock::new();
 
 mod view;
 
@@ -42,12 +51,89 @@ pub enum Message {
     Scrolled(bool),
     ScrollToEnd,
     Settings(bool),
+    /// Plays a sample of the selected voice.
+    Preview,
+    AgentChoice(AgentChoice),
+    AgentDraft(String),
+    /// Starts the chosen agent in place of the current one.
+    Connect,
+    Stt(SttChoice),
+    /// Waits for the key or the button to assign to push-to-talk.
+    Capture(Capture),
+    Captured(Captured),
+    Wheel(ButtonEvent),
+    ClearWheel,
+    CloseToTray(bool),
+    StartWithWindows(bool),
+    Resident(ResidentEvent),
     DismissError,
     /// Caption buttons drawn by the app (Windows). Maximize is native
     /// (`HTMAXBUTTON`), see `chrome`.
     Minimize,
     Close,
     Chrome(crate::chrome::ChromeEvent),
+}
+
+/// Agents that can be picked without knowing their command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentChoice {
+    Claude,
+    Codex,
+    Custom,
+}
+
+impl AgentChoice {
+    const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Custom];
+
+    fn command(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some(config::DEFAULT_AGENT),
+            Self::Codex => Some(config::CODEX_AGENT),
+            Self::Custom => None,
+        }
+    }
+
+    fn of(command: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.command() == Some(command))
+            .unwrap_or(Self::Custom)
+    }
+}
+
+impl std::fmt::Display for AgentChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Custom => "カスタム",
+        })
+    }
+}
+
+/// Who transcribes, as one list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SttChoice {
+    Windows,
+    Model(String),
+}
+
+impl std::fmt::Display for SttChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Windows => f.write_str("Windows 標準（オフライン）"),
+            Self::Model(m) => f.write_str(m),
+        }
+    }
+}
+
+/// What the settings wait for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Capture {
+    #[default]
+    None,
+    Key,
+    Wheel,
 }
 
 /// What the radio is doing right now, for the status at a glance.
@@ -123,11 +209,43 @@ pub struct App {
     at_end: bool,
     settings_open: bool,
     chrome: crate::chrome::ChromeState,
+    /// Current settings, starting from the command line and the saved file.
+    config: Config,
+    settings: Settings,
+    settings_path: Option<PathBuf>,
+    agent_choice: AgentChoice,
+    agent_draft: String,
+    hotkey: Option<Result<String, String>>,
+    capture: Capture,
+    capture_hint: Option<&'static str>,
+    /// What is being spoken is a voice sample.
+    previewing: bool,
+    /// The tray icon is there, so the window may be hidden.
+    tray: bool,
+    starts_with_windows: bool,
+    has_stt_key: bool,
 }
 
 impl App {
     pub fn new() -> Self {
+        let config = CONFIG
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Config::parse_from(["vr-radio"]));
+        let (settings, settings_path) = SETTINGS.get().cloned().unwrap_or_default();
         Self {
+            agent_choice: AgentChoice::of(&config.agent),
+            agent_draft: config.agent.clone(),
+            hotkey: HOTKEY.get().cloned(),
+            capture: Capture::None,
+            capture_hint: None,
+            previewing: false,
+            tray: false,
+            starts_with_windows: false,
+            has_stt_key: config.stt().api_key.is_some(),
+            config,
+            settings,
+            settings_path,
             engine: None,
             agent: AgentStatus::Starting,
             recording: false,
@@ -147,10 +265,19 @@ impl App {
 
     /// The app at startup: also installs the native window chrome.
     pub fn boot() -> (Self, Task<Message>) {
-        let install = iced::window::latest()
-            .and_then(|id| iced::window::run(id, |w| crate::chrome::install_native_chrome(w)))
+        let install = window::latest()
+            .and_then(|id| window::run(id, |w| crate::chrome::install_native_chrome(w)))
             .discard();
-        (Self::new(), install)
+        let mut app = Self::new();
+        app.tray = resident::install_tray();
+        app.starts_with_windows = resident::starts_with_windows();
+        // Never leave the radio running with no way to reach it.
+        let show = if app.config.tray && !app.tray {
+            show_window()
+        } else {
+            Task::none()
+        };
+        (app, Task::batch([install, show]))
     }
 
     /// A conversation in progress, for snapshots and screenshots.
@@ -239,11 +366,101 @@ impl App {
         }
     }
 
-    fn hotkey(&self) -> Option<&'static str> {
-        HOTKEY
-            .get()
-            .and_then(|h| h.as_ref().ok())
-            .map(String::as_str)
+    fn hotkey(&self) -> Option<&str> {
+        self.hotkey.as_ref()?.as_deref().ok()
+    }
+
+    fn error(&mut self, e: String) {
+        self.errors.push(e);
+        let excess = self.errors.len().saturating_sub(3);
+        self.errors.drain(..excess);
+    }
+
+    fn save(&mut self) {
+        if let Some(path) = &self.settings_path
+            && let Err(e) = self.settings.save(path)
+        {
+            self.error(format!("設定を保存できません: {e:#}"));
+        }
+    }
+
+    /// Push-to-talk, unless the key or button is being assigned.
+    fn ptt(&self, down: bool) {
+        if self.capture == Capture::None {
+            self.send(if down {
+                Command::PttDown
+            } else {
+                Command::PttUp
+            });
+        }
+    }
+
+    fn set_capture(&mut self, capture: Capture) {
+        if self.capture == capture {
+            return;
+        }
+        // A registered key never reaches the window: released while waiting
+        // for one, so that the same key can be pressed again.
+        if capture == Capture::Key {
+            hotkey::unbind();
+        } else if self.capture == Capture::Key
+            && let Some(Ok(key)) = &self.hotkey
+        {
+            self.hotkey = Some(hotkey::bind(key));
+        }
+        self.capture = capture;
+        self.capture_hint = None;
+    }
+
+    fn assign_key(&mut self, key: String) {
+        match hotkey::bind(&key) {
+            Ok(key) => {
+                self.hotkey = Some(Ok(key.clone()));
+                self.settings.hotkey = Some(key);
+                self.capture = Capture::None;
+                self.save();
+            }
+            Err(e) => {
+                // Back to the previous key.
+                self.set_capture(Capture::None);
+                self.error(format!("キーを割り当てられません: {e}"));
+            }
+        }
+    }
+
+    /// Hides to the tray when asked to stay resident, else quits.
+    fn close(&self) -> Task<Message> {
+        if self.settings.close_to_tray && self.tray {
+            window::latest().and_then(|id| window::set_mode(id, window::Mode::Hidden))
+        } else {
+            iced::exit()
+        }
+    }
+
+    fn stt_choice(&self) -> SttChoice {
+        match self.config.stt {
+            SttBackend::Windows => SttChoice::Windows,
+            SttBackend::Api => SttChoice::Model(self.config.stt_model.clone()),
+        }
+    }
+
+    /// Windows (where it exists), the current model and, on OpenRouter, the
+    /// models compared for this use.
+    fn stt_choices(&self) -> Vec<SttChoice> {
+        let mut models = vec![];
+        if stt::is_openrouter(&self.config.stt_url) {
+            models.extend(config::STT_MODELS.iter().map(|m| m.to_string()));
+        }
+        if !models.contains(&self.config.stt_model) {
+            models.insert(0, self.config.stt_model.clone());
+        }
+        let windows =
+            (cfg!(windows) || self.config.stt == SttBackend::Windows).then_some(SttChoice::Windows);
+        models
+            .into_iter()
+            .map(SttChoice::Model)
+            .chain(windows)
+            .collect()
     }
 
     fn send(&self, cmd: Command) {
@@ -266,16 +483,12 @@ impl App {
                 }
             }
             Message::Voices(Ok(voices)) => {
-                let id = CONFIG.get().map_or(3, |c| c.speaker);
+                let id = self.config.speaker;
                 self.voice = voices.iter().find(|v| v.id == id).cloned();
                 self.voices = voices;
             }
             Message::Voices(Err(e)) => self.errors.push(e),
-            Message::Hotkey(down) => self.send(if down {
-                Command::PttDown
-            } else {
-                Command::PttUp
-            }),
+            Message::Hotkey(down) => self.ptt(down),
             Message::TogglePtt => self.send(if self.recording {
                 Command::PttUp
             } else {
@@ -294,17 +507,107 @@ impl App {
             }
             Message::Speaker(v) => {
                 self.send(Command::SetSpeaker(v.id));
+                // Hear it at once, but not over an answer.
+                if self.phase() == Phase::Idle || self.previewing {
+                    self.previewing = true;
+                    self.send(Command::Preview(v.id));
+                }
+                self.settings.speaker = Some(v.id);
+                self.config.speaker = v.id;
                 self.voice = Some(v);
+                self.save();
             }
             Message::Muted(m) => {
                 self.muted = m;
                 self.send(Command::SetMuted(m));
             }
-            Message::Settings(open) => self.settings_open = open,
-            Message::Minimize => {
-                return iced::window::latest().and_then(|id| iced::window::minimize(id, true));
+            Message::Settings(open) => {
+                self.settings_open = open;
+                self.set_capture(Capture::None);
             }
-            Message::Close => return iced::window::latest().and_then(iced::window::close),
+            Message::Preview => {
+                if let Some(v) = &self.voice {
+                    self.send(Command::Preview(v.id));
+                    self.previewing = true;
+                }
+            }
+            Message::AgentChoice(choice) => {
+                self.agent_choice = choice;
+                if let Some(command) = choice.command() {
+                    self.agent_draft = command.into();
+                }
+            }
+            Message::AgentDraft(d) => self.agent_draft = d,
+            Message::Connect => {
+                let command = self.agent_draft.trim().to_string();
+                if !command.is_empty() && self.engine.is_some() {
+                    self.agent = AgentStatus::Starting;
+                    self.config.agent = command.clone();
+                    self.settings.agent = Some(command.clone());
+                    self.save();
+                    self.send(Command::SetAgent(command));
+                }
+            }
+            Message::Stt(choice) => {
+                self.config.stt = match choice {
+                    SttChoice::Windows => SttBackend::Windows,
+                    SttChoice::Model(m) => {
+                        self.settings.stt_model = Some(m.clone());
+                        self.config.stt_model = m;
+                        SttBackend::Api
+                    }
+                };
+                self.settings.stt = Some(self.config.stt);
+                self.save();
+                let stt = self.config.stt();
+                self.has_stt_key = stt.api_key.is_some();
+                self.send(Command::SetStt(stt));
+            }
+            Message::Capture(c) => self.set_capture(c),
+            Message::Captured(c) => match c {
+                _ if self.capture != Capture::Key => {}
+                Captured::Key(key) => self.assign_key(key),
+                Captured::Cancel => self.set_capture(Capture::None),
+                Captured::NeedsModifier => {
+                    self.capture_hint = Some("文字キーは Ctrl・Alt・Win と組み合わせてください");
+                }
+            },
+            Message::Wheel(e) => {
+                if self.capture == Capture::Wheel {
+                    if e.pressed {
+                        self.settings.wheel = Some(e.button);
+                        self.set_capture(Capture::None);
+                        self.save();
+                    }
+                } else if self
+                    .settings
+                    .wheel
+                    .as_ref()
+                    .is_some_and(|b| b.same_button(&e.button))
+                {
+                    self.ptt(e.pressed);
+                }
+            }
+            Message::ClearWheel => {
+                self.settings.wheel = None;
+                self.save();
+            }
+            Message::CloseToTray(on) => {
+                self.settings.close_to_tray = on;
+                self.save();
+            }
+            Message::StartWithWindows(on) => {
+                match resident::set_start_with_windows(on, &self.config.agent_cwd()) {
+                    Ok(()) => self.starts_with_windows = on,
+                    Err(e) => self.error(format!("自動起動を変更できません: {e}")),
+                }
+            }
+            Message::Resident(ResidentEvent::Show) => return show_window(),
+            Message::Resident(ResidentEvent::Quit) => return iced::exit(),
+            Message::Minimize => {
+                return window::latest().and_then(|id| window::minimize(id, true));
+            }
+            Message::Close => return self.close(),
             Message::Chrome(e) => self.chrome.apply(e),
             Message::DismissError => {
                 self.errors.pop();
@@ -327,16 +630,18 @@ impl App {
             }
             Event::Recording(r) => self.recording = r,
             Event::Level(l) => self.level = l,
-            Event::Speaking(s) => self.speaking = s,
-            Event::Error(e) => {
-                self.errors.push(e);
-                let excess = self.errors.len().saturating_sub(3);
-                self.errors.drain(..excess);
+            Event::Speaking(s) => {
+                self.speaking = s;
+                self.previewing &= s;
             }
-            Event::TurnStarted { turn } => self.turns.push(TurnView {
-                id: turn,
-                ..Default::default()
-            }),
+            Event::Error(e) => self.error(e),
+            Event::TurnStarted { turn } => {
+                self.previewing = false;
+                self.turns.push(TurnView {
+                    id: turn,
+                    ..Default::default()
+                });
+            }
             Event::Transcript { turn, text, ms } => {
                 if let Some(t) = self.turn(turn) {
                     t.heard = Some(text);
@@ -430,9 +735,13 @@ fn latency(t: &TurnView) -> String {
 impl TurnView {
     /// The driver's words as shown, `None` while transcribing.
     fn heard_label(&self) -> Option<&str> {
-        self.heard
-            .as_deref()
-            .map(|h| if h.is_empty() { "（無音）" } else { h })
+        match (self.heard.as_deref(), &self.done) {
+            (Some(""), _) => Some("（無音）"),
+            (Some(h), _) => Some(h),
+            // The transcriber failed (e.g. HTTP 401): the turn is over.
+            (None, Some(_)) => Some("（聞き取れませんでした）"),
+            (None, None) => None,
+        }
     }
 
     /// Something was asked, so the engineer answers.
@@ -446,12 +755,84 @@ impl TurnView {
     }
 }
 
-pub fn subscription(_: &App) -> Subscription<Message> {
+pub fn subscription(app: &App) -> Subscription<Message> {
+    let keys = if app.capture == Capture::Key {
+        iced::event::listen_with(captured_key)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
         Subscription::run(engine_stream),
         Subscription::run(hotkey_stream),
         Subscription::run(chrome_stream),
+        Subscription::run(wheel_stream),
+        Subscription::run(resident_stream),
+        window::close_requests().map(|_| Message::Close),
+        keys,
     ])
+}
+
+fn captured_key(event: iced::Event, _: iced::event::Status, _: window::Id) -> Option<Message> {
+    use iced::keyboard::{Event, key::Physical};
+    match event {
+        iced::Event::Keyboard(Event::KeyPressed {
+            physical_key: Physical::Code(code),
+            modifiers,
+            ..
+        }) => hotkey::capture(code, modifiers).map(Message::Captured),
+        _ => None,
+    }
+}
+
+fn show_window() -> Task<Message> {
+    window::latest().and_then(|id| {
+        Task::batch([
+            window::set_mode(id, window::Mode::Windowed),
+            window::minimize(id, false),
+            window::gain_focus(id),
+        ])
+    })
+}
+
+fn context(cfg: &Config) -> Option<Arc<dyn ContextSource>> {
+    let commands = cfg.context_commands();
+    (!commands.is_empty()).then(|| {
+        let cwd = cfg.agent_cwd();
+        Arc::new(Commands { commands, cwd }) as Arc<dyn ContextSource>
+    })
+}
+
+/// Starts an agent from its command line.
+fn connect(cfg: &Config, command: &str) -> AgentLink {
+    match AcpAgent::from_str(&config::agent_command(command)) {
+        Ok(acp) => AgentLink::spawn(acp, cfg.session()),
+        Err(e) => AgentLink::failed(format!("bad agent command: {e}")),
+    }
+}
+
+/// The pipeline between the given devices: transcriber, agent and speech as
+/// configured. Must be called on a tokio runtime.
+pub fn deps(
+    cfg: &Config,
+    recorder: Arc<dyn Recorder>,
+    output: Arc<dyn Output>,
+    synth: Arc<dyn Synth>,
+) -> Deps {
+    let connect_cfg = cfg.clone();
+    Deps {
+        recorder,
+        transcriber: stt::build(&cfg.stt()),
+        make_transcriber: Box::new(stt::build),
+        synth,
+        output,
+        agent: connect(cfg, &cfg.agent),
+        connect: Box::new(move |command| connect(&connect_cfg, command)),
+        context: context(cfg),
+        prompt_template: cfg.prompt.clone(),
+        speaker: cfg.speaker,
+        early_stt: cfg.early_stt,
+        language: Some(cfg.language.clone()).filter(|l| !l.is_empty()),
+    }
 }
 
 /// Opens the devices, starts the agent session and the pipeline.
@@ -484,35 +865,8 @@ pub async fn start_engine(
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
 
-    let (agent_tx, agent_cmd_rx) = unbounded_channel();
-    let (agent_ev_tx, agent_rx) = unbounded_channel();
-    match AcpAgent::from_str(&config::agent_command(&cfg.agent)) {
-        Ok(acp) => {
-            tokio::spawn(agent::run(
-                acp,
-                cfg.agent_cwd(),
-                cfg.permissions,
-                agent_cmd_rx,
-                agent_ev_tx,
-            ));
-        }
-        Err(e) => {
-            let _ = agent_ev_tx.send(agent::AgentEvent::Closed {
-                error: Some(format!("bad agent command: {e}")),
-            });
-        }
-    }
     tokio::spawn(engine::run(
-        Deps {
-            recorder,
-            transcriber: Arc::new(OpenAiTranscriber::new(cfg.stt())),
-            synth: voicevox,
-            output,
-            agent_tx,
-            agent_rx,
-            prompt_template: cfg.prompt.clone(),
-            speaker: cfg.speaker,
-        },
+        deps(cfg, recorder, output, voicevox),
         cmd_rx,
         ev_tx,
     ));
@@ -561,6 +915,31 @@ fn hotkey_stream() -> impl Stream<Item = Message> {
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+}
+
+fn wheel_stream() -> impl Stream<Item = Message> {
+    iced::stream::channel(64, async |mut out| {
+        let (tx, mut rx) = unbounded_channel();
+        wheel::listen(tx);
+        while let Some(e) = rx.recv().await {
+            if out.send(Message::Wheel(e)).await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
+fn resident_stream() -> impl Stream<Item = Message> {
+    iced::stream::channel(4, async |mut out| {
+        loop {
+            while let Some(e) = resident::poll() {
+                if out.send(Message::Resident(e)).await.is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
 }
@@ -711,6 +1090,14 @@ mod tests {
         );
         t.reply = "0.6".into();
         assert!(!t.thinking());
+        let failed = TurnView {
+            done: Some((Outcome::Failed("HTTP 401".into()), 1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            (failed.heard_label(), failed.asked()),
+            (Some("（聞き取れませんでした）"), false)
+        );
         t.reply.clear();
         t.done = Some((Outcome::Answered, 1));
         assert!(!t.thinking());
@@ -858,6 +1245,233 @@ mod tests {
         assert_eq!(app.voice, Some(voices[0].clone()));
         let _ = app.update(Message::Voices(Err("down".into())));
         assert_eq!(app.errors, vec!["down"]);
+    }
+
+    fn wheel_event(button: u16, pressed: bool) -> Message {
+        Message::Wheel(ButtonEvent {
+            button: wheel::Binding {
+                device: "VID".into(),
+                name: "R9".into(),
+                button,
+            },
+            pressed,
+        })
+    }
+
+    /// An app wired to a fake engine, keeping its settings in a folder.
+    fn wired() -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.settings_path = Some(dir.path().join("settings.json"));
+        let (tx, rx) = unbounded_channel();
+        let _ = app.update(Message::EngineReady(tx));
+        (app, rx, dir)
+    }
+
+    fn saved(app: &App) -> Settings {
+        Settings::load(app.settings_path.as_ref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn agent_is_switched_and_remembered() {
+        let (mut app, mut rx, _dir) = wired();
+        app.apply(Event::AgentReady { name: "A".into() });
+        let _ = app.update(Message::AgentChoice(AgentChoice::Codex));
+        assert_eq!(app.agent_draft, config::CODEX_AGENT);
+        assert_eq!(app.agent, AgentStatus::Ready("A".into()));
+        let _ = app.update(Message::Connect);
+        assert_eq!(app.agent, AgentStatus::Starting);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Command::SetAgent(config::CODEX_AGENT.into()))
+        );
+        assert_eq!(saved(&app).agent.as_deref(), Some(config::CODEX_AGENT));
+        // Custom keeps the command to edit it.
+        let _ = app.update(Message::AgentChoice(AgentChoice::Custom));
+        assert_eq!(app.agent_draft, config::CODEX_AGENT);
+        let _ = app.update(Message::AgentDraft("  ".into()));
+        let _ = app.update(Message::Connect);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(AgentChoice::of(config::DEFAULT_AGENT), AgentChoice::Claude);
+        assert_eq!(AgentChoice::of("other"), AgentChoice::Custom);
+        let labels = AgentChoice::ALL.map(|c| c.to_string());
+        assert_eq!(labels, ["Claude Code", "Codex", "カスタム"]);
+    }
+
+    #[test]
+    fn transcriber_is_switched_and_remembered() {
+        let (mut app, mut rx, _dir) = wired();
+        let model = SttChoice::Model("openai/gpt-transcribe".into());
+        assert_eq!(app.stt_choice(), model);
+        let _ = app.update(Message::Stt(SttChoice::Windows));
+        assert_eq!(app.stt_choice(), SttChoice::Windows);
+        let Ok(Command::SetStt(cfg)) = rx.try_recv() else {
+            panic!("SetStt expected")
+        };
+        assert_eq!(cfg.backend, SttBackend::Windows);
+        assert_eq!(saved(&app).stt, Some(SttBackend::Windows));
+        let _ = app.update(Message::Stt(SttChoice::Model("m".into())));
+        assert_eq!(app.stt_choice(), SttChoice::Model("m".into()));
+        assert_eq!(saved(&app).stt_model.as_deref(), Some("m"));
+        assert_eq!(saved(&app).stt, Some(SttBackend::Api));
+        // The current model is listed even when it is not a known one.
+        let choices = app.stt_choices();
+        assert_eq!(choices[0], SttChoice::Model("m".into()));
+        assert_eq!(choices[1], model);
+        assert_eq!(choices.contains(&SttChoice::Windows), cfg!(windows));
+        app.config.stt_url = "http://127.0.0.1:9000/v1".into();
+        let others: Vec<_> = app
+            .stt_choices()
+            .into_iter()
+            .filter(|c| *c != SttChoice::Windows)
+            .collect();
+        assert_eq!(others, [SttChoice::Model("m".into())]);
+        assert_eq!(SttChoice::Windows.to_string(), "Windows 標準（オフライン）");
+        assert_eq!(model.to_string(), "openai/gpt-transcribe");
+    }
+
+    #[test]
+    fn wheel_button_is_assigned_then_talks() {
+        let (mut app, mut rx, _dir) = wired();
+        let _ = app.update(wheel_event(5, true));
+        assert!(rx.try_recv().is_err());
+        let _ = app.update(Message::Capture(Capture::Wheel));
+        // Letting go of another button does not assign it; talking waits.
+        let _ = app.update(wheel_event(4, false));
+        let _ = app.update(Message::Hotkey(true));
+        assert_eq!(app.capture, Capture::Wheel);
+        assert!(rx.try_recv().is_err());
+        let _ = app.update(wheel_event(5, true));
+        assert_eq!(app.capture, Capture::None);
+        assert_eq!(saved(&app).wheel.unwrap().button, 5);
+        let _ = app.update(wheel_event(5, false));
+        let _ = app.update(wheel_event(6, true));
+        let _ = app.update(wheel_event(5, true));
+        assert_eq!(rx.try_recv(), Ok(Command::PttUp));
+        assert_eq!(rx.try_recv(), Ok(Command::PttDown));
+        let _ = app.update(Message::ClearWheel);
+        let _ = app.update(wheel_event(5, true));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(saved(&app).wheel, None);
+    }
+
+    #[test]
+    fn capturing_a_key_can_be_cancelled() {
+        let (mut app, _rx, _dir) = wired();
+        app.hotkey = None;
+        let _ = app.update(Message::Captured(Captured::Key("F13".into())));
+        assert_eq!(app.settings.hotkey, None);
+        let _ = app.update(Message::Capture(Capture::Key));
+        let _ = app.update(Message::Captured(Captured::NeedsModifier));
+        assert!(app.capture_hint.is_some());
+        let _ = app.view();
+        let _ = app.update(Message::Captured(Captured::Cancel));
+        assert_eq!((app.capture, app.capture_hint), (Capture::None, None));
+        // A key that cannot be registered keeps the old one and says so.
+        let _ = app.update(Message::Capture(Capture::Key));
+        let _ = app.update(Message::Captured(Captured::Key("Nope".into())));
+        assert_eq!(app.capture, Capture::None);
+        assert_eq!(app.settings.hotkey, None);
+        assert!(app.errors[0].starts_with("キーを割り当てられません: Nope"));
+        // The key is given back while waiting for one, and only then: an
+        // unregistrable one shows that it was registered again.
+        app.hotkey = Some(Ok("Nope".into()));
+        let _ = app.update(Message::Capture(Capture::Wheel));
+        let _ = app.update(Message::Capture(Capture::None));
+        assert_eq!(app.hotkey, Some(Ok("Nope".into())));
+        let _ = app.update(Message::Capture(Capture::Key));
+        assert_eq!(app.hotkey, Some(Ok("Nope".into())));
+        let _ = app.update(Message::Capture(Capture::None));
+        assert!(matches!(app.hotkey, Some(Err(_))));
+        // Closing the settings stops waiting.
+        let _ = app.update(Message::Capture(Capture::Wheel));
+        let _ = app.update(Message::Settings(false));
+        assert_eq!(app.capture, Capture::None);
+    }
+
+    #[test]
+    fn settings_build_in_every_state() {
+        let mut app = App::sample();
+        let (tx, _rx) = unbounded_channel();
+        let _ = app.update(Message::EngineReady(tx));
+        let _ = app.update(Message::Settings(true));
+        let _ = app.view();
+        for choice in AgentChoice::ALL {
+            let _ = app.update(Message::AgentChoice(choice));
+            let _ = app.view();
+        }
+        let _ = app.update(Message::Connect);
+        let _ = app.view();
+        app.apply(Event::AgentClosed { error: None });
+        for (backend, key) in [
+            (SttBackend::Api, true),
+            (SttBackend::Api, false),
+            (SttBackend::Windows, false),
+        ] {
+            app.config.stt = backend;
+            app.has_stt_key = key;
+            let _ = app.view();
+        }
+        for hotkey in [Ok("F13".into()), Err("使用中".into())] {
+            app.hotkey = Some(hotkey);
+            let _ = app.view();
+        }
+        for capture in [Capture::Key, Capture::Wheel] {
+            app.capture = capture;
+            let _ = app.view();
+        }
+        let _ = app.update(wheel_event(5, true));
+        app.voices.clear();
+        let _ = app.view();
+    }
+
+    #[test]
+    fn voices_are_heard_when_nothing_else_is() {
+        let (mut app, mut rx, _dir) = wired();
+        let v = |id| Voice {
+            id,
+            speaker: "v".into(),
+            style: "s".into(),
+        };
+        let _ = app.update(Message::Preview);
+        assert!(rx.try_recv().is_err());
+        let _ = app.update(Message::Speaker(v(8)));
+        assert_eq!(rx.try_recv(), Ok(Command::SetSpeaker(8)));
+        assert_eq!(rx.try_recv(), Ok(Command::Preview(8)));
+        assert_eq!(saved(&app).speaker, Some(8));
+        // The next voice replaces the sample still playing.
+        app.apply(Event::Speaking(true));
+        let _ = app.update(Message::Speaker(v(9)));
+        assert_eq!(rx.try_recv(), Ok(Command::SetSpeaker(9)));
+        assert_eq!(rx.try_recv(), Ok(Command::Preview(9)));
+        // An answer is not interrupted by picking a voice...
+        app.apply(Event::TurnStarted { turn: 1 });
+        let _ = app.update(Message::Speaker(v(10)));
+        assert_eq!(rx.try_recv(), Ok(Command::SetSpeaker(10)));
+        assert!(rx.try_recv().is_err());
+        // ...only by asking for the sample.
+        let _ = app.update(Message::Preview);
+        assert_eq!(rx.try_recv(), Ok(Command::Preview(10)));
+        app.apply(Event::Speaking(false));
+        assert!(!app.previewing);
+    }
+
+    #[test]
+    fn residency_is_remembered_and_save_errors_are_shown() {
+        let (mut app, _rx, dir) = wired();
+        let _ = app.update(Message::CloseToTray(true));
+        assert!(saved(&app).close_to_tray);
+        let _ = app.update(Message::CloseToTray(false));
+        assert!(!saved(&app).close_to_tray);
+        // A file where the folder should be.
+        std::fs::write(dir.path().join("f"), "").unwrap();
+        app.settings_path = Some(dir.path().join("f").join("settings.json"));
+        let _ = app.update(Message::CloseToTray(true));
+        assert!(app.errors[0].starts_with("設定を保存できません"));
     }
 
     #[test]

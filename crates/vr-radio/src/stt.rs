@@ -2,23 +2,38 @@
 //! (`/audio/transcriptions`), optionally followed by an LLM pass that fixes
 //! misheard racing terms (`/chat/completions`).
 //!
-//! Works with OpenAI, Groq and local servers (whisper.cpp, faster-whisper,
-//! speaches) since they share the same endpoints.
+//! Works with OpenRouter, OpenAI, Groq and local servers (whisper.cpp,
+//! faster-whisper, speaches) since they share the same endpoints.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::http::{self, Multipart};
+use crate::sapi::WindowsTranscriber;
 
 pub trait Transcriber: Send + Sync + 'static {
     /// Transcribes a WAV file. Blocking.
     fn transcribe(&self, wav: &[u8]) -> Result<String>;
 }
 
-#[derive(Debug, Clone)]
+/// Who turns speech into text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SttBackend {
+    /// An OpenAI-compatible API.
+    #[default]
+    Api,
+    /// The recognizer built into Windows, offline.
+    Windows,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct SttConfig {
+    pub backend: SttBackend,
     /// Base URL ending before `/audio/transcriptions`, e.g. `https://api.openai.com/v1`.
     pub base_url: String,
     pub api_key: Option<String>,
@@ -29,6 +44,65 @@ pub struct SttConfig {
     pub prompt: Option<String>,
     /// Chat model that cleans up the transcript; `None` skips the pass.
     pub refine_model: Option<String>,
+}
+
+/// Without the API key: commands carrying it are logged.
+impl std::fmt::Debug for SttConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SttConfig")
+            .field("backend", &self.backend)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("has_key", &self.api_key.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+pub fn build(cfg: &SttConfig) -> Arc<dyn Transcriber> {
+    match cfg.backend {
+        SttBackend::Api => Arc::new(OpenAiTranscriber::new(cfg.clone())),
+        SttBackend::Windows => Arc::new(WindowsTranscriber::new(cfg.language.as_deref())),
+    }
+}
+
+/// Whether `url` is OpenRouter itself, not a look-alike host.
+pub fn is_openrouter(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .and_then(|u| u.split('/').next())
+        .is_some_and(|host| host.eq_ignore_ascii_case("openrouter.ai"))
+}
+
+/// The key for `url`. A key is only sent to the service it belongs to: an
+/// OpenAI key would be rejected (and leaked) by OpenRouter and vice versa.
+pub fn api_key(
+    url: &str,
+    explicit: Option<&str>,
+    env: impl Fn(&str) -> Option<String>,
+    dotenv: Option<&str>,
+) -> Option<String> {
+    let found = |k: Option<String>| k.filter(|k| !k.is_empty());
+    let name = if is_openrouter(url) {
+        "OPENROUTER_API_KEY"
+    } else {
+        "OPENAI_API_KEY"
+    };
+    found(explicit.map(str::to_string))
+        .or_else(|| found(env(name)))
+        .or_else(|| found(dotenv_key(dotenv?, name)))
+}
+
+/// `NAME=value` of a `.env` file. A bare `sk-or-…` line is an OpenRouter key.
+fn dotenv_key(file: &str, name: &str) -> Option<String> {
+    file.lines().map(str::trim).find_map(|line| {
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        match line.split_once('=') {
+            Some((key, value)) => {
+                (key.trim() == name).then(|| value.trim().trim_matches(['"', '\'']).to_string())
+            }
+            None => (name == "OPENROUTER_API_KEY" && line.starts_with("sk-or-"))
+                .then(|| line.to_string()),
+        }
+    })
 }
 
 pub struct OpenAiTranscriber {
@@ -124,6 +198,7 @@ mod tests {
 
     fn cfg(url: &str) -> SttConfig {
         SttConfig {
+            backend: SttBackend::Api,
             base_url: format!("{url}/v1/"),
             api_key: Some("sk-test".into()),
             model: "gpt-4o-mini-transcribe".into(),
@@ -215,6 +290,62 @@ mod tests {
         c.base_url = silent.url.clone();
         assert_eq!(OpenAiTranscriber::new(c).transcribe(b"x").unwrap(), "");
         assert_eq!(silent.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn keys_go_to_their_own_service() {
+        let or = "https://openrouter.ai/api/v1";
+        let oa = "https://api.openai.com/v1";
+        let env = |n: &str| Some(format!("env-{n}"));
+        let none = |_: &str| None;
+        let key = |k: &str| Some(k.to_string());
+        assert_eq!(api_key(or, None, env, None), key("env-OPENROUTER_API_KEY"));
+        assert_eq!(api_key(oa, None, env, None), key("env-OPENAI_API_KEY"));
+        assert_eq!(api_key(or, Some("x"), env, None), key("x"));
+        assert_eq!(
+            api_key(or, Some(""), env, None),
+            key("env-OPENROUTER_API_KEY")
+        );
+        assert_eq!(api_key(or, None, none, None), None);
+        assert_eq!(api_key(or, None, |_| key(""), None), None);
+
+        let file = "# keys\nexport OPENAI_API_KEY='oa'\nOPENROUTER_API_KEY = \"or=1\"\n";
+        assert_eq!(api_key(or, None, none, Some(file)), key("or=1"));
+        assert_eq!(api_key(oa, None, none, Some(file)), key("oa"));
+        assert_eq!(
+            api_key(oa, None, env, Some(file)),
+            key("env-OPENAI_API_KEY")
+        );
+        let bare = "sk-or-v1-abc\r\n";
+        assert_eq!(api_key(or, None, none, Some(bare)), key("sk-or-v1-abc"));
+        assert_eq!(api_key(oa, None, none, Some(bare)), None);
+        assert_eq!(api_key(or, None, none, Some("hello\nA=1")), None);
+    }
+
+    #[test]
+    fn openrouter_is_matched_by_host() {
+        assert!(is_openrouter("https://openrouter.ai/api/v1"));
+        assert!(is_openrouter("https://OpenRouter.ai"));
+        assert!(!is_openrouter("https://openrouter.ai.evil.example/api"));
+        assert!(!is_openrouter("http://openrouter.ai/api/v1"));
+        assert!(!is_openrouter("https://api.openai.com/openrouter.ai"));
+    }
+
+    #[test]
+    fn debug_hides_the_key() {
+        let shown = format!("{:?}", cfg("http://x"));
+        assert!(!shown.contains("sk-test"), "{shown}");
+        assert!(shown.contains("has_key: true"), "{shown}");
+    }
+
+    #[test]
+    fn build_follows_the_backend() {
+        let server = fake::serve(|_| fake::Response::json(r#"{"text":"ok"}"#));
+        assert_eq!(build(&cfg(&server.url)).transcribe(b"x").unwrap(), "ok");
+        let mut c = cfg(&server.url);
+        c.backend = SttBackend::Windows;
+        build(&c);
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
     }
 
     #[test]

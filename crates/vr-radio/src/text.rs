@@ -12,7 +12,12 @@ pub struct SentenceSplitter {
     buf: String,
     /// Cut at a soft stop once the pending sentence has this many characters.
     soft_limit: usize,
+    /// Nothing was cut yet: speaking starts with the first clause.
+    first: bool,
 }
+
+/// Length from which the first clause is spoken on its own.
+const FIRST_CLAUSE: usize = 6;
 
 impl Default for SentenceSplitter {
     fn default() -> Self {
@@ -25,6 +30,7 @@ impl SentenceSplitter {
         Self {
             buf: String::new(),
             soft_limit,
+            first: true,
         }
     }
 
@@ -38,6 +44,7 @@ impl SentenceSplitter {
             }
             let sentence: String = self.buf.drain(..end).collect();
             if let Some(s) = speakable(&sentence) {
+                self.first = false;
                 out.push(s);
             }
         }
@@ -83,12 +90,27 @@ impl SentenceSplitter {
                     None => return None, // wait for the next chunk
                 }
             }
-            if SOFT_STOPS.contains(&c) && count >= self.soft_limit {
+            let limit = if self.first {
+                FIRST_CLAUSE.min(self.soft_limit)
+            } else {
+                self.soft_limit
+            };
+            if SOFT_STOPS.contains(&c) && count >= limit {
                 return Some(end);
             }
         }
         None
     }
+}
+
+/// Whether `text` must not be read aloud to a driver who speaks `language`:
+/// an English sentence in a Japanese radio is an error of the agent (an
+/// expired login...), not an answer. Names and units alone are fine.
+pub fn foreign(text: &str, language: Option<&str>) -> bool {
+    let japanese = |c: char| matches!(c, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}');
+    language == Some("ja")
+        && !text.chars().any(japanese)
+        && text.chars().filter(char::is_ascii_alphabetic).count() >= 16
 }
 
 /// Removes Markdown and decoration; `None` if nothing is left to say.
@@ -126,6 +148,29 @@ pub fn speakable(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_first_clause_is_spoken_early_and_only_the_first() {
+        let mut s = SentenceSplitter::default();
+        assert_eq!(s.push("前の Ito まで 0.6 秒、"), ["前の Ito まで 0.6 秒、"]);
+        assert!(s.push("毎周 0.4 秒ずつ詰めてる、").is_empty());
+        assert_eq!(s.push("2 周で射程内。").len(), 1);
+        // Five characters and the comma are enough, fewer are not (了解、).
+        assert_eq!(SentenceSplitter::default().push("一二三四五、").len(), 1);
+        assert!(SentenceSplitter::default().push("一二三四、").is_empty());
+    }
+
+    #[test]
+    fn agent_errors_in_another_language_are_not_for_the_driver() {
+        let error = "Failed to authenticate: OAuth session expired";
+        assert!(foreign(error, Some("ja")));
+        assert!(!foreign(error, Some("en")));
+        assert!(!foreign(error, None));
+        assert!(!foreign("前は Kowalski、P4 だ。", Some("ja")));
+        assert!(!foreign("OK, P4.", Some("ja")));
+        assert!(!foreign("abcdefghijklmno", Some("ja")));
+        assert!(foreign("abcdefghijklmnop", Some("ja")));
+    }
+
     fn split_all(chunks: &[&str]) -> Vec<String> {
         let mut s = SentenceSplitter::default();
         let mut out: Vec<String> = chunks.iter().flat_map(|c| s.push(c)).collect();
@@ -141,7 +186,11 @@ mod tests {
                 "6、毎周 0.4 詰めてる",
                 "。2 周で射程内。"
             ]),
-            vec!["前の Ito まで 0.6、毎周 0.4 詰めてる。", "2 周で射程内。"]
+            vec![
+                "前の Ito まで 0.6、",
+                "毎周 0.4 詰めてる。",
+                "2 周で射程内。"
+            ]
         );
     }
 

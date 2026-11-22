@@ -116,14 +116,17 @@ vr serve
 
 ### 声で聞く
 
-[VOICEVOX](https://voicevox.hiroshiba.jp/) を起動し、文字起こし API のキーを設定して起動する。
+[VOICEVOX](https://voicevox.hiroshiba.jp/) を起動し、[OpenRouter](https://openrouter.ai/) のキーを設定して起動する。
+キーは作業ディレクトリの `.env`（`OPENROUTER_API_KEY=<key>`）でもよい。
 
 ```powershell
-$env:OPENAI_API_KEY = "<key>"; cargo run --release -p vr-radio
+$env:OPENROUTER_API_KEY = "<key>"; cargo run --release -p vr-radio
 ```
 
-- F9 を押している間に話す（`--hotkey` で変更）
-- Codex: `--agent "npx -y @agentclientprotocol/codex-acp@2.6.0"`
+- F9 を押している間に話す。別のキーやハンドルのボタンは設定の「割り当て」で登録
+- 話者（試聴可）・エージェント（Claude Code / Codex）・文字起こしは設定で切り替え
+- キー無しで使うなら、文字起こしを「Windows 標準」に（精度は低い）
+- 常駐: 設定でトレイ常駐と Windows 起動時の開始を選択
 - 画面無しの動作確認: `--ask "前との差は？"`
 - 設定一覧: `vr-radio --help`
 

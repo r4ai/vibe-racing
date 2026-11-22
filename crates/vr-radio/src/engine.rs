@@ -4,20 +4,26 @@
 //! agent is still writing the rest. Pressing the button again interrupts
 //! both the speech and the agent (barge-in).
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::agent::{AgentCmd, AgentEvent, ToolState, Turn};
+use crate::agent::{AgentCmd, AgentEvent, AgentLink, ToolState, Turn};
 use crate::audio::{Output, Recorder};
-use crate::stt::Transcriber;
-use crate::text::SentenceSplitter;
+use crate::context::ContextSource;
+use crate::early::Early;
+use crate::stt::{SttConfig, Transcriber};
+use crate::text::{self, SentenceSplitter};
 use crate::voicevox::Synth;
 
 /// Recordings shorter than this are treated as accidental presses.
 pub const MIN_SPEECH: f32 = 0.3;
+
+/// Spoken when trying out a voice.
+pub const SAMPLE: &str = "前との差は1.2秒。いいペースです。次の周、ボックス。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -29,6 +35,11 @@ pub enum Command {
     Cancel,
     SetSpeaker(u32),
     SetMuted(bool),
+    /// Speaks [`SAMPLE`] with a voice, even when muted.
+    Preview(u32),
+    /// Replaces the agent: the old session ends, a new one starts.
+    SetAgent(String),
+    SetStt(SttConfig),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,23 +100,40 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// Starts an agent session from its command.
+pub type Connect = Box<dyn Fn(&str) -> AgentLink + Send>;
+pub type MakeTranscriber = Box<dyn Fn(&SttConfig) -> Arc<dyn Transcriber> + Send>;
+
 pub struct Deps {
     pub recorder: Arc<dyn Recorder>,
     pub transcriber: Arc<dyn Transcriber>,
     pub synth: Arc<dyn Synth>,
     pub output: Arc<dyn Output>,
-    pub agent_tx: UnboundedSender<AgentCmd>,
-    pub agent_rx: UnboundedReceiver<AgentEvent>,
-    /// `{text}` is replaced by what the driver said.
+    pub make_transcriber: MakeTranscriber,
+    pub agent: AgentLink,
+    pub connect: Connect,
+    /// Data for the question, fetched while the speech is transcribed.
+    pub context: Option<Arc<dyn ContextSource>>,
+    /// `{text}` is what the driver said, `{context}` the data.
     pub prompt_template: String,
     pub speaker: u32,
+    /// Transcribes the words before each pause while the button is held.
+    pub early_stt: bool,
+    /// What the driver speaks (ISO-639-1).
+    pub language: Option<String>,
 }
 
-pub fn render_prompt(template: &str, text: &str) -> String {
-    if template.contains("{text}") {
-        template.replace("{text}", text)
+pub fn render_prompt(template: &str, text: &str, context: Option<&str>) -> String {
+    let context = context.map_or_else(
+        || "（データは付いていない。vr で取得すること）".to_string(),
+        |c| format!("取得したての実データ:\n{c}"),
+    );
+    // The driver's words last: they must not be searched for placeholders.
+    let prompt = template.replace("{context}", &context);
+    if prompt.contains("{text}") {
+        prompt.replacen("{text}", text, 1)
     } else {
-        format!("{template}\n{text}")
+        format!("{prompt}\n{text}")
     }
 }
 
@@ -124,6 +152,26 @@ struct Clip {
     started: Instant,
     first: bool,
     text: String,
+    /// Overrides the selected voice (trying one out).
+    voice: Option<u32>,
+}
+
+/// A question made out, with its data.
+struct Transcribed {
+    turn: Turn,
+    result: anyhow::Result<String>,
+    ms: u64,
+    data: Option<String>,
+}
+
+/// Starts fetching the data at once; the future waits for it.
+fn fetch(
+    context: &Option<Arc<dyn ContextSource>>,
+) -> impl Future<Output = Option<String>> + Send + 'static {
+    let task = context
+        .clone()
+        .map(|c| tokio::task::spawn_blocking(move || c.fetch()));
+    async move { task?.await.ok()? }
 }
 
 fn ms(since: Instant) -> u64 {
@@ -146,7 +194,9 @@ async fn speak(
         }
         let synth = synth.clone();
         let text = clip.text.clone();
-        let id = speaker.load(Ordering::Relaxed);
+        let id = clip
+            .voice
+            .unwrap_or_else(|| speaker.load(Ordering::Relaxed));
         let result = tokio::task::spawn_blocking(move || synth.synthesize(&text, id)).await;
         if clip.generation != generation.load(Ordering::SeqCst) {
             continue;
@@ -174,13 +224,17 @@ async fn speak(
 pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: UnboundedSender<Event>) {
     let Deps {
         recorder,
-        transcriber,
+        mut transcriber,
         synth,
         output,
-        agent_tx,
-        mut agent_rx,
+        make_transcriber,
+        mut agent,
+        connect,
+        context,
         prompt_template,
         speaker,
+        early_stt,
+        language,
     } = deps;
     let generation = Arc::new(AtomicU64::new(0));
     let speaker = Arc::new(AtomicU32::new(speaker));
@@ -194,11 +248,13 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         speaker.clone(),
         events.clone(),
     ));
-    let (stt_tx, mut stt_rx) = unbounded_channel::<(Turn, anyhow::Result<String>, u64)>();
+    let (stt_tx, mut stt_rx) = unbounded_channel::<Transcribed>();
+    let (ask_tx, mut ask_rx) = unbounded_channel::<(Turn, String, Option<String>)>();
 
     let mut next_turn: Turn = 0;
     let mut current: Option<Current> = None;
     let mut recording = false;
+    let mut early: Option<Early> = None;
     let mut speaking = false;
     let mut first_sentence = true;
     let mut tick = tokio::time::interval(Duration::from_millis(50));
@@ -209,11 +265,11 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
     };
 
     // Interrupts the speech and the running turn.
-    let barge_in = |current: &mut Option<Current>| {
+    let barge_in = |current: &mut Option<Current>, agent: &AgentLink| {
         generation.fetch_add(1, Ordering::SeqCst);
         output.stop();
         if let Some(c) = current.take() {
-            let _ = agent_tx.send(AgentCmd::Cancel);
+            let _ = agent.tx.send(AgentCmd::Cancel);
             emit(Event::TurnDone {
                 turn: c.turn,
                 outcome: Outcome::Cancelled,
@@ -234,7 +290,31 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         next_turn
     };
 
+    // Asks the agent, or ends the turn when there is none to answer.
+    let ask = |current: &mut Option<Current>,
+               agent: &AgentLink,
+               turn: Turn,
+               text: &str,
+               data: Option<&str>| {
+        let text = render_prompt(&prompt_template, text, data);
+        if agent.tx.send(AgentCmd::Prompt { turn, text }).is_err()
+            && let Some(c) = current.take()
+        {
+            let error = "エージェントに接続していません";
+            emit(Event::Error(format!("{error}（設定から接続してください）")));
+            emit(Event::TurnDone {
+                turn,
+                outcome: Outcome::Failed(error.into()),
+                ms: ms(c.started),
+            });
+        }
+    };
+
     let send_clip = |c: &Current, text: String, first: &mut bool| {
+        if text::foreign(&text, language.as_deref()) {
+            emit(Event::Error(text));
+            return;
+        }
         if muted.load(Ordering::Relaxed) {
             return;
         }
@@ -244,6 +324,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
             started: c.started,
             first: std::mem::take(first),
             text,
+            voice: None,
         });
     };
 
@@ -256,9 +337,10 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                         if recording {
                             continue;
                         }
-                        barge_in(&mut current);
+                        barge_in(&mut current, &agent);
                         recorder.start();
                         recording = true;
+                        early = early_stt.then(Early::default);
                         emit(Event::Recording(true));
                     }
                     Command::PttUp => {
@@ -274,12 +356,17 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                         }
                         let turn = begin(&mut current);
                         first_sentence = true;
-                        let transcriber = transcriber.clone();
                         let tx = stt_tx.clone();
                         let t0 = Instant::now();
-                        tokio::task::spawn_blocking(move || {
-                            let result = transcriber.transcribe(&rec.to_wav());
-                            let _ = tx.send((turn, result, ms(t0)));
+                        // The data as of the end of the question, while
+                        // the words are being made out.
+                        let data = fetch(&context);
+                        let text = early.take().unwrap_or_default().finish(rec, transcriber.clone());
+                        tokio::spawn(async move {
+                            let result = text.await;
+                            let took = ms(t0);
+                            let data = data.await;
+                            let _ = tx.send(Transcribed { turn, result, ms: took, data });
                         });
                     }
                     Command::Ask(text) => {
@@ -287,13 +374,35 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                         if text.is_empty() {
                             continue;
                         }
-                        barge_in(&mut current);
+                        barge_in(&mut current, &agent);
                         let turn = begin(&mut current);
                         first_sentence = true;
                         emit(Event::Transcript { turn, text: text.clone(), ms: 0 });
-                        let _ = agent_tx.send(AgentCmd::Prompt { turn, text: render_prompt(&prompt_template, &text) });
+                        let data = fetch(&context);
+                        let tx = ask_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = tx.send((turn, text, data.await));
+                        });
                     }
-                    Command::Cancel => barge_in(&mut current),
+                    Command::Cancel => barge_in(&mut current, &agent),
+                    Command::Preview(voice) => {
+                        generation.fetch_add(1, Ordering::SeqCst);
+                        output.stop();
+                        let _ = clip_tx.send(Clip {
+                            turn: 0,
+                            generation: generation.load(Ordering::SeqCst),
+                            started: Instant::now(),
+                            first: false,
+                            text: SAMPLE.into(),
+                            voice: Some(voice),
+                        });
+                    }
+                    Command::SetAgent(command) => {
+                        barge_in(&mut current, &agent);
+                        // Dropping the old link ends its process.
+                        agent = connect(&command);
+                    }
+                    Command::SetStt(cfg) => transcriber = make_transcriber(&cfg),
                     Command::SetSpeaker(id) => speaker.store(id, Ordering::Relaxed),
                     Command::SetMuted(m) => {
                         muted.store(m, Ordering::Relaxed);
@@ -304,7 +413,12 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                     }
                 }
             }
-            Some((turn, result, took)) = stt_rx.recv() => {
+            Some((turn, text, data)) = ask_rx.recv() => {
+                if current.as_ref().is_some_and(|c| c.turn == turn) {
+                    ask(&mut current, &agent, turn, &text, data.as_deref());
+                }
+            }
+            Some(Transcribed { turn, result, ms: took, data }) = stt_rx.recv() => {
                 let Some(c) = current.as_ref().filter(|c| c.turn == turn) else { continue };
                 match result {
                     Ok(text) if text.trim().is_empty() => {
@@ -314,7 +428,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                     }
                     Ok(text) => {
                         emit(Event::Transcript { turn, text: text.clone(), ms: took });
-                        let _ = agent_tx.send(AgentCmd::Prompt { turn, text: render_prompt(&prompt_template, &text) });
+                        ask(&mut current, &agent, turn, &text, data.as_deref());
                     }
                     Err(e) => {
                         let error = format!("transcription: {e:#}");
@@ -324,7 +438,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
                     }
                 }
             }
-            Some(ev) = agent_rx.recv() => match ev {
+            Some(ev) = agent.rx.recv() => match ev {
                 AgentEvent::Ready { name } => emit(Event::AgentReady { name }),
                 AgentEvent::Closed { error } => {
                     if let Some(c) = current.take() {
@@ -376,6 +490,9 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
             _ = tick.tick() => {
                 if recording {
                     emit(Event::Level(recorder.level()));
+                    if let Some(e) = &mut early {
+                        e.update(recorder.as_ref(), &transcriber);
+                    }
                 }
                 let now = !output.is_idle();
                 if now != speaking {
@@ -392,7 +509,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::agent::{self, fake};
+    use crate::agent::{SessionConfig, fake};
     use crate::audio::Recording;
     use crate::policy::Permissions;
 
@@ -413,6 +530,11 @@ mod tests {
         fn level(&self) -> f32 {
             0.25
         }
+        fn peek(&self, from: usize) -> Recording {
+            let mut r = self.stop();
+            r.samples.drain(..from.min(r.samples.len()));
+            r
+        }
     }
 
     struct FakeStt(&'static str);
@@ -420,6 +542,13 @@ mod tests {
         fn transcribe(&self, wav: &[u8]) -> anyhow::Result<String> {
             assert_eq!(&wav[..4], b"RIFF");
             Ok(self.0.to_string())
+        }
+    }
+
+    struct FakeContext;
+    impl ContextSource for FakeContext {
+        fn fetch(&self) -> Option<String> {
+            Some("P4".into())
         }
     }
 
@@ -459,15 +588,18 @@ mod tests {
 
     fn start(reply: &'static [&'static str], stt: &'static str, seconds: f32) -> Harness {
         let prompts = Arc::new(Mutex::new(Vec::new()));
-        let (agent_tx, agent_cmd_rx) = unbounded_channel();
-        let (agent_ev_tx, agent_rx) = unbounded_channel();
-        tokio::spawn(agent::run(
-            fake::agent(reply, prompts.clone()),
-            std::env::temp_dir(),
-            Permissions::Safe,
-            agent_cmd_rx,
-            agent_ev_tx,
-        ));
+        let link = |reply, prompts| {
+            AgentLink::spawn(
+                fake::agent(reply, prompts),
+                SessionConfig {
+                    cwd: std::env::temp_dir(),
+                    permissions: Permissions::Safe,
+                    options: vec![],
+                    primer: None,
+                },
+            )
+        };
+        let other = prompts.clone();
         let out = Arc::new(FakeOut::default());
         let (cmds, cmd_rx) = unbounded_channel();
         let (ev_tx, events) = unbounded_channel();
@@ -478,12 +610,22 @@ mod tests {
                     started: AtomicBool::new(false),
                 }),
                 transcriber: Arc::new(FakeStt(stt)),
+                make_transcriber: Box::new(|cfg| {
+                    assert_eq!(cfg.model, "new");
+                    Arc::new(FakeStt("聞き直し"))
+                }),
                 synth: Arc::new(EchoSynth),
                 output: out.clone(),
-                agent_tx,
-                agent_rx,
-                prompt_template: "無線:「{text}」".into(),
+                agent: link(reply, prompts.clone()),
+                connect: Box::new(move |command| match command {
+                    "other" => link(&["別の返答。"], other.clone()),
+                    e => AgentLink::failed(e.into()),
+                }),
+                context: Some(Arc::new(FakeContext)),
+                prompt_template: "無線:「{text}」{context}".into(),
                 speaker: 3,
+                early_stt: true,
+                language: Some("ja".into()),
             },
             cmd_rx,
             ev_tx,
@@ -577,7 +719,7 @@ mod tests {
         );
         assert_eq!(
             *h.prompts.lock().unwrap(),
-            vec!["無線:「前との差は？」".to_string()]
+            vec!["無線:「前との差は？」取得したての実データ:\nP4".to_string()]
         );
         let audio = h.until(|e| matches!(e, Event::FirstAudio { .. })).await;
         assert!(matches!(
@@ -673,6 +815,119 @@ mod tests {
         assert_eq!(h.played(1).await, vec!["8:了解。"]);
     }
 
+    #[tokio::test]
+    async fn the_agent_is_replaced_and_its_turn_cancelled() {
+        let mut h = start(&["了解。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("slow".into())).unwrap();
+        h.until(|e| matches!(e, Event::TurnStarted { .. })).await;
+        h.cmds.send(Command::SetAgent("other".into())).unwrap();
+        let events = h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::TurnDone {
+                turn: 1,
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        )));
+        // The old session ends silently.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::AgentClosed { .. }))
+        );
+        h.cmds.send(Command::Ask("b".into())).unwrap();
+        h.until(is_done).await;
+        assert_eq!(h.played(1).await, vec!["3:別の返答。"]);
+    }
+
+    #[tokio::test]
+    async fn a_question_without_an_agent_fails_instead_of_waiting() {
+        let mut h = start(&["了解。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::SetAgent("broken".into())).unwrap();
+        let events = h.until(|e| matches!(e, Event::AgentClosed { .. })).await;
+        assert_eq!(
+            events.last(),
+            Some(&Event::AgentClosed {
+                error: Some("broken".into())
+            })
+        );
+        h.cmds.send(Command::Ask("b".into())).unwrap();
+        let events = h.until(is_done).await;
+        let Some(Event::TurnDone {
+            turn: 1, outcome, ..
+        }) = events.last()
+        else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            *outcome,
+            Outcome::Failed("エージェントに接続していません".into())
+        );
+        assert!(events.iter().any(|e| matches!(e, Event::Error(_))));
+        // Connecting makes it usable again.
+        h.cmds.send(Command::SetAgent("other".into())).unwrap();
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("c".into())).unwrap();
+        h.until(is_done).await;
+        assert_eq!(h.played(1).await, vec!["3:別の返答。"]);
+    }
+
+    #[tokio::test]
+    async fn an_error_of_the_agent_is_shown_and_not_spoken() {
+        let mut h = start(
+            &["Failed to authenticate: please log in\n", "了解。"],
+            "x",
+            1.0,
+        );
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("a".into())).unwrap();
+        let events = h.until(is_done).await;
+        assert!(events.contains(&Event::Error(
+            "Failed to authenticate: please log in".into()
+        )));
+        assert_eq!(h.played(1).await, vec!["3:了解。"]);
+    }
+
+    #[tokio::test]
+    async fn the_transcriber_is_replaced() {
+        let mut h = start(&["了解。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds
+            .send(Command::SetStt(SttConfig {
+                backend: Default::default(),
+                base_url: String::new(),
+                api_key: None,
+                model: "new".into(),
+                language: None,
+                prompt: None,
+                refine_model: None,
+            }))
+            .unwrap();
+        h.cmds.send(Command::PttDown).unwrap();
+        h.cmds.send(Command::PttUp).unwrap();
+        let events = h.until(is_done).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Transcript { text, .. } if text == "聞き直し"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sample_is_spoken_even_when_muted() {
+        let mut h = start(&["了解。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::SetMuted(true)).unwrap();
+        let stops = h.out.stops.load(Ordering::SeqCst);
+        h.cmds.send(Command::Preview(20)).unwrap();
+        assert_eq!(h.played(1).await, vec![format!("20:{SAMPLE}")]);
+        // Stopped once for muting, once for the sample.
+        assert_eq!(h.out.stops.load(Ordering::SeqCst), stops + 2);
+    }
+
     #[test]
     fn elapsed_milliseconds() {
         let t = Instant::now() - Duration::from_millis(50);
@@ -682,7 +937,15 @@ mod tests {
 
     #[test]
     fn prompt_template() {
-        assert_eq!(render_prompt("無線「{text}」", "差は"), "無線「差は」");
-        assert_eq!(render_prompt("前置き", "差は"), "前置き\n差は");
+        assert_eq!(
+            render_prompt("無線「{text}」", "差は", None),
+            "無線「差は」"
+        );
+        assert_eq!(render_prompt("前置き", "差は", None), "前置き\n差は");
+        assert_eq!(
+            render_prompt("{context}/{text}", "{context}", Some("P3")),
+            "取得したての実データ:\nP3/{context}"
+        );
+        assert!(render_prompt("{context}{text}", "x", None).contains("vr で取得"));
     }
 }

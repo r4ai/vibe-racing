@@ -5,14 +5,55 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use crate::policy::Permissions;
-use crate::stt::SttConfig;
+use crate::stt::{self, SttBackend, SttConfig};
 
 /// Default agent: Claude Code over ACP, pinned to a release older than 7 days.
 pub const DEFAULT_AGENT: &str = "npx -y @agentclientprotocol/claude-agent-acp@0.107.0";
 
-pub const DEFAULT_PROMPT: &str = "ドライバーからの無線:「{text}」\n\
-race-engineer スキルの手順で実データを調べて答えて。\
-返答はそのまま音声で読み上げるので、日本語 1〜2 文、結論から、マークダウン・箇条書き・前置き無し。";
+/// Codex over ACP, pinned likewise.
+pub const CODEX_AGENT: &str = "npx -y @agentclientprotocol/codex-acp@2.6.0";
+
+/// Most accurate on spoken Japanese racing terms at under a second per
+/// question, among the OpenRouter models compared in docs/architecture.md.
+pub const DEFAULT_STT_MODEL: &str = "openai/gpt-transcribe";
+
+/// OpenRouter models offered in the settings.
+pub const STT_MODELS: &[&str] = &[
+    DEFAULT_STT_MODEL,
+    "openai/gpt-4o-mini-transcribe",
+    "elevenlabs/scribe-v2",
+    "assemblyai/universal-3-6-pro",
+    "x-ai/grok-stt-2.0",
+    "qwen/qwen3-asr-0.6b",
+];
+
+/// Sent once when the agent connects, before the first question: the rules,
+/// and time to read the skill.
+pub const DEFAULT_PRIMER: &str = "\
+これからシムレース走行中のドライバーの無線が 1 通ずつ届く。あなたはレースエンジニア。\n\
+返答はそのまま音声で読み上げるので、次を守る。\n\
+- 結論と数字から言い始める。日本語 1〜2 文。前置き、復唱、記号、マークダウン、箇条書きは無し\n\
+- 聞かれたことにすべて答え、聞かれていないことは言わない。例外は新しい危険（イエロー、後ろの急接近）だけ。一度伝えた注意は繰り返さない\n\
+- 無線には取得したての実データが付く。足りるときはコマンドを使わず即答し、足りないときだけ vr を実行する\n\
+- 数字は推測しない。複数のデータで値が違うときは新しい方を使う。age が数秒以上か DISCONNECTED なら、値を言わずデータが途切れていると伝える\n\
+- 無線は音声認識の文字なので、誤変換は文脈で補う（何週→何周、燃費・ボックス等）。疑問符は落ちるので、「イエロー出てる」「後ろは」のような状態や名詞だけの無線は質問とみなす。言い直しは最後の意図に従う\n\
+- 冒頭や末尾が切れて二通りに取れるときは、推測で答えず「前と後ろ、どっち？」のように短く聞き返す。意味が取れない無線には「もう一度頼む」とだけ返す\n\
+- お礼や了解、独り言だけの無線には「了解」など一言だけ返す\n\
+race-engineer スキルがあれば今読んで、データの読み方を把握しておくこと。コマンドはまだ実行しない。終わったら「了解」とだけ返す。";
+
+pub const DEFAULT_PROMPT: &str = "\
+無線:「{text}」\n\n\
+{context}\n\n\
+結論と数字から、日本語 1〜2 文で即答。";
+
+/// Commands whose output goes with every question. Together they answer
+/// nearly everything a driver asks while driving.
+pub const DEFAULT_CONTEXT: &[&str] = &[
+    "vr brief",
+    "vr standings",
+    "vr laps --last 5",
+    "vr events --limit 10",
+];
 
 pub const DEFAULT_VOCABULARY: &str = "シムレースの無線。ギャップ、燃費、給油、ピット、ボックス、\
 イエローフラッグ、アンダーカット、周回遅れ、ラップタイム、スティント。";
@@ -36,28 +77,49 @@ pub struct Config {
     #[arg(long, value_enum, env = "VR_RADIO_PERMISSIONS", default_value = "safe")]
     pub permissions: Permissions,
 
-    /// Prompt sent to the agent; `{text}` is what the driver said.
+    /// Option of the agent's session, e.g. `model=haiku` or `effort=low`
+    /// (repeatable; the agent lists its own).
+    #[arg(long = "agent-option", env = "VR_RADIO_AGENT_OPTIONS", value_delimiter = ';', value_parser = parse_option)]
+    pub agent_options: Vec<(String, String)>,
+
+    /// Sent once when the agent connects, so that the first question does
+    /// not wait for it. Empty: nothing is sent.
+    #[arg(long, env = "VR_RADIO_PRIMER", default_value = DEFAULT_PRIMER)]
+    pub primer: String,
+
+    /// Command whose output goes with every question, e.g. `vr brief`
+    /// (repeatable). One empty value: none.
+    #[arg(long, env = "VR_RADIO_CONTEXT", value_delimiter = ';', default_values = DEFAULT_CONTEXT)]
+    pub context: Vec<String>,
+
+    /// Prompt sent to the agent; `{text}` is what the driver said, `{context}`
+    /// the data fetched for it.
     #[arg(long, env = "VR_RADIO_PROMPT", default_value = DEFAULT_PROMPT)]
     pub prompt: String,
 
-    /// OpenAI-compatible speech-to-text base URL (OpenAI, Groq, local whisper server).
+    /// Who transcribes: an API, or the recognizer built into Windows (offline).
+    #[arg(long, value_enum, env = "VR_RADIO_STT", default_value = "api")]
+    pub stt: SttBackend,
+
+    /// OpenAI-compatible speech-to-text base URL (OpenRouter, OpenAI, Groq, local whisper server).
     #[arg(
         long,
         env = "VR_RADIO_STT_URL",
-        default_value = "https://api.openai.com/v1"
+        default_value = "https://openrouter.ai/api/v1"
     )]
     pub stt_url: String,
 
-    /// API key for the transcriber (falls back to OPENAI_API_KEY).
+    /// API key for the transcriber. Falls back to OPENROUTER_API_KEY (OpenRouter)
+    /// or OPENAI_API_KEY, from the environment or `.env` in the working directory.
     #[arg(long, env = "VR_RADIO_STT_API_KEY", hide_env_values = true)]
     pub stt_api_key: Option<String>,
 
-    #[arg(
-        long,
-        env = "VR_RADIO_STT_MODEL",
-        default_value = "gpt-4o-mini-transcribe"
-    )]
+    #[arg(long, env = "VR_RADIO_STT_MODEL", default_value = DEFAULT_STT_MODEL)]
     pub stt_model: String,
+
+    /// Transcribe while the button is still held, at every pause.
+    #[arg(long, env = "VR_RADIO_EARLY_STT", default_value_t = true, action = clap::ArgAction::Set)]
+    pub early_stt: bool,
 
     #[arg(long, env = "VR_RADIO_LANGUAGE", default_value = "ja")]
     pub language: String,
@@ -90,6 +152,14 @@ pub struct Config {
     #[arg(long, env = "VR_RADIO_FONT")]
     pub font: Option<String>,
 
+    /// File of the choices made in the settings sheet.
+    #[arg(long, env = "VR_RADIO_SETTINGS")]
+    pub settings: Option<PathBuf>,
+
+    /// Start in the tray, without showing the window (Windows).
+    #[arg(long)]
+    pub tray: bool,
+
     /// Ask one typed question without the window, print the events and exit
     /// once the answer has been spoken (for checking the setup).
     #[arg(long)]
@@ -98,18 +168,39 @@ pub struct Config {
 
 impl Config {
     pub fn stt(&self) -> SttConfig {
+        let dotenv = std::fs::read_to_string(self.agent_cwd().join(".env")).ok();
         SttConfig {
+            backend: self.stt,
             base_url: self.stt_url.clone(),
-            api_key: self
-                .stt_api_key
-                .clone()
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .filter(|k| !k.is_empty()),
+            api_key: stt::api_key(
+                &self.stt_url,
+                self.stt_api_key.as_deref(),
+                |name| std::env::var(name).ok(),
+                dotenv.as_deref(),
+            ),
             model: self.stt_model.clone(),
             language: Some(self.language.clone()).filter(|l| !l.is_empty()),
             prompt: Some(self.vocabulary.clone()).filter(|v| !v.is_empty()),
             refine_model: self.refine_model.clone().filter(|m| !m.is_empty()),
         }
+    }
+
+    pub fn session(&self) -> crate::agent::SessionConfig {
+        crate::agent::SessionConfig {
+            cwd: self.agent_cwd(),
+            permissions: self.permissions,
+            options: self.agent_options.clone(),
+            primer: Some(self.primer.clone()).filter(|p| !p.trim().is_empty()),
+        }
+    }
+
+    /// The commands that fetch data for a question.
+    pub fn context_commands(&self) -> Vec<String> {
+        self.context
+            .iter()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect()
     }
 
     pub fn agent_cwd(&self) -> PathBuf {
@@ -118,6 +209,13 @@ impl Config {
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         std::path::absolute(&cwd).unwrap_or(cwd)
+    }
+}
+
+fn parse_option(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((id, value)) if !id.is_empty() && !value.is_empty() => Ok((id.into(), value.into())),
+        _ => Err("expected id=value".into()),
     }
 }
 
@@ -189,9 +287,15 @@ mod tests {
         assert_eq!(c.speaker, 3);
         assert_eq!(c.speed, 1.2);
         assert_eq!(c.hotkey, "F9");
-        assert!(c.prompt.contains("{text}"));
+        assert!(c.prompt.contains("{text}") && c.prompt.contains("{context}"));
+        assert_eq!(c.context_commands()[0], "vr brief");
+        assert_eq!(c.context_commands().len(), 4);
+        assert!(c.agent_options.is_empty());
         let stt = c.stt();
-        assert_eq!(stt.model, "gpt-4o-mini-transcribe");
+        assert_eq!(stt.model, "openai/gpt-transcribe");
+        assert_eq!(stt.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(stt.backend, SttBackend::Api);
+        assert!(!c.tray);
         assert_eq!(stt.language.as_deref(), Some("ja"));
         assert_eq!(stt.refine_model, None);
     }
@@ -214,6 +318,49 @@ mod tests {
         assert_eq!(stt.prompt, None);
         assert_eq!(stt.refine_model, None);
         assert_eq!(stt.api_key.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn key_comes_from_dotenv_in_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "VR_TEST=1\nOPENAI_API_KEY=k\n").unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let c = Config::parse_from(["vr-radio", "--cwd", &cwd, "--stt-api-key", "given"]);
+        assert_eq!(c.stt().api_key.as_deref(), Some("given"));
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            let mut c = Config::parse_from(["vr-radio", "--cwd", &cwd]);
+            c.stt_api_key = None;
+            c.stt_url = "https://api.openai.com/v1".into();
+            assert_eq!(c.stt().api_key.as_deref(), Some("k"));
+        }
+    }
+
+    #[test]
+    fn context_and_agent_options() {
+        let c = Config::parse_from([
+            "vr-radio",
+            "--context",
+            "vr fuel",
+            "--context",
+            "vr gap",
+            "--agent-option",
+            "model=haiku",
+            "--agent-option",
+            "effort=low",
+        ]);
+        assert_eq!(c.context_commands(), ["vr fuel", "vr gap"]);
+        assert_eq!(
+            c.agent_options,
+            [
+                ("model".to_string(), "haiku".to_string()),
+                ("effort".to_string(), "low".to_string())
+            ]
+        );
+        let none = Config::parse_from(["vr-radio", "--context", ""]);
+        assert!(none.context_commands().is_empty());
+        for bad in ["model", "=x", "model="] {
+            assert!(Config::try_parse_from(["vr-radio", "--agent-option", bad]).is_err());
+        }
     }
 
     #[test]

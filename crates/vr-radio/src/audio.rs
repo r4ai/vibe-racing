@@ -42,6 +42,8 @@ pub trait Recorder: Send + Sync + 'static {
     fn stop(&self) -> Recording;
     /// Input level (RMS, 0.0..=1.0) of the last few milliseconds.
     fn level(&self) -> f32;
+    /// What was recorded so far, from the given sample on.
+    fn peek(&self, from: usize) -> Recording;
 }
 
 pub trait Output: Send + Sync + 'static {
@@ -178,6 +180,14 @@ impl Recorder for Mic {
         }
     }
 
+    fn peek(&self, from: usize) -> Recording {
+        let buf = self.shared.buf.lock().unwrap();
+        Recording {
+            samples: buf.get(from..).unwrap_or_default().to_vec(),
+            rate: self.shared.rate.load(Ordering::Relaxed),
+        }
+    }
+
     fn level(&self) -> f32 {
         f32::from_bits(self.shared.level.load(Ordering::Relaxed))
     }
@@ -191,6 +201,10 @@ impl Recorder for NoMic {
     fn stop(&self) -> Recording {
         Recording::default()
     }
+    fn peek(&self, _: usize) -> Recording {
+        Recording::default()
+    }
+
     fn level(&self) -> f32 {
         0.0
     }

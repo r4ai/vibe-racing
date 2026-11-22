@@ -7,12 +7,13 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme
 use shadcn_iced::button::{self, button, icon_button};
 use shadcn_iced::prelude::*;
 use shadcn_iced::trace::{self, trace, trace_line};
-use shadcn_iced::typography::{muted_text, small};
+use shadcn_iced::typography::muted_text;
 
-use super::{AgentStatus, App, HOTKEY, Message, Phase, SCROLLER, TurnView, latency};
+use super::{AgentChoice, AgentStatus, App, Capture, Message, Phase, SCROLLER, TurnView, latency};
 use crate::agent::ToolState;
 use crate::chrome;
 use crate::engine::Outcome;
+use crate::stt::{self, SttBackend};
 
 const CONSOLE_WIDTH: f32 = 288.0;
 const LOG_PADDING: f32 = 24.0;
@@ -53,7 +54,7 @@ impl App {
         tab_order(
             sheet(container(page).style(hairline_bottom), self.settings_open)
                 .title("設定")
-                .description("読み上げと接続先")
+                .description("声・エージェント・操作")
                 .content(self.settings())
                 .on_close(Message::Settings(false)),
         )
@@ -205,6 +206,10 @@ impl App {
                 .into(),
             None => muted("ホットキーは使えません", 12.0).into(),
         };
+        let mut keys = column![hotkey].spacing(6).align_x(Alignment::Center);
+        if let Some(wheel) = &self.settings.wheel {
+            keys = keys.push(muted(wheel.to_string(), 12.0));
+        }
 
         let mut info = column![].spacing(6);
         let has_info = self.voice.is_some() || self.turns.iter().any(|t| t.audio_ms.is_some());
@@ -223,7 +228,7 @@ impl App {
             Space::new().height(Length::FillPortion(1)),
             state,
             Space::new().height(Length::FillPortion(1)),
-            column![ptt, stop, container(hotkey).center_x(Length::Fill)].spacing(8),
+            column![ptt, stop, container(keys).center_x(Length::Fill)].spacing(8),
         ]
         .spacing(20);
         if has_info {
@@ -360,47 +365,176 @@ impl App {
     }
 
     pub(super) fn settings(&self) -> Element<'_, Message> {
-        let cfg = super::CONFIG.get();
         let voice: Element<'_, Message> = if self.voices.is_empty() {
-            muted_text("VOICEVOX に接続できません").into()
+            muted_text(format!(
+                "VOICEVOX に接続できません（{}）",
+                self.config.voicevox_url
+            ))
+            .into()
         } else {
-            speaker_select(&self.voices, self.voice.clone())
+            column![
+                speaker_select(&self.voices, self.voice.clone()),
+                button(if self.previewing && self.speaking {
+                    "再生中…"
+                } else {
+                    "試聴"
+                })
+                .icon(lucide::VOLUME_2)
+                .variant(button::Variant::Outline)
+                .size(button::Size::Sm)
+                .on_press_maybe(self.voice.as_ref().map(|_| Message::Preview)),
+            ]
+            .spacing(8)
+            .into()
         };
-        let hotkey = match HOTKEY.get() {
-            Some(Ok(key)) => format!("{key}（押している間録音）"),
-            Some(Err(e)) => format!("無効: {e}"),
-            None => "未設定".into(),
-        };
-        let info = |label: &'static str, value: String| {
-            let value = if value.is_empty() {
-                "未設定".into()
-            } else {
-                value
-            };
-            column![small(label), muted_text(value)].spacing(2)
-        };
-        column![
+        let content = column![
             switch(!self.muted)
                 .label("回答を読み上げる")
                 .on_toggle(|on| Message::Muted(!on)),
             field("話者", voice),
             separator(),
-            info("ホットキー", hotkey),
-            info(
-                "エージェント",
-                cfg.map(|c| c.agent.clone()).unwrap_or_default()
-            ),
-            info(
-                "文字起こし",
-                cfg.map(|c| format!("{} · {}", c.stt_model, c.stt_url))
-                    .unwrap_or_default()
-            ),
-            info(
-                "VOICEVOX",
-                cfg.map(|c| c.voicevox_url.clone()).unwrap_or_default()
-            ),
+            field("エージェント", self.agent_settings()),
+            field("文字起こし", self.stt_settings()),
+            separator(),
+            field("押して話すキー", self.key_settings()),
+            field("ハンドルのボタン", self.wheel_settings()),
+            separator(),
+            self.resident_settings(),
         ]
         .spacing(16)
+        .padding(Padding::new(2.0).right(12));
+        iced::widget::scrollable(content)
+            .height(Length::Fill)
+            .direction(iced::widget::scrollable::Direction::Vertical(
+                shadcn_iced::scroll_area::scrollbar(),
+            ))
+            .style(shadcn_iced::scroll_area::style)
+            .into()
+    }
+
+    fn agent_settings(&self) -> Element<'_, Message> {
+        let connected = self.agent_draft.trim() == self.config.agent;
+        let label = match &self.agent {
+            AgentStatus::Starting if connected => "接続中…",
+            _ if connected => "再接続",
+            _ => "接続",
+        };
+        let pick = row![
+            select(Some(self.agent_choice), Message::AgentChoice)
+                .options(AgentChoice::ALL)
+                .width(Length::Fill),
+            button(label).on_press_maybe(
+                (self.engine.is_some() && !self.agent_draft.trim().is_empty())
+                    .then_some(Message::Connect)
+            ),
+        ]
+        .spacing(8);
+        let status = match &self.agent {
+            AgentStatus::Starting => "起動中".to_string(),
+            AgentStatus::Ready(name) => format!("接続済み: {name}"),
+            AgentStatus::Closed(e) => format!("停止: {e}"),
+        };
+        let mut col = column![pick].spacing(8);
+        if self.agent_choice == AgentChoice::Custom {
+            col = col.push(
+                input("ACP アダプタの起動コマンド", &self.agent_draft)
+                    .on_input(Message::AgentDraft)
+                    .on_submit(Message::Connect),
+            );
+        }
+        col.push(muted(status, 12.0)).into()
+    }
+
+    fn stt_settings(&self) -> Element<'_, Message> {
+        let note = match self.config.stt {
+            SttBackend::Windows => {
+                "キー不要・通信なし。レース用語の精度は API より低めです".to_string()
+            }
+            SttBackend::Api if !self.has_stt_key && stt::is_openrouter(&self.config.stt_url) => {
+                "API キーがありません（環境変数か .env の OPENROUTER_API_KEY）".to_string()
+            }
+            SttBackend::Api => self.config.stt_url.clone(),
+        };
+        column![
+            select(Some(self.stt_choice()), Message::Stt)
+                .options(self.stt_choices())
+                .width(Length::Fill),
+            muted(note, 12.0),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    /// The current assignment, and the button that waits for a new one.
+    fn assign_row<'a>(
+        &self,
+        current: String,
+        waiting: &'static str,
+        capture: Capture,
+    ) -> iced::widget::Row<'a, Message> {
+        let active = self.capture == capture;
+        let (label, next) = if active {
+            ("やめる", Capture::None)
+        } else {
+            ("割り当て", capture)
+        };
+        row![
+            container(text(if active { waiting.to_string() } else { current }).size(14))
+                .width(Length::Fill),
+            button(label)
+                .variant(button::Variant::Outline)
+                .size(button::Size::Sm)
+                .on_press(Message::Capture(next)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+    }
+
+    fn key_settings(&self) -> Element<'_, Message> {
+        let current = match &self.hotkey {
+            Some(Ok(key)) => key.clone(),
+            Some(Err(e)) => format!("無効: {e}"),
+            None => "未設定".into(),
+        };
+        let mut col =
+            column![self.assign_row(current, "キーを押してください（Esc で中止）", Capture::Key)]
+                .spacing(6);
+        if let Some(hint) = self.capture_hint {
+            col = col.push(muted(hint, 12.0));
+        }
+        col.into()
+    }
+
+    fn wheel_settings(&self) -> Element<'_, Message> {
+        let current = match &self.settings.wheel {
+            Some(b) => b.to_string(),
+            None => "未設定".into(),
+        };
+        let mut row = self.assign_row(current, "ボタンを押してください", Capture::Wheel);
+        if self.settings.wheel.is_some() && self.capture != Capture::Wheel {
+            row = row.push(
+                icon_button(lucide::X)
+                    .variant(button::Variant::Ghost)
+                    .size(button::Size::IconSm)
+                    .on_press(Message::ClearWheel),
+            );
+        }
+        row.into()
+    }
+
+    fn resident_settings(&self) -> Element<'_, Message> {
+        if !crate::resident::SUPPORTED {
+            return muted("常駐は Windows で使えます", 12.0).into();
+        }
+        column![
+            switch(self.settings.close_to_tray)
+                .label("閉じてもトレイに常駐する")
+                .on_toggle(Message::CloseToTray),
+            switch(self.starts_with_windows)
+                .label("Windows の起動時にトレイで開始する")
+                .on_toggle(Message::StartWithWindows),
+        ]
+        .spacing(12)
         .into()
     }
 }

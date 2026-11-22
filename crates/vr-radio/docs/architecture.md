@@ -7,7 +7,9 @@
 
 ### 設計目標
 
-- **初回音声までの短さ**: 返答の最初の 1 文が揃った時点で合成を開始
+- **初回音声までの短さ**: 返答の最初の句が揃った時点で合成を開始
+- **待たせない準備**: 規則とスキルは接続時に読ませ、データは文字起こしと同時に取得して質問に添付
+- **話している間の文字起こし**: 間（ま）で区切り、ボタンを離す前に開始
 - **常駐セッション**: エージェントのプロセスと ACP セッションを起動時に 1 回だけ作成
 - **割り込み**: 再度話し始めると読み上げとエージェントの処理を中断
 - **ハードウェア無しで検証可能**: 録音・文字起こし・合成・再生・エージェントは trait で差し替え
@@ -39,8 +41,8 @@ flowchart LR
         Speak -->|WAV| Out
         Engine <-->|AgentCmd / AgentEvent| Session
     end
-    Hotkey["グローバルホットキー"]
-    STT["文字起こし API<br/>OpenAI 互換"]
+    Hotkey["グローバルホットキー<br/>ハンドルのボタン"]
+    STT["文字起こし<br/>OpenAI 互換 API / Windows 標準"]
     Agent["Claude Code / Codex<br/>ACP アダプタ"]
     VV["VOICEVOX engine"]
 
@@ -68,7 +70,11 @@ flowchart LR
 | [`src/agent.rs`](../src/agent.rs)       | ACP クライアント、実行中ターンの取消と次の送信 |
 | [`src/policy.rs`](../src/policy.rs)     | 権限要求の自動応答                             |
 | [`src/text.rs`](../src/text.rs)         | 文分割、Markdown 除去                          |
-| [`src/stt.rs`](../src/stt.rs)           | 文字起こしと任意の LLM 校正                    |
+| [`src/stt.rs`](../src/stt.rs)           | 文字起こし API、キーの選択、任意の LLM 校正    |
+| [`src/early.rs`](../src/early.rs)       | 録音中の文字起こし（区切りと推測）             |
+| [`src/vad.rs`](../src/vad.rs)           | 録音中の間（ま）の検出                         |
+| [`src/context.rs`](../src/context.rs)   | 質問に添付するデータの取得（`vr brief` 等）    |
+| [`src/sapi.rs`](../src/sapi.rs)         | Windows 標準の文字起こし（常駐 PowerShell）    |
 | [`src/voicevox.rs`](../src/voicevox.rs) | 話者一覧、音声合成                             |
 | [`src/audio.rs`](../src/audio.rs)       | マイク（cpal）・スピーカー（rodio）            |
 | [`src/wav.rs`](../src/wav.rs)           | ダウンミックス、リサンプル、WAV 符号化         |
@@ -77,12 +83,18 @@ flowchart LR
 | [`src/fonts.rs`](../src/fonts.rs)       | 同梱フォント（`assets/fonts/`）                |
 | [`src/chrome.rs`](../src/chrome.rs)     | ウィンドウ枠（Windows のヒットテスト）         |
 | [`src/config.rs`](../src/config.rs)     | 引数・環境変数、Windows の `npx.cmd` 解決      |
+| [`src/settings.rs`](../src/settings.rs) | 設定画面の選択の保存                           |
+| [`src/hotkey.rs`](../src/hotkey.rs)     | グローバルキーの登録と割り当て                 |
+| [`src/wheel.rs`](../src/wheel.rs)       | ハンドルのボタン（Raw Input）                  |
+| [`src/resident.rs`](../src/resident.rs) | トレイ、自動起動、二重起動の防止               |
 
 ## 設計上の不変条件
 
-- **テレメトリ非依存**: workspace の他 crate に依存しない（`crates/vr-cli/tests/architecture.rs`）
+- **テレメトリ非依存**: workspace の他 crate に依存しない（`crates/vr-cli/tests/architecture.rs`）。データは外部コマンド（`--context`）の出力としてだけ扱う
 - **1 セッション 1 ターン**: 新しい質問は実行中のターンを `session/cancel` してから送る
 - **古いイベントの破棄**: 現在のターン以外のチャンク・ツール通知は表示も読み上げもしない
+- **キーは持ち主のサービスだけに送る**: OpenRouter には `OPENROUTER_API_KEY`、他には `OPENAI_API_KEY`。設定ファイルには保存しない
+- **終わらないターンを作らない**: 文字起こしの失敗やエージェント未接続は、そのターンを失敗で終える
 - **運転中に確認を出さない**: 権限要求は許可方針で即答。`safe` は読取・検索・取得と `vr` コマンドだけ許可し、`&` `|` `;` 等で連結したコマンドは拒否
 
 ## 主要な処理フロー
@@ -96,10 +108,10 @@ sequenceDiagram
     participant V as VOICEVOX
     D->>E: 押下（読み上げ中なら中断）
     D->>E: 解放（0.3 秒未満は無視）
-    E->>S: WAV
+    E->>S: 間（ま）までの WAV（録音中から）
+    E->>E: vr brief 等を実行（データ取得）
     S-->>E: 質問文
-    E->>A: session/prompt（テンプレートに埋め込み）
-    A->>A: vr brief 等を実行
+    E->>A: session/prompt（質問文とデータ）
     loop 返答のチャンク
         A-->>E: agent_message_chunk
         E->>V: 揃った文から順に合成
@@ -108,6 +120,8 @@ sequenceDiagram
     A-->>E: 終了（残りの文を合成）
 ```
 
+応答の速さと正確さは [vr-eval](../../vr-eval/docs/architecture.md) で測る。
+
 画面には各ターンの「認識」「初回応答」「初回音声」「完了」までの時間を表示。
 起点は録音の終了（文字入力では送信）。
 
@@ -115,13 +129,50 @@ sequenceDiagram
 
 ### 文字起こし
 
-OpenAI 互換の `/audio/transcriptions` を使い、OpenAI・Groq・ローカルの whisper サーバーを URL で切り替える。
+OpenAI 互換の `/audio/transcriptions` を使い、OpenRouter（既定）・OpenAI・Groq・ローカルの whisper サーバーを URL で切り替える。
+既定のモデルは `openai/gpt-transcribe`。
+2026-11-22 に OpenRouter で比較した結果（VOICEVOX 2 話者 × 4 文、語彙ヒント付き、逐次実行。合成音声だけの小さな比較）。
+
+| モデル                          | 中央値 | 主な誤り                                     |
+| ------------------------------- | ------ | -------------------------------------------- |
+| `openai/gpt-transcribe`         | 0.74 s | 「はいつ」→「開通」1 件                      |
+| `openai/gpt-4o-mini-transcribe` | 1.07 s | 「はいつ」→「あいつ」1 件、「周」→「週」2 件 |
+| `assemblyai/universal-3-6-pro`  | 0.44 s | 「周」→「週」「州」、語中の空白              |
+| `elevenlabs/scribe-v2`          | 0.98 s | 「はいつ」→「アイツー」、「周」→「週」2 件   |
+| `microsoft/mai-transcribe-2`    | 0.82 s | 「イエロー」を `イ**ー` と伏せ字にする       |
+| `qwen/qwen3-asr-0.6b`           | 1.03 s | 「周」→「週」4 件、「もつ」→「通」2 件       |
+| `qwen/qwen3-asr-1.7b`           | 21 s   | 0.7〜34 s とばらつき、「周」→「週」「州」    |
+
+Windows 標準は SAPI（`System.Speech`）で、API キーも通信も要らないが、レース用語の精度は低い。
+Windows PowerShell を常駐させ、WAV を 1 行の base64 で渡す。
+Windows AI API の `Microsoft.Windows.AI.Speech` は実験版で、対応言語の記載も無いため使わない。
+
 `--refine-model` を指定すると `/chat/completions` でレース用語を校正する（1 往復増える）。
 
 ### エージェント
 
-`--agent` は ACP アダプタの起動コマンド。既定は公開から 7 日以上経った版に固定した `@agentclientprotocol/claude-agent-acp`。
+`--agent` は ACP アダプタの起動コマンド。設定から切り替えると、古いセッションのタスクを打ち切ってプロセスを終わらせ、新しいセッションを開く。既定は公開から 7 日以上経った版に固定した `@agentclientprotocol/claude-agent-acp`。
 エージェントが `vr` を `cargo run` で起動するとビルド待ちで遅いため、`cargo install --path crates/vr-cli` で PATH に置く。
+
+### 設定の保存
+
+設定画面の選択は `settings.json`（Windows は `%APPDATA%\vr-radio\`、`--settings` で変更）に保存。
+優先順は、引数・環境変数、設定ファイル、既定値。
+壊れた設定ファイルは無視し、上書きもしない。
+
+### 押して話す操作
+
+- グローバルキー: 文字キーは修飾キーとの組み合わせだけ割り当て可（他のアプリの入力を奪うため）
+- ハンドル: Raw Input を `RIDEV_INPUTSINK` で受け、ゲームが前面でもボタン数の制限無しに検出
+  - ハードウェア ID（VID・PID・インターフェース）で覚え、USB ポートを変えても有効
+  - 抜かれた機器のボタンは離したものとして扱う
+- 割り当て待ちの間は録音しない
+
+### 常駐
+
+- 「閉じてもトレイに常駐」を選ぶと、ウィンドウを隠すだけで待ち受けを続ける。トレイアイコンが無ければ終了
+- 自動起動は `HKCU` の `Run` に `--tray --cwd <作業ディレクトリ>` を登録
+- 2 つ目の起動は、名前付きイベントで既存のウィンドウを表示させて終了
 
 ### 画面
 

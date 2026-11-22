@@ -5,7 +5,8 @@
 # vr-radio/src/app/view.rs: layout and styling only. The states it shows
 # (Phase, TurnView, latency) are tested in app.rs; the look is reviewed with
 # `cargo run -p vr-radio --example snapshot`.
-exclude_globs = ["crates/vr-radio/src/app/view.rs"]
+# vr-radio/src/main.rs: window options and startup wiring (also outside coverage).
+exclude_globs = ["crates/vr-radio/src/app/view.rs", "crates/vr-radio/src/main.rs"]
 
 exclude_re = [
     # vr-iracing/src/shm.rs `imp`: the live Win32 mapping and its non-Windows
@@ -63,6 +64,24 @@ exclude_re = [
     'replace win32::',
     'install_native_chrome',
     'in chrome_stream',
+    # vr-radio: real controllers, tray, registry and OS key registration
+    # (needs the hardware or the desktop). `Held`, `device_key`, `capture`
+    # and the app's reactions to them are tested.
+    'raw_input::',
+    'stub::',
+    'replace (listen|bind|unbind|connect|show_window|captured_key) ',
+    'in (listen|bind|unbind|connect|show_window|captured_key)$',
+    'in wheel_stream',
+    'in resident_stream',
+    'App::close',
+    # Which event streams run is window wiring.
+    'in subscription',
+    # Equivalent on Windows (the list always offers it there); caught elsewhere.
+    'replace == with != in App::stt_choices',
+    # Pixel art of the tray icon; its shape is tested at a few points.
+    'in icon_rgba',
+    # Waits for the recognizer process; only its absence of answers differs.
+    '<impl Drop for LineProcess>',
     'in App::boot',
     'replace App::boot',
     'replace (main|ask_once) ',

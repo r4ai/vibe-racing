@@ -12,6 +12,7 @@ use iced_test::simulator::Simulator;
 use shadcn_iced::Mode;
 use vr_radio::app::{App, Message};
 use vr_radio::engine::Event;
+use vr_radio::voicevox::Voice;
 
 fn settings() -> iced::Settings {
     let mut fonts = shadcn_iced::font::all();
@@ -82,4 +83,18 @@ fn main() {
         &theme,
         Some("ずんだもん"),
     );
+
+    // As many characters as VOICEVOX has: the list is taller than the window.
+    let mut many = App::new();
+    let voices = (0..43).map(|i| Voice {
+        id: i + 3,
+        speaker: match i {
+            0 => "四国めたん".into(),
+            _ => format!("キャラクター{i}"),
+        },
+        style: "ノーマル".into(),
+    });
+    let _ = many.update(Message::Voices(Ok(voices.collect())));
+    let _ = many.update(Message::Settings(true));
+    render("settings-long-select", &many, &theme, Some("四国めたん"));
 }
