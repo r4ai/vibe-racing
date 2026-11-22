@@ -13,6 +13,7 @@
 | cargo-mutants  | 任意                                             | ミューテーションテスト     |
 
 iRacing の実機接続は Windows のみ（他 OS では `Unsupported`）。
+Linux で `vr-radio` をビルドするには ALSA の開発パッケージ（`libasound2-dev`、`pkg-config`）が必要。
 
 ## ビルドと実行
 
@@ -26,6 +27,18 @@ cargo run -q -p vr-cli -- brief --game synthetic --until 600
 
 ```powershell
 cargo run -q -p vr-cli -- serve --game synthetic --speed 10
+```
+
+音声無線を画面無しで 1 問だけ通す（VOICEVOX とエージェントが必要、マイクと文字起こしは不要）:
+
+```powershell
+cargo run -q -p vr-radio -- --ask "前との差は？"
+```
+
+画面を状態ごとに PNG へ描画する（ウィンドウ・デバイス不要）:
+
+```powershell
+$env:ICED_TEST_BACKEND = "tiny-skia"; cargo run -q -p vr-radio --example snapshot
 ```
 
 ## 整形
@@ -75,6 +88,8 @@ cargo test --workspace
 | 記録・再生      | `crates/vr-replay/tests/replay.rs`          | 往復、間引き、ペーシング、壊れた入力                             |
 | サーバー        | `crates/vr-server/tests/http.rs`            | コレクター・HTTP 全エンドポイント・SSE・discovery                |
 | CLI             | `crates/vr-cli/tests/cli.rs`                | 実バイナリを起動。`vr serve` 子プロセス経由も含む                |
+| 依存の向き      | `crates/vr-cli/tests/architecture.rs`       | `cargo metadata` の crate 間依存を許可表と照合                   |
+| 音声無線        | `crates/vr-radio/src/*.rs` 内の単体テスト   | 偽の HTTP サーバー、プロセス内の偽 ACP エージェント、偽デバイス  |
 
 CLI テストは `VR_DISCOVERY` を一時ファイルに向け、手元の `vr serve` と干渉しない。
 
@@ -90,12 +105,13 @@ CLI テストは `VR_DISCOVERY` を一時ファイルに向け、手元の `vr s
 cargo llvm-cov --workspace --summary-only
 ```
 
-主な未到達: Win32 マッピング（`crates/vr-iracing/src/shm.rs`）と Ctrl-C で終わる経路。
+主な未到達: Win32 マッピング（`crates/vr-iracing/src/shm.rs`）、音声デバイス（`crates/vr-radio/src/audio.rs`）、`vr-radio` の `main.rs`、Ctrl-C で終わる経路。
+CI はこれらを除いた行カバレッジ 90% 未満で失敗する。
 
 ## ミューテーションテスト
 
 ```powershell
-cargo mutants -p vr-engine -p vr-iracing -j 6
+cargo mutants -p vr-engine -p vr-iracing -p vr-replay -p vr-radio -j 6
 ```
 
 差分のみ:
@@ -106,6 +122,18 @@ git diff main > mutants.diff; cargo mutants --in-diff mutants.diff -j 6
 
 - 生存ミュータント: `mutants.out/missed.txt`
 - 生存したらテストを追加。等価ミュータントと実機専用の関数は `.cargo/mutants.toml` に理由付きで除外
+
+## CI
+
+`.github/workflows/ci.yml`。
+
+| ジョブ         | 内容                                                            |
+| -------------- | --------------------------------------------------------------- |
+| `test`         | fmt・clippy・テスト（Windows と Linux）                         |
+| `architecture` | crate 間依存の向き                                              |
+| `coverage`     | `cargo llvm-cov`、行 90% 未満で失敗。`lcov.info` を成果物に保存 |
+| `mutants`      | PR は差分のみ、毎週の定期実行と手動実行は全体。生存で失敗       |
+| `format`       | oxfmt                                                           |
 
 ## 記録データ
 

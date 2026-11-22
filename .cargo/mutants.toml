@@ -2,6 +2,11 @@
 # Patterns are regexes matched against the mutant name; use TOML literal
 # strings ('...') so backslashes reach the regex engine unchanged.
 
+# vr-radio/src/app/view.rs: layout and styling only. The states it shows
+# (Phase, TurnView, latency) are tested in app.rs; the look is reviewed with
+# `cargo run -p vr-radio --example snapshot`.
+exclude_globs = ["crates/vr-radio/src/app/view.rs"]
+
 exclude_re = [
     # vr-iracing/src/shm.rs `imp`: the live Win32 mapping and its non-Windows
     # stub. Only testable against a running iRacing; the parsing it feeds is
@@ -31,4 +36,37 @@ exclude_re = [
     'replace < with <= in Pacer::wait_until',
     'replace > with >= in Pacer::wait_until',
     'replace < with <= in Recorder::record',
+    # vr-radio hardware and window glue: the default microphone / output device
+    # threads, the global hotkey poller and the code that wires real devices
+    # into the engine. Exercised by `vr-radio --ask`; the engine they feed is
+    # tested with fakes (engine.rs, agent.rs).
+    'in Mic::open',
+    'replace capture ',
+    'in capture',
+    'replace open_input ',
+    'in open_input',
+    '<impl Drop for Mic>',
+    '<impl Recorder for Mic>',
+    'in Speakers::',
+    'replace Speakers::',
+    '<impl Output for Speakers>',
+    '<impl Output for Silent>',
+    'replace start_engine ',
+    'in start_engine',
+    'replace subscription ',
+    'in engine_stream',
+    'in hotkey_stream',
+    # vr-radio/src/chrome.rs: the Win32 window subclass and its installation
+    # act only inside a real window (checked by hand: snap layouts, drag,
+    # maximize, hit tests via WM_NCHITTEST). `hit_test` itself is tested.
+    'in win32::',
+    'replace win32::',
+    'install_native_chrome',
+    'in chrome_stream',
+    'in App::boot',
+    'replace App::boot',
+    'replace (main|ask_once) ',
+    'in (main|ask_once)$',
+    # Equivalent: NoMic::stop already returns the default recording.
+    'replace <impl Recorder for NoMic>::stop -> Recording with Default::default\(\)',
 ]

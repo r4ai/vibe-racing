@@ -60,6 +60,13 @@ flowchart LR
 - データの出所と鮮度（`live`・`oneshot`、`age_ms`）
 - 終了コード: ゲーム未接続 `3`、対象無し `4`
 
+### 音声無線（`vr-radio`）
+
+- 押している間だけ録音（画面のボタン、またはハンドルのボタンに割り当てたホットキー）
+- 文字起こし → ACP でエージェントに質問 → 返答を文ごとに VOICEVOX で読み上げ
+- 話し始めると読み上げとエージェントを中断
+- 認識・初回応答・初回音声までの時間を表示
+
 ### 記録と再生
 
 - NDJSON 記録（`vr record`、`vr serve --record`）
@@ -74,6 +81,7 @@ flowchart LR
 | Rust                     | stable（1.88 以上） | [rustup](https://rustup.rs/) |
 | iRacing                  | 現行版              | 実走時のみ。Windows 専用     |
 | Claude Code または Codex | 現行版              |                              |
+| VOICEVOX                 | 0.25 以上           | 音声無線のみ                 |
 
 ### インストール
 
@@ -105,6 +113,19 @@ vr serve
 
 あとはエージェントに「燃料あと何周？」などと聞く。
 接続の確認は `vr doctor`。
+
+### 声で聞く
+
+[VOICEVOX](https://voicevox.hiroshiba.jp/) を起動し、文字起こし API のキーを設定して起動する。
+
+```powershell
+$env:OPENAI_API_KEY = "<key>"; cargo run --release -p vr-radio
+```
+
+- F9 を押している間に話す（`--hotkey` で変更）
+- Codex: `--agent "npx -y @agentclientprotocol/codex-acp@2.6.0"`
+- 画面無しの動作確認: `--ask "前との差は？"`
+- 設定一覧: `vr-radio --help`
 
 ## 設定と連携
 

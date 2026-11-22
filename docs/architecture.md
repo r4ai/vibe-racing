@@ -4,6 +4,7 @@
 
 ゲームのテレメトリを解析し、エージェントの無線回答に必要な情報を返す CLI `vr`。
 ゲーム固有の処理は入力アダプタに限定し、問い合わせは `RaceApi` に一本化。
+音声無線アプリ `vr-radio` は、声をエージェントに渡し、返答を読み上げる。
 
 ### 基本モデル
 
@@ -75,6 +76,7 @@ flowchart LR
         Http -->|read| St
         Col -->|broadcast| Http
     end
+    Radio["vr-radio<br/>（音声無線）"]
     Agent["Claude Code / Codex"]
     Vr["vr コマンド<br/>（短命プロセス）"]
     Disc[("server.json")]
@@ -83,6 +85,7 @@ flowchart LR
     Game -->|60 Hz| Col
     Col -.->|--record| Rec
     Http -.->|起動時に書込| Disc
+    Radio -->|ACP stdio| Agent
     Agent -->|実行| Vr
     Vr -.->|URL 取得| Disc
     Vr -->|GET /v1/*| Http
@@ -95,6 +98,7 @@ flowchart LR
 | コレクタースレッド | `std::thread` | ソースの読取と `RaceState` 更新、切断時の再接続   | `vr serve` と同じ      |
 | HTTP サーバー      | tokio + axum  | `RaceApi` の JSON 公開、SSE 配信                  | `vr serve` と同じ      |
 | `vr <query>`       | 短命プロセス  | サーバーへの問い合わせ<br/>またはワンショット読取 | 1 コマンド             |
+| `vr-radio`         | GUI プロセス  | 音声入力・エージェント呼出・読み上げ              | 利用者が閉じるまで     |
 
 ### 境界と永続化
 
@@ -126,9 +130,12 @@ flowchart BT
     cli --> iracing
     cli --> replay
     cli --> core
+    radio[vr-radio]
 ```
 
 - `vr-server` → `vr-replay` は記録（`Recorder`）用
+- `vr-radio` は workspace の crate に依存しない。テレメトリはエージェントが `vr` で取得
+- 許可する依存は [`crates/vr-cli/tests/architecture.rs`](../crates/vr-cli/tests/architecture.rs) が `cargo metadata` で検査（dev-dependencies は対象外）
 
 ### 構成要素の対応
 
@@ -144,6 +151,7 @@ flowchart BT
 | 配信   | [`crates/vr-server`](../crates/vr-server)                             | コレクター、HTTP・SSE、discovery                                      | 低       |
 | CLI    | [`crates/vr-cli`](../crates/vr-cli)                                   | コマンド定義、ソース登録、バックエンド選択、`doctor`、スキル同梱      | 中       |
 | スキル | [`skills/race-engineer`](../skills/race-engineer)                     | エージェントの手順と返答規範（`vr` バイナリに埋め込み）               | 中       |
+| 音声   | [`crates/vr-radio`](../crates/vr-radio)                               | 録音・文字起こし・ACP クライアント・VOICEVOX 読み上げ・画面           | 中       |
 
 ## 設計上の不変条件
 
@@ -154,6 +162,7 @@ flowchart BT
 - **共有メモリの整合性**: バッファ複製後に tick を再確認し、変化していれば破棄
 - **ローカル限定**: HTTP は `127.0.0.1` のみ
 - **スキルの正本**: `skills/race-engineer/`。配布は `vr skill install` のみ
+- **依存の向き**: 上図以外の crate 間依存は禁止。新しい crate は規則と本文書の更新が必要
 
 ## 主要な処理フロー
 
@@ -246,3 +255,4 @@ iRacing はドライバー名等を引用符なしで出力するため、`: ` �
 | [development.md](development.md)                                                              | ビルド・テスト・カバレッジ・ミューテーションテスト・記録の扱い |
 | [skills/race-engineer/references/commands.md](../skills/race-engineer/references/commands.md) | コマンド・JSON フィールド・HTTP エンドポイントの仕様           |
 | [skills/race-engineer/SKILL.md](../skills/race-engineer/SKILL.md)                             | エージェントの手順と返答規範                                   |
+| [crates/vr-radio/docs/architecture.md](../crates/vr-radio/docs/architecture.md)               | 音声無線のパイプライン・遅延・割り込み                         |
