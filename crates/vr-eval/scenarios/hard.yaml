@@ -1,0 +1,210 @@
+# Hard set: realistic races (tyre wear, uneven laps, mistakes, other cars'
+# stops, rain) and a driver who is upset, rambles or is half heard. Used
+# while changing the radio, like dev. See docs/architecture.md for the fields.
+# `typed` is what a transcriber made of the call; text mode types it, the
+# judges read `say` (what the driver meant).
+
+- id: rain-coming
+  world:
+    {
+      start_s: 1130,
+      laps: 25,
+      fuel_start_l: 40,
+      player_pit_lap: 15,
+      rival_pit_lap: 11,
+      tyre_deg_s: 0.08,
+      lap_noise_s: 0.5,
+      mistake_one_in: 12,
+      stops: [[0, 13], [5, 10], [8, 12]],
+      rain: [960, 1500],
+      yellow: null,
+      incident_at: null,
+    }
+  calls:
+    - id: slippery
+      say: やばい、滑る滑る！これ雨だよな？どんどん酷くなってる？ペースどれくらい落ちてる？
+      typed: やばいすべるすべる これ雨だよな どんどんひどくなってる ペースどれくらい落ちてる
+      voice: vv:13
+      behavior: calm
+      points:
+        - 路面が濡れてきていること（weather の値）と、濡れが進んでいるか
+        - 直近のラップタイムがどれだけ落ちたか（秒）
+    - id: rain-plan
+      say: で、どうする？このまま走る？早めに入る？燃料と残り周回も見て決めてくれ
+      typed: でどうする このまま走る 早めにはいる 燃料と残り周回も見て決めてくれ
+      voice: vv:13
+      facts: [fuel_laps]
+      points:
+        - 燃料があと何周もつかと残り周回の比較
+        - データに基づく判断（タイヤの種類などデータに無いことを断定しない）
+    - id: rival-pitted
+      say: 前のやつ、ピット入った？
+      typed: 前のやつピットはいった
+      voice: vv:13
+      points: [前の車（またはさっきまで前にいた車）がピットに入ったかどうか（events と矛盾しない）]
+
+- id: undercut
+  world:
+    {
+      start_s: 860,
+      laps: 24,
+      fuel_start_l: 34,
+      player_pit_lap: 12,
+      rival_pit_lap: 9,
+      tyre_deg_s: 0.15,
+      lap_noise_s: 0.45,
+      mistake_one_in: 15,
+      stops: [[1, 10], [6, 11]],
+      yellow: null,
+      incident_at: null,
+    }
+  calls:
+    - id: tyres-going
+      say: タイヤ終わってきてる気がする、ラップどれくらい落ちてる？
+      typed: タイヤおわってきてる気がする らっぷどれくらいおちてる
+      voice: vv:2
+      facts: [last_lap]
+      points: [直近のラップタイムと、スティント序盤からの落ち幅（秒）]
+    - id: box-or-stay
+      say: 前が入ったなら、こっちも次で入るべき？それとも引っ張る？
+      typed: 前が入ったならこっちも次ではいるべき それとも引っ張る
+      voice: vv:2
+      facts: [fuel_laps]
+      points:
+        - 燃料が何周もつか（引っ張れる上限）
+        - ラップの落ち幅やギャップなど実データを根拠にした推奨
+    - id: garbled-gap
+      say: 前との差、今どのくらい？
+      typed: まえとの さ 、 さ い まどのくらい
+      voice: vv:2
+      facts: [gap_ahead]
+      points: [前の車との差（秒）]
+
+- id: fuel-save
+  world:
+    {
+      start_s: 1300,
+      laps: 30,
+      fuel_start_l: 47,
+      fuel_per_lap_l: 2.9,
+      player_pit_lap: null,
+      rival_pit_lap: 12,
+      tyre_deg_s: 0.06,
+      lap_noise_s: 0.5,
+      mistake_one_in: 12,
+      stops: [[0, 14], [4, 15]],
+      yellow: null,
+      incident_at: null,
+    }
+  calls:
+    - id: save-target
+      say: これ燃料足りる？足りないなら1周何リッターに抑えればいい？
+      typed: これ燃料たりる たりないなら1周なんリッターにおさえればいい
+      voice: gemini:Kore
+      facts: [fuel_laps]
+      points:
+        - このままでは足りるかどうか（何周分足りないか、または何リットル）
+        - ゴールまで持たせるための 1 周あたりの消費の目標（残量 ÷ 残り周回）
+    - id: frustrated
+      say: くそっ、全然ペース上がんねえ！なんでこんな遅いんだよ！
+      typed: くそっ ぜんぜんペースあがんねえ なんでこんなおそいんだよ
+      voice: gemini:Charon
+      noise: { snr_db: 12 }
+      behavior: calm
+      facts: [last_lap]
+      points:
+        - 直近のラップタイム（または平均との差）を実データで伝える
+        - 遅い理由として、データで裏付けられること（タイヤの劣化、燃料の節約など）か、分からないなら分からないと言う
+    - id: rambling-laps
+      say: あのさ、えっと、燃料このまま……いや違う、残り何周だっけ？
+      typed: あのさ えっと ねんりょう このまま いや ちがう のこり なんしゅう だっけ
+      voice: gemini:Kore
+      facts: [laps_left]
+      points: [残り周回数（燃料の話ではない）]
+
+- id: under-pressure
+  world:
+    {
+      start_s: 1480,
+      laps: 22,
+      fuel_start_l: 30,
+      player_pit_lap: 9,
+      rival_pit_lap: 8,
+      tyre_deg_s: 0.12,
+      lap_noise_s: 0.5,
+      mistake_one_in: 8,
+      stops: [[4, 13], [2, 7]],
+      yellow: null,
+      incident_at: null,
+    }
+  calls:
+    - id: mistake-panic
+      say: あー！ミスった！完全にやった、後ろ来てる来てる！
+      typed: あーミスった 完全にやった うしろきてるきてる
+      voice: vv:13
+      noise: { snr_db: 10 }
+      behavior: calm
+      facts: [gap_behind]
+      points:
+        - 後ろとの差（秒）
+        - 次に集中すべき具体的なこと（守り方や、差の推移に基づく見通し）
+    - id: stutter-behind
+      say: 後ろとの差は？
+      typed: うしろ うしろの さ さは さは
+      voice: vv:13
+      facts: [gap_behind]
+      points: [後ろの車との差（秒）]
+    - id: hold-on
+      say: あと何周守ればいい？今のペースだと後ろに追いつかれる？
+      typed: あとなんしゅうまもればいい いまのペースだと後ろに追いつかれる
+      voice: vv:13
+      facts: [laps_left, gap_behind]
+      points:
+        - 残り周回数
+        - 後ろとの差と毎周の詰まり方から、ゴールまでに追いつかれるかの見通し
+
+- id: blackout
+  world: { start_s: 900, stale_after_start: true, tyre_deg_s: 0.1, lap_noise_s: 0.5 }
+  calls:
+    - id: radio-check-angry
+      say: おい！聞こえてる？！前どうなってんだよ、早く教えろ！
+      typed: おい 聞こえてる 前どうなってんだよ 早く教えろ
+      voice: gemini:Charon
+      noise: { snr_db: 10 }
+      behavior: admit_unknown
+      points:
+        - データが途切れていて今の値は分からないことを伝え、古い値を現在値として言わない
+        - 動揺に短く応じる（長い説明はしない）
+
+- id: half-heard
+  world:
+    {
+      start_s: 700,
+      laps: 20,
+      tyre_deg_s: 0.1,
+      lap_noise_s: 0.5,
+      mistake_one_in: 10,
+      stops: [[1, 6]],
+      incident_at: null,
+    }
+  calls:
+    - id: fragments
+      say: ピットは何周目に入る予定？あと前の人の名前
+      typed: ピット なんしゅうめ はいる よてい 、 あと まえ の ひと の なまえ
+      voice: vv:2
+      facts: [name_ahead]
+      points:
+        - 自車のピット予定（データに予定が無ければ、燃料から見た入るべき周、または分からないこと）
+        - 前の車のドライバー名
+    - id: misheard-week
+      say: 燃料あと何周もつ？
+      typed: ねんりょう あと なんしゅう もつ 何週
+      voice: vv:2
+      facts: [fuel_laps]
+      points: [燃料があと何周もつか]
+    - id: wrong-word
+      say: ボックス、ボックス、今週入る？
+      typed: ボクシング ボクシング 今週はいる
+      voice: vv:2
+      behavior: answer_or_ask
+      points: [今の周でピットに入るべきかの判断（燃料など実データから）、または短く聞き返す]

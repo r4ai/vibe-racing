@@ -185,6 +185,10 @@ struct LoggedSynth {
 }
 
 impl Synth for LoggedSynth {
+    fn warm_up(&self, speaker: u32) -> Result<()> {
+        self.inner.warm_up(speaker)
+    }
+
     fn synthesize(&self, text: &str, speaker: u32) -> Result<Vec<u8>> {
         let wav = self.inner.synthesize(text, speaker)?;
         self.texts.lock().unwrap().insert(key(&wav), text.into());
@@ -390,7 +394,7 @@ pub struct Runner {
 
 /// Calls of a stint in text mode: a call without words has nothing to type.
 pub fn typed_calls(stint: &Stint) -> impl Iterator<Item = &Call> {
-    stint.calls.iter().filter(|c| !c.words().is_empty())
+    stint.calls.iter().filter(|c| !c.typed_words().is_empty())
 }
 
 impl Runner {
@@ -472,7 +476,7 @@ impl Runner {
         let mut seen = Observed::default();
         let mut question_end = match voices {
             Some((main, _)) => radio.say(main, &mut seen).await?,
-            None => radio.type_in(&call.words()),
+            None => radio.type_in(&call.typed_words()),
         };
         let (mut said, mut facts, mut points) =
             (call.words(), call.facts.clone(), call.points.clone());

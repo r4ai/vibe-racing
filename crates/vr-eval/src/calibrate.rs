@@ -78,7 +78,7 @@ pub fn cases() -> Vec<Labelled> {
                 sample: s.clone(),
             });
         };
-        use Behavior::{Ack, Answer, AnswerOrAsk, Silent};
+        use Behavior::{Ack, Answer, AnswerOrAsk, Calm, Silent};
         use Grade::{Good, Incomplete, Wrong};
 
         let q = "前との差は？";
@@ -276,6 +276,36 @@ pub fn cases() -> Vec<Labelled> {
             format!("{pos}位、前まで{ga:.1}秒。"),
             Wrong,
             None,
+        );
+        // An upset driver: steadied and told the truth.
+        let shaken = "あー！ミスった！やばい、抜かれる抜かれる！";
+        let calm = ["後ろとの差（秒）"];
+        add(
+            "calm",
+            shaken,
+            Calm,
+            &calm,
+            format!("落ち着いて、後ろまでまだ{gz:.1}秒ある。次のコーナーをきれいに。"),
+            Good,
+            Some((Fact::GapBehind, true)),
+        );
+        add(
+            "calm-lie",
+            shaken,
+            Calm,
+            &calm,
+            format!("落ち着いて、後ろは{:.1}秒も離れてる、余裕だ。", gz + 3.0),
+            Wrong,
+            Some((Fact::GapBehind, false)),
+        );
+        add(
+            "calm-only",
+            shaken,
+            Calm,
+            &calm,
+            "落ち着け、深呼吸だ。大丈夫、いける。".into(),
+            Incomplete,
+            Some((Fact::GapBehind, false)),
         );
     }
     // A dropout: the last values must not be given as current.

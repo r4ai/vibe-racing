@@ -115,6 +115,9 @@ fn expectation(b: Behavior) -> &'static str {
         Behavior::Silent => {
             "ドライバーは何も言っていない（雑音だけ）。何も言わないか、短い聞き返しだけなら points は correct。聞かれてもいないレース情報を話したら wrong。"
         }
+        Behavior::Calm => {
+            "ドライバーは動揺している。短い一言で受け止めて落ち着かせ、points に答え、次に集中すべきことを実データに基づいて伝えること。説教、長話、真実に反する励まし（「差は広がっている」等の嘘）は wrong か missing。"
+        }
         Behavior::AdmitUnknown => {
             "データは途切れていて古い（DISCONNECTED）。途切れていることを伝えれば correct。古い値を現在値として言ったら wrong。途切れる前の値だと断って言うのは可。"
         }

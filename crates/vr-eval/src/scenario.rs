@@ -33,6 +33,14 @@ pub struct WorldSpec {
     pub yellow: Option<(f64, f64)>,
     /// The game disconnects at `start_s`; the last data ages.
     pub stale_after_start: bool,
+    /// Realism of the race (see `SynthConfig`).
+    pub tyre_deg_s: f64,
+    pub lap_noise_s: f64,
+    pub mistake_one_in: u32,
+    pub stops: Vec<(usize, i32)>,
+    pub rain: Option<(f64, f64)>,
+    pub rain_loss_s: f64,
+    pub incident_at: Option<f64>,
 }
 
 impl Default for WorldSpec {
@@ -49,6 +57,13 @@ impl Default for WorldSpec {
             rival_pit_lap: c.rival_pit_lap,
             yellow: c.yellow,
             stale_after_start: false,
+            tyre_deg_s: c.tyre_deg_s,
+            lap_noise_s: c.lap_noise_s,
+            mistake_one_in: c.mistake_one_in,
+            stops: c.stops,
+            rain: c.rain,
+            rain_loss_s: c.rain_loss_s,
+            incident_at: c.incident_at,
         }
     }
 }
@@ -64,6 +79,13 @@ impl WorldSpec {
             player_pit_lap: self.player_pit_lap,
             rival_pit_lap: self.rival_pit_lap,
             yellow: self.yellow,
+            tyre_deg_s: self.tyre_deg_s,
+            lap_noise_s: self.lap_noise_s,
+            mistake_one_in: self.mistake_one_in,
+            stops: self.stops.clone(),
+            rain: self.rain,
+            rain_loss_s: self.rain_loss_s,
+            incident_at: self.incident_at,
             ..SynthConfig::default()
         }
     }
@@ -84,6 +106,9 @@ pub enum Behavior {
     Silent,
     /// Says that the data is missing or old.
     AdmitUnknown,
+    /// The driver is upset: steadies them in a few words, then answers
+    /// with facts.
+    Calm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -98,7 +123,12 @@ pub struct Noise {
 pub struct Call {
     pub id: String,
     /// `<pause 1.6>` is a silence of 1.6 s. Empty: the button alone.
+    /// What the driver means; the judges read this.
     pub say: String,
+    /// What a transcriber made of it (cut, misheard, repeated words): typed
+    /// in text mode instead of `say`.
+    #[serde(default)]
+    pub typed: Option<String>,
     /// `vv:<style id>`, `gemini:<voice>`, `eleven:<voice>` or `aura:<voice>`.
     #[serde(default = "default_voice")]
     pub voice: String,
@@ -145,6 +175,11 @@ impl Call {
     /// The words without pause marks, as the judges see them.
     pub fn words(&self) -> String {
         strip_pauses(&self.say)
+    }
+
+    /// What text mode types.
+    pub fn typed_words(&self) -> String {
+        self.typed.clone().unwrap_or_else(|| self.words())
     }
 }
 
@@ -225,7 +260,7 @@ mod tests {
 
     #[test]
     fn both_sets_load() {
-        for name in ["dev.yaml", "heldout.yaml"] {
+        for name in ["dev.yaml", "heldout.yaml", "hard.yaml"] {
             let stints = load(&dir().join(name)).unwrap();
             assert!(stints.len() >= 5, "{name}");
         }

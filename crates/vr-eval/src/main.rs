@@ -93,6 +93,17 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// What the judges would be shown as the truth at a moment of a stint
+    /// (for writing scenarios).
+    Truth {
+        #[arg(long, default_value = "crates/vr-eval/scenarios/dev.yaml")]
+        set: PathBuf,
+        #[arg(long)]
+        stint: String,
+        /// Session time; the stint's start by default.
+        #[arg(long)]
+        at: Option<f64>,
+    },
     /// One stint in its own process (used by `run`).
     #[command(hide = true)]
     Stint {
@@ -189,6 +200,18 @@ fn main() -> Result<()> {
             write_html(&cli.dir, names, &out)
         }
         Cmd::Report { names, problems } => print_report(&cli.dir, names, *problems),
+        Cmd::Truth { set, stint, at } => {
+            let stints = scenario::load(set)?;
+            let spec = stints
+                .iter()
+                .find(|s| s.id == *stint)
+                .context("unknown stint")?;
+            print!(
+                "{}",
+                vr_eval::world::text_at(&spec.world, at.unwrap_or(spec.world.start_s))
+            );
+            Ok(())
+        }
         Cmd::Stint {
             name,
             set,
