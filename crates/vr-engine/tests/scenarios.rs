@@ -319,7 +319,8 @@ fn pending_lap_waits_for_new_time_then_times_out() {
     assert_eq!(laps[0].lap, 2);
     assert_eq!(laps[0].time_s, Some(99.5));
 
-    // Next crossing with an identical lap time: accepted after the timeout.
+    // Next crossing, the game keeps the old time: after the timeout the
+    // crossings 100 s apart tell it.
     me.laps_completed = Some(3);
     st.ingest(frame(SessionKind::Race, 201.0, vec![me.clone()], 0));
     st.ingest(frame(SessionKind::Race, 203.0, vec![me.clone()], 0));
@@ -331,7 +332,18 @@ fn pending_lap_waits_for_new_time_then_times_out() {
     st.ingest(frame(SessionKind::Race, 204.5, vec![me.clone()], 0));
     let laps = st.laps(&LapsParams::default()).unwrap().laps;
     assert_eq!(laps.len(), 2);
-    assert_eq!(laps[1].time_s, Some(99.5));
+    assert_eq!(laps[1].time_s, Some(100.0));
+    // A lap within a frame of the old one is the game's own time.
+    me.laps_completed = Some(4);
+    st.ingest(frame(SessionKind::Race, 300.6, vec![me.clone()], 0));
+    st.ingest(frame(SessionKind::Race, 304.0, vec![me.clone()], 0));
+    let laps = st.laps(&LapsParams::default()).unwrap().laps;
+    assert_eq!(laps[2].time_s, Some(99.5));
+    me.laps_completed = Some(5);
+    st.ingest(frame(SessionKind::Race, 400.31, vec![me.clone()], 0));
+    st.ingest(frame(SessionKind::Race, 404.0, vec![me.clone()], 0));
+    let laps = st.laps(&LapsParams::default()).unwrap().laps;
+    assert!((laps[3].time_s.unwrap() - 99.71).abs() < 1e-9, "{laps:?}");
 }
 
 #[test]

@@ -118,6 +118,7 @@ fn only_questions_are_answered_and_answers_are_bounded() {
         "DROP TABLE laps",
         "COPY laps TO 'x.csv'",
         "SELECT 1; DROP TABLE laps",
+        "SELECT ';'; DROP TABLE laps",
         "INSERT INTO laps VALUES (1)",
         "",
     ] {
@@ -135,6 +136,9 @@ fn only_questions_are_answered_and_answers_are_bounded() {
     );
     assert_eq!(r.columns, ["a", "s", "n", "t"]);
     assert_eq!(r.to_text(), "a | s | n | t\n1.5 | b |  | true\n");
+    // A `;` in a string is no second statement.
+    let r = ask(&store, "SELECT 'a; b' s, \"x;y\" FROM (SELECT 1 \"x;y\")");
+    assert_eq!(r.rows[0][0], "a; b");
     let none = ask(&store, "SELECT 1 WHERE false");
     assert!(none.to_text().ends_with("(no rows)\n"));
     assert!(lake::query(store.dir(), "SELECT * FROM nowhere").is_err());
@@ -237,4 +241,53 @@ fn the_examples_of_the_schema_run() {
         ask(&SessionStore::new(empty.path()), sql);
         ask(&driven, sql);
     }
+}
+
+/// The summaries agree with the rows they come from.
+#[test]
+fn the_summaries_are_worked_out_right() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = driven(dir.path());
+    // Every driver once, the driver asking among them; laps 2 and 3 count.
+    let r = ask(
+        &store,
+        "SELECT count(*), count(*) FILTER (is_player), max(laps), bool_and(best_s <= median_s) FROM lap_stats",
+    );
+    assert_eq!(
+        (number(&r, 0, 0), number(&r, 0, 1), number(&r, 0, 2)),
+        (12.0, 1.0, 2.0),
+        "{r:?}"
+    );
+    assert_eq!(r.rows[0][3], true);
+    let r = ask(
+        &store,
+        "SELECT abs(s.best_s - (SELECT min(time_s) FROM laps l WHERE l.is_player AND l.lap > 1 AND NOT l.pit)) < 1e-9 FROM lap_stats s WHERE is_player",
+    );
+    assert_eq!(r.rows[0][0], true);
+    // Each event on the driver's lap it happened in.
+    let r = ask(
+        &store,
+        "SELECT bool_and(lap IS NOT NULL) FROM events WHERE type = 'lap_completed'",
+    );
+    assert_eq!(r.rows[0][0], true);
+    // Corners: what was lost against the best, over the laps.
+    let mut w = lake::Writer::new().unwrap();
+    let track = Some("Suzuka International Racing Course - Grand Prix");
+    for (lap, slow) in [(2, 0.0), (3, 8.0), (4, 4.0)] {
+        w.lap(store.dir(), "s1", &suzuka_lap(lap, slow), track)
+            .unwrap();
+    }
+    let r = ask(
+        &store,
+        "SELECT laps, round(lost_s, 6) = round((SELECT sum(time_s) - 3 * min(time_s) FROM corners WHERE session = 's1' AND corner = 'ヘアピン'), 6), min_kmh_high - min_kmh_low, flat_out FROM corner_stats WHERE session = 's1' AND corner = 'ヘアピン'",
+    );
+    assert_eq!(number(&r, 0, 0), 3.0, "{r:?}");
+    assert_eq!(r.rows[0][1], true);
+    assert_eq!(number(&r, 0, 2).round(), 8.0);
+    assert_eq!(r.rows[0][3], false);
+    let r = ask(
+        &store,
+        "SELECT flat_out FROM corner_stats WHERE session = 's1' AND corner = '130R'",
+    );
+    assert_eq!(r.rows[0][0], true);
 }

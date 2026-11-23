@@ -467,17 +467,22 @@ events: session, seq, session_time_s, type (incident, flag_raised, position_chan
 telemetry (yours, 60 per second): session, t (session seconds), lap, lap_pct (0-1), lap_m (metres from the line), lap_time, speed_kmh, throttle_pct, brake_pct, clutch_pct, gear, rpm, steer_deg, lat_g, long_g, yaw_dps, abs, fuel_l, delta_best_s, on_track, in_pits, lf_/rf_/lr_/rr_speed_kmh, _brake_bar, _ride_mm, _shock_mps
 cars (everyone, 10 per second): session, t, idx, number, driver, class, position, class_position, lap, lap_pct, in_pits, surface, last_lap_s, best_lap_s, gap_to_leader_s, is_player
 corners (yours, one row per corner per lap): session, lap, lap_time_s, pit, number, corner (name on known tracks: スプーン, S字...; number 0 'ホームストレート' is the line to the first corner, so a lap's rows add up to the lap), from_pct, to_pct, time_s (start of it to start of the next), entry_kmh, min_kmh, exit_kmh, gear, brake_before_m (braking began this far before the slowest point), min_throttle_pct (100 = flat out)
+Summaries (start here; pit laps, caution laps and the first lap left out):
+lap_stats: session, car_number, driver, is_player, laps, best_s, median_s, spread_s (stddev: how steady), early_s (laps 2-4), late_s (last 3), fade_s (late - early: + is slower at the end)
+corner_stats: session, number, corner, laps, best_s, median_s, lost_s (time lost there over the session against its best), min_kmh_low, min_kmh_high, brake_spread_m, flat_out
+events also has lap (the driver's lap it happened on)
 Examples (the current session: session = (SELECT max(id) FROM sessions); leave out pit laps and the first lap for pace):
-  -- time lost per corner over the race, against its best:
-  SELECT corner, round(sum(time_s - b), 2) lost FROM corners JOIN (SELECT corner c, min(time_s) b FROM corners WHERE session = (SELECT max(id) FROM sessions) AND NOT pit GROUP BY c) ON c = corner WHERE session = (SELECT max(id) FROM sessions) AND NOT pit GROUP BY corner ORDER BY lost DESC LIMIT 3
+  -- where the session lost most, and the lap of the best corners together:
+  SELECT corner, round(lost_s, 2) lost, round(best_s, 2) best FROM corner_stats WHERE session = (SELECT max(id) FROM sessions) ORDER BY lost DESC LIMIT 3
+  SELECT round(sum(best_s), 3) ideal FROM corner_stats WHERE session = (SELECT max(id) FROM sessions)
   -- one corner lap by lap:
   SELECT lap, round(time_s, 2) t, round(min_kmh) v, round(brake_before_m) brake, gear FROM corners WHERE corner = 'スプーン' AND session = (SELECT max(id) FROM sessions) ORDER BY lap
-  -- the best lap of everyone, and how steady each driver was:
-  SELECT car_number, driver, is_player, min(time_s) best, round(stddev(time_s), 3) spread FROM laps WHERE session = (SELECT max(id) FROM sessions) AND NOT pit AND lap > 1 GROUP BY ALL ORDER BY best LIMIT 5
+  -- the best lap of everyone, how steady and how they faded:
+  SELECT car_number, driver, is_player, round(best_s, 3) best, round(spread_s, 3) spread, round(fade_s, 2) fade FROM lap_stats WHERE session = (SELECT max(id) FROM sessions) ORDER BY best LIMIT 5
   -- a car's pace lap by lap (yours: is_player):
   SELECT lap, time_s FROM laps WHERE session = (SELECT max(id) FROM sessions) AND car_number = '5' ORDER BY lap
-  -- the lap each incident happened on:
-  SELECT e.text, (SELECT min(l.lap) FROM laps l WHERE l.session = e.session AND l.is_player AND l.session_time_s >= e.session_time_s) lap FROM events e WHERE e.type = 'incident' AND e.session = (SELECT max(id) FROM sessions)
+  -- incidents lap by lap:
+  SELECT lap, count(*) n, string_agg(text, '; ') FROM events WHERE type = 'incident' AND session = (SELECT max(id) FROM sessions) GROUP BY lap ORDER BY lap
   -- this session against an earlier one, corner by corner:
   WITH a AS (SELECT corner, min(time_s) b FROM corners WHERE session = (SELECT max(id) FROM sessions) GROUP BY corner), o AS (SELECT corner, min(time_s) b FROM corners WHERE session = '<id from sessions>' GROUP BY corner) SELECT corner, round(a.b - o.b, 3) slower FROM a JOIN o USING (corner) ORDER BY slower DESC
   -- the speed through a stretch of one lap:
@@ -502,7 +507,7 @@ pub fn query(sessions: &Path, sql: &str) -> Result<QueryReport> {
     ) {
         bail!("only questions: SELECT, WITH, FROM, DESCRIBE, SUMMARIZE or SHOW");
     }
-    if sql.contains(';') {
+    if statements(&sql) > 1 {
         bail!("one statement at a time");
     }
     let dir = sessions.to_path_buf();
@@ -515,6 +520,21 @@ pub fn query(sessions: &Path, sql: &str) -> Result<QueryReport> {
     });
     rx.recv_timeout(TIMEOUT)
         .unwrap_or_else(|_| bail!("the query took longer than {TIMEOUT:?}; narrow it"))
+}
+
+/// Statements in the text: a `;` within quotes ends none.
+fn statements(sql: &str) -> usize {
+    let mut quoted = None;
+    let mut n = 1;
+    for c in sql.chars() {
+        match (quoted, c) {
+            (None, '\'' | '"') => quoted = Some(c),
+            (Some(q), c) if c == q => quoted = None,
+            (None, ';') => n += 1,
+            _ => {}
+        }
+    }
+    n
 }
 
 fn run(dir: &Path, sql: &str) -> Result<QueryReport> {
@@ -622,7 +642,7 @@ CREATE VIEW laps AS
   SELECT id, o->'car'->>'number', o->'car'->>'driver', false, CAST(l->>'lap' AS INTEGER), CAST(l->>'time_s' AS DOUBLE), CAST(l->>'pit' AS BOOLEAN),
     CAST(l->>'caution' AS BOOLEAN), CAST(l->>'position' AS INTEGER), CAST(l->>'fuel_used_l' AS DOUBLE), CAST(l->>'session_time_s' AS DOUBLE)
   FROM (SELECT id, o, unnest(CAST(o->'laps' AS JSON[])) l FROM (SELECT id, unnest(CAST(others AS JSON[])) o FROM raw));
-CREATE VIEW events AS SELECT id AS session, CAST(e->>'seq' AS BIGINT) AS seq,
+CREATE VIEW events_raw AS SELECT id AS session, CAST(e->>'seq' AS BIGINT) AS seq,
     CAST(e->>'session_time_s' AS DOUBLE) AS session_time_s, e->>'type' AS type, e->>'text' AS text, e AS detail
   FROM (SELECT id, unnest(CAST(events AS JSON[])) e FROM raw);\n"
         ));
@@ -630,11 +650,31 @@ CREATE VIEW events AS SELECT id AS session, CAST(e->>'seq' AS BIGINT) AS seq,
         out.push_str(
             "CREATE TABLE sessions (id VARCHAR, started_ms BIGINT, kind VARCHAR, track VARCHAR, car VARCHAR, laps_completed INTEGER, best_lap_s DOUBLE, position INTEGER, incidents INTEGER);
 CREATE TABLE laps (session VARCHAR, car_number VARCHAR, driver VARCHAR, is_player BOOLEAN, lap INTEGER, time_s DOUBLE, pit BOOLEAN, caution BOOLEAN, position INTEGER, fuel_used_l DOUBLE, session_time_s DOUBLE);
-CREATE TABLE events (session VARCHAR, seq BIGINT, session_time_s DOUBLE, type VARCHAR, text VARCHAR, detail JSON);\n",
+CREATE TABLE events_raw (session VARCHAR, seq BIGINT, session_time_s DOUBLE, type VARCHAR, text VARCHAR, detail JSON);\n",
         );
     }
+    out.push_str(SUMMARIES);
     out
 }
+
+/// What most questions need, worked out once and right: the laps that count
+/// are clean ones, the lap of an event is the driver's lap it fell in.
+const SUMMARIES: &str = "
+CREATE VIEW events AS SELECT e.*, (SELECT min(l.lap) FROM laps l WHERE l.session = e.session AND l.is_player
+    AND l.session_time_s >= e.session_time_s) AS lap FROM events_raw e;
+CREATE VIEW lap_stats AS
+  WITH clean AS (SELECT *, row_number() OVER (PARTITION BY session, car_number ORDER BY lap DESC) AS from_end
+    FROM laps WHERE NOT pit AND NOT caution AND lap > 1 AND time_s > 0)
+  SELECT session, car_number, driver, is_player, count(*) AS laps, min(time_s) AS best_s, median(time_s) AS median_s,
+    stddev(time_s) AS spread_s, avg(time_s) FILTER (lap <= 4) AS early_s, avg(time_s) FILTER (from_end <= 3) AS late_s,
+    avg(time_s) FILTER (from_end <= 3) - avg(time_s) FILTER (lap <= 4) AS fade_s
+  FROM clean GROUP BY ALL;
+CREATE VIEW corner_stats AS
+  SELECT session, number, corner, count(*) AS laps, min(time_s) AS best_s, median(time_s) AS median_s,
+    sum(time_s) - count(*) * min(time_s) AS lost_s, min(min_kmh) AS min_kmh_low, max(min_kmh) AS min_kmh_high,
+    stddev(brake_before_m) AS brake_spread_m, bool_and(min_throttle_pct = 100) AS flat_out
+  FROM corners WHERE NOT pit GROUP BY ALL;
+";
 
 fn has_files(dir: &Path, sub: &str) -> bool {
     let Ok(all) = std::fs::read_dir(dir) else {

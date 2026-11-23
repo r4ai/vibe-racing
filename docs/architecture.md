@@ -125,6 +125,7 @@ flowchart LR
 `vr query` は、保存したファイルを埋め込みの DuckDB で読む（[`lake`](../crates/vr-server/src/lake.rs)）。別のサーバーは置かない。
 Parquet は一度書いたら変えないファイルを足していく。書き途中は別名で書いて名前を変えるので、読み手が半端なファイルを見ることはない。
 `laps`・`events`・`sessions` の表は、セッションの JSON をそのまま読む。
+集計の間違いが多い計算（ピット・黄旗・1 周目を除いたペース、コーナーごとのロス合計、出来事の周）は、`lap_stats`・`corner_stats`・`events.lap` として用意する。
 問い合わせは読み取り専用で、1 文の SELECT（WITH・FROM・DESCRIBE・SUMMARIZE・SHOW）だけ、20 秒・200 行まで。
 走行中の無線の即答は今までどおり `RaceState` から計算し、SQL は調べ物とレース後の集計に使う。
 `vr sessions lake` は、`vr query` 以前に残した周の波形から `corners` を作る。

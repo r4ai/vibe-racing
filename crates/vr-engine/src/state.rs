@@ -21,6 +21,9 @@ const PACE_LAPS_WINDOW: usize = 3;
 const TREND_LAPS_WINDOW: usize = 3;
 /// How long to wait for the game to publish a lap time after the line crossing.
 const PENDING_LAP_TIMEOUT_S: f64 = 3.0;
+/// A lap timed by the crossings this close to the game's old time is the
+/// same lap time.
+const SAME_LAP_S: f64 = 0.2;
 const NEARBY_WINDOW_S: f64 = 3.0;
 /// Slower than this, the instant fuel consumption is not that of a lap.
 const MIN_INSTANT_SPEED_MPS: f64 = 15.0;
@@ -739,9 +742,19 @@ impl RaceState {
                 let changed = last.is_some() && last != p.prev_last_lap;
                 let timed_out = t - p.since_s > PENDING_LAP_TIMEOUT_S;
                 if changed || timed_out {
-                    // On timeout the game most likely published an identical
-                    // lap time, so take whatever value it shows.
-                    let time_s = last;
+                    // Still the old time: the game did not tell this lap's
+                    // (after the flag it never does). The crossings tell it,
+                    // to a frame; a lap within a frame of the last one is the
+                    // game's.
+                    let crossed = tr
+                        .laps
+                        .back()
+                        .map(|l| p.since_s - l.session_time_s)
+                        .filter(|d| *d > 0.0);
+                    let time_s = match (changed, last, crossed) {
+                        (false, Some(l), Some(c)) if (c - l).abs() > SAME_LAP_S => Some(c),
+                        _ => last,
+                    };
                     tr.push_lap(LapRecord {
                         lap: p.lap,
                         time_s,
