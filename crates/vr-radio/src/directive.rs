@@ -60,8 +60,12 @@ pub enum Directive {
     Watch(Watch),
     /// Laps between looks at the strategy; 0: never.
     Planning(u16),
+    /// The usual questions are answered without the agent.
+    Quick(bool),
     /// The engineer's own notes on the strategy.
     Plan(String),
+    /// Something the desk is to look into.
+    Study(String),
 }
 
 impl Directive {
@@ -97,6 +101,7 @@ pub enum Setting {
     Forgot(usize),
     Watch(String),
     Planning(u16),
+    Quick(bool),
 }
 
 fn on_off(b: bool) -> &'static str {
@@ -127,6 +132,7 @@ impl std::fmt::Display for Setting {
             Self::Watch(w) => write!(f, "見張り: {w}"),
             Self::Planning(0) => write!(f, "裏での作戦立案 オフ"),
             Self::Planning(n) => write!(f, "裏での作戦立案 {n}周ごと"),
+            Self::Quick(b) => write!(f, "定型の質問への即答 {}", on_off(*b)),
         }
     }
 }
@@ -241,6 +247,10 @@ fn parse(body: &str) -> Vec<Result<Directive, String>> {
             ("say", Some(w)) => {
                 w.say = Some(value.trim().into()).filter(|v: &String| !v.is_empty());
             }
+            ("tell", Some(w)) => match value.trim() {
+                t if crate::quick::TOPICS.contains(&t) => w.tell = Some(t.into()),
+                _ => out.push(bad()),
+            },
             ("every", Some(w)) => match value.trim_end_matches(['s', '秒']).parse() {
                 Ok(n) => w.every = n,
                 Err(_) => out.push(bad()),
@@ -307,7 +317,9 @@ fn pair(key: &str, value: &str) -> Option<Result<Directive, String>> {
         "planning" if switch == Some(false) => Directive::Planning(0),
         "planning" if switch == Some(true) => Directive::Planning(Rules::default().planning),
         "planning" => Directive::Planning(value.trim_end_matches('周').parse().ok()?),
+        "quick" => Directive::Quick(switch?),
         "plan" => Directive::Plan(text()?),
+        "study" => Directive::Study(text()?),
         k => Directive::Event(Group::parse(k.strip_prefix("event.")?)?, switch?),
     }))
 }
@@ -470,7 +482,7 @@ mod tests {
             d("planning=off planning=on planning=5周"),
             [
                 Ok(Directive::Planning(0)),
-                Ok(Directive::Planning(3)),
+                Ok(Directive::Planning(5)),
                 Ok(Directive::Planning(5))
             ]
         );

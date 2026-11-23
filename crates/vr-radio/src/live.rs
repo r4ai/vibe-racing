@@ -1,4 +1,4 @@
-//! The live values of the race (`vr live --hz 10`), for the rules that are
+//! The live values of the race (`vr live --hz 60`), for the rules that are
 //! checked while driving.
 
 use std::path::PathBuf;

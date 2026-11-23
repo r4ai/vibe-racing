@@ -36,11 +36,11 @@ fn opt<T>(v: Option<T>, f: impl FnOnce(T) -> String) -> String {
     v.map(f).unwrap_or_else(|| "--".into())
 }
 
-fn car_label(c: &CarRef) -> String {
+pub(crate) fn car_label(c: &CarRef) -> String {
     format!("#{} {}", c.number, c.driver)
 }
 
-fn pos_label(c: &CarRef, class: bool) -> String {
+pub(crate) fn pos_label(c: &CarRef, class: bool) -> String {
     let p = if class {
         c.class_position.or(c.position)
     } else {
@@ -106,6 +106,20 @@ fn gap_line(label: &str, g: &GapInfo, ahead: bool) -> String {
             if d >= 0.0 { "+" } else { "" },
             d
         );
+    }
+    if let (Some(l), Some(runs_ahead)) = (g.live_s, g.live_ahead) {
+        // Behind a car that the places have ahead, and the other way round.
+        let passed = if runs_ahead == ahead {
+            ""
+        } else if ahead {
+            " BEHIND you on track"
+        } else {
+            " AHEAD of you on track"
+        };
+        let _ = write!(s, " | now {l:.2}s{passed}");
+        if let Some(c) = g.live_change_s {
+            let _ = write!(s, " ({c:+.2}s since a lap ago)");
+        }
     }
     if g.on_pit_road {
         s.push_str(" | ON PIT ROAD");
@@ -264,6 +278,10 @@ impl Brief {
             if p.on_pit_road {
                 l.push_str(" | ON PIT ROAD");
             }
+            let official = p.car.class_position.or(p.car.position);
+            if let Some(now) = p.live_position.filter(|n| Some(*n) != official) {
+                let _ = write!(l, " | running P{now} on track now");
+            }
             let _ = writeln!(out, "{l}");
         }
         match &self.ahead {
@@ -275,6 +293,15 @@ impl Brief {
         }
         if let Some(g) = &self.behind {
             let _ = writeln!(out, "{}", gap_line("behind", g, false));
+        }
+        for (label, g, ahead) in [
+            ("running ahead now", &self.running_ahead, true),
+            ("running behind now", &self.running_behind, false),
+            ("leader", &self.leader, true),
+        ] {
+            if let Some(g) = g {
+                let _ = writeln!(out, "{}", gap_line(label, g, ahead));
+            }
         }
         if !self.nearby.is_empty() {
             let parts: Vec<String> = self.nearby.iter().map(relative_label).collect();
@@ -398,6 +425,76 @@ impl GapReport {
     }
 }
 
+impl SectorsReport {
+    pub fn to_text(&self) -> String {
+        let mut out = format!("{}\n", meta_line(&self.meta));
+        let basis = match self.basis {
+            SectorBasis::None => {
+                out.push_str(
+                    "sectors: unavailable (needs a lap from line to line and `vr serve`)\n",
+                );
+                return out;
+            }
+            SectorBasis::GameLines => "the game's sector lines",
+            SectorBasis::Thirds => "thirds of the lap: the game tells no sector lines",
+        };
+        let _ = writeln!(out, "sectors (derived from car positions; {basis}):");
+        let list = |v: &[Option<f64>]| {
+            let parts: Vec<String> = v.iter().map(|t| opt(*t, fmt_lap)).collect();
+            parts.join(" / ")
+        };
+        for r in &self.rows {
+            let _ = write!(
+                out,
+                "{}: {} {} last {} | best {}",
+                r.role,
+                pos_label(&r.car, true),
+                car_label(&r.car),
+                list(&r.last),
+                list(&r.best)
+            );
+            if let Some(l) = r.lap {
+                let _ = write!(out, " | lap {l}");
+            }
+            if r.role == "you" && r.current.iter().any(Option::is_some) {
+                let _ = write!(out, " | this lap {}", list(&r.current));
+            }
+            out.push('\n');
+        }
+        if let Some(v) = &self.versus {
+            let parts: Vec<String> = self
+                .delta
+                .iter()
+                .enumerate()
+                .map(|(i, d)| format!("S{} {}", i + 1, opt(*d, |d| format!("{d:+.2}s"))))
+                .collect();
+            let _ = writeln!(
+                out,
+                "you vs {} (last lap, + is slower): {}",
+                car_label(v),
+                parts.join(" / ")
+            );
+        }
+        for (label, list) in [("lost", &self.losses), ("won", &self.gains)] {
+            if list.is_empty() {
+                continue;
+            }
+            let parts: Vec<String> = list
+                .iter()
+                .map(|s| {
+                    let place = match (s.from_m, s.to_m) {
+                        (Some(a), Some(b)) => format!("{a:.0}-{b:.0}m"),
+                        _ => format!("{:.0}-{:.0}%", s.from * 100.0, s.to * 100.0),
+                    };
+                    format!("S{} {place} {:+.2}s", s.sector, s.lost_s)
+                })
+                .collect();
+            let _ = writeln!(out, "{label} most: {}", parts.join("; "));
+        }
+        out
+    }
+}
+
 impl FuelReport {
     pub fn to_text(&self) -> String {
         let mut out = format!("{}\n", meta_line(&self.meta));
@@ -493,6 +590,9 @@ mod tests {
             their_last_lap_s: None,
             last_lap_delta_s: None,
             on_pit_road: false,
+            live_s: None,
+            live_change_s: None,
+            live_ahead: None,
         }
     }
 
@@ -534,6 +634,9 @@ mod tests {
             weather: None,
             rain_trend: None,
             car: None,
+            leader: None,
+            running_ahead: None,
+            running_behind: None,
         }
     }
 
@@ -755,6 +858,7 @@ mod tests {
             incidents: None,
             on_pit_road: false,
             on_track: true,
+            live_position: None,
         });
         let t = b.to_text();
         assert!(

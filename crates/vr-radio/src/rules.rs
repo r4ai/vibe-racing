@@ -37,6 +37,9 @@ pub struct Watch {
     /// is replaced by the value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub say: Option<String>,
+    /// A topic of `vr say`, said without the engineer thinking about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tell: Option<String>,
     /// Seconds.
     pub every: u32,
     /// Gone after the first time.
@@ -49,7 +52,8 @@ pub struct Watch {
 
 impl std::fmt::Display for Watch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let what = self.say.as_ref().or(self.act.as_ref());
+        let what = self.say.as_ref().or(self.tell.as_ref());
+        let what = what.or(self.act.as_ref());
         write!(
             f,
             "{} → {}",
@@ -77,13 +81,15 @@ pub struct Rules {
     pub watches: Vec<Watch>,
     /// Laps between the engineer's own looks at the strategy; 0: never.
     pub planning: u16,
+    /// The usual questions are answered without the agent.
+    pub quick: bool,
 }
 
 /// Quiet on the brakes, like a real engineer.
 pub const HOLD_CALLS: &str = "brake > 10";
 pub const INTERVAL_S: u16 = 8;
 pub const HOLD_MAX_S: u16 = 8;
-pub const PLANNING: u16 = 3;
+pub const PLANNING: u16 = 5;
 
 impl Default for Rules {
     fn default() -> Self {
@@ -96,6 +102,7 @@ impl Default for Rules {
             notes: Vec::new(),
             watches: Vec::new(),
             planning: PLANNING,
+            quick: true,
         }
     }
 }
@@ -170,7 +177,12 @@ impl Rules {
         } else {
             self.notes.retain(|n| !n.contains(what));
             self.watches.retain(|w| {
-                let texts = [Some(&w.when), w.act.as_ref(), w.say.as_ref()];
+                let texts = [
+                    Some(&w.when),
+                    w.act.as_ref(),
+                    w.say.as_ref(),
+                    w.tell.as_ref(),
+                ];
                 !texts.into_iter().flatten().any(|t| t.contains(what))
             });
         }
@@ -181,12 +193,13 @@ impl Rules {
     pub fn status(&self) -> String {
         let off = |s: Option<&str>| s.unwrap_or("off").to_string();
         let mut out = format!(
-            "interval={} hold=\"{}\" hold_calls=\"{}\" quiet=\"{}\" hold_max={} planning={}",
+            "interval={} hold=\"{}\" hold_calls=\"{}\" quiet=\"{}\" hold_max={} quick={} planning={}",
             self.interval_s,
             off(self.hold.as_deref()),
             off(self.hold_calls.as_deref()),
             off(self.quiet.as_deref()),
             self.hold_max_s,
+            if self.quick { "on" } else { "off" },
             if self.planning == 0 {
                 "off".into()
             } else {
@@ -351,7 +364,7 @@ mod tests {
         let mut r = Rules::default();
         assert_eq!(
             r.status(),
-            "interval=8 hold=\"off\" hold_calls=\"brake > 10\" quiet=\"off\" hold_max=8 planning=3"
+            "interval=8 hold=\"off\" hold_calls=\"brake > 10\" quiet=\"off\" hold_max=8 quick=on planning=5"
         );
         r.set_hold(Scope::All, Some("abs(steer) > 45".into()));
         r.set_hold(Scope::Calls, None);
@@ -360,7 +373,7 @@ mod tests {
         r.watch(watch("lap % 5 == 0", 1));
         assert_eq!(
             r.status(),
-            "interval=60 hold=\"abs(steer) > 45\" hold_calls=\"off\" quiet=\"off\" hold_max=8 planning=off\n\
+            "interval=60 hold=\"abs(steer) > 45\" hold_calls=\"off\" quiet=\"off\" hold_max=8 quick=on planning=off\n\
              指示 n1: 差は毎周\n見張り w1: lap % 5 == 0 → 知らせる"
         );
         assert_eq!(r.hold(Scope::All), Some("abs(steer) > 45"));

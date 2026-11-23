@@ -389,6 +389,7 @@ impl SynthSource {
                     name: "Demo Raceway".into(),
                     config: Some("GP".into()),
                     length_m: Some(4500.0),
+                    sectors: vec![0.0, 0.3, 0.7],
                 }),
                 uid: None,
                 time_total_s: None,
@@ -580,6 +581,7 @@ impl TelemetrySource for SynthSource {
                     item("Chassis/Front/ArbBlades", "3"),
                     item("Chassis/Rear/WingAngle", "7 deg"),
                 ],
+                unavailable: Vec::new(),
             }),
         })
     }

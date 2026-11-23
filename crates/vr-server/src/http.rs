@@ -101,10 +101,22 @@ pub fn router(app: AppState) -> Router {
             get(|State(a): State<AppState>| async move { r(a.state.strategy()) }),
         )
         .route(
+            "/v1/forecast",
+            get(|State(a): State<AppState>| async move { r(a.state.forecast()) }),
+        )
+        .route(
             "/v1/laps",
             get(
                 |State(a): State<AppState>, Query(p): Query<LapsParams>| async move {
                     r(a.state.laps(&p))
+                },
+            ),
+        )
+        .route(
+            "/v1/sectors",
+            get(
+                |State(a): State<AppState>, Query(p): Query<SectorsParams>| async move {
+                    r(a.state.sectors(&p))
                 },
             ),
         )

@@ -73,6 +73,58 @@ fn brief_text_for_synthetic_race() {
 }
 
 #[test]
+fn sectors_and_spoken_answers() {
+    let (_d, disc) = tmp();
+    let o = run(&disc, &with_syn(&["sectors"]));
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    for want in [
+        "the game's sector lines",
+        "you: P4",
+        "ahead: P3",
+        "leader: P1",
+        "you vs #16 C. Ito (last lap, + is slower): S1 -0.",
+    ] {
+        assert!(out.contains(want), "missing {want:?}:\n{out}");
+    }
+    let s = json(&run(
+        &disc,
+        &with_syn(&["sectors", "--car", "16", "-f", "json"]),
+    ));
+    assert_eq!(s["basis"], "game_lines");
+    assert_eq!(s["versus"]["number"], "16");
+    assert_eq!(s["delta"].as_array().unwrap().len(), 3);
+    let o = run(&disc, &with_syn(&["sectors", "--car", "999"]));
+    assert_eq!(o.status.code(), Some(4));
+    // Before the first lap is done there are none.
+    let o = run(&disc, &["sectors", "--game", "synthetic", "--until", "5"]);
+    assert_eq!(o.status.code(), Some(3));
+
+    let o = run(&disc, &with_syn(&["say", "position"]));
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "4番手。燃料が足りない、ピットが要る。
+"
+    );
+    let s = json(&run(&disc, &with_syn(&["say", "leader-lap", "-f", "json"])));
+    assert_eq!(s["topic"], "leader-lap");
+    assert!(s["text"].as_str().unwrap().starts_with("トップは"));
+    let o = run(&disc, &with_syn(&["forecast"]));
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("forecast (pace of the last clean laps, stops not counted): now P4, "),
+        "{}",
+        stdout(&o)
+    );
+    let f = json(&run(&disc, &with_syn(&["forecast", "-f", "json"])));
+    assert_eq!(f["cars"].as_array().unwrap().len(), 11);
+    let o = run(&disc, &with_syn(&["say", "nothing"]));
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("one of status, position"));
+}
+
+#[test]
 fn every_query_command_emits_json() {
     let (_d, disc) = tmp();
     let b = json(&run(&disc, &with_syn(&["brief", "-f", "json"])));

@@ -30,6 +30,7 @@ pub fn pair(s: &Setting) -> (String, String) {
         Setting::Note(n) => ("note".into(), n.clone()),
         Setting::Forgot(n) => ("forget".into(), n.to_string()),
         Setting::Watch(w) => ("when".into(), w.clone()),
+        Setting::Quick(on) => ("quick".into(), on_off(*on)),
         Setting::Planning(0) => ("planning".into(), "off".into()),
         Setting::Planning(n) => ("planning".into(), n.to_string()),
     }

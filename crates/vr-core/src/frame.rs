@@ -96,11 +96,15 @@ pub enum Flag {
     OneLapToGreen,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TrackInfo {
     pub name: String,
     pub config: Option<String>,
     pub length_m: Option<f64>,
+    /// Where the sectors begin, as lap fractions, the first at 0; empty when
+    /// the game does not tell.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sectors: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +398,9 @@ pub struct Setup {
     pub modified: Option<bool>,
     pub passed_tech: Option<bool>,
     pub items: Vec<SetupItem>,
+    /// Settings the game names without telling their value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

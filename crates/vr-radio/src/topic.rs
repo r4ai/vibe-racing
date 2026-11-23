@@ -104,6 +104,14 @@ const CAR: &[&str] = &[
     "ダメージ",
     "損傷",
     "壊れ",
+    "当てら",
+    "当たっ",
+    "ぶつ",
+    "接触",
+    "追突",
+    "クラッシュ",
+    // As 当てられ is heard.
+    "かたられ",
     "修理",
     "リペア",
     "水温",
@@ -165,12 +173,28 @@ const STRATEGY: &[&str] = &[
     "ウインドウ",
 ];
 
+/// What the desk looks at, whatever it was asked: the race, the pace of
+/// everyone, where time is lost, how the car behaves.
+pub const STUDY: &[&str] = &[
+    "vr brief",
+    "vr standings",
+    "vr laps --last 60",
+    "vr sectors",
+    "vr forecast",
+    "vr sessions corners",
+    "vr handling",
+    "vr car",
+    "vr strategy",
+];
+
 /// Asks for more than a look at the data.
 const LONG: &[&str] = &[
     "調べて",
     "調べと",
+    "調査",
     "検索",
     "ネットで",
+    "ウェブ",
     "イシュー",
     "メモし",
     "メモっ",
@@ -178,6 +202,16 @@ const LONG: &[&str] = &[
     "まとめて",
     "分析",
     "解析",
+    "詳しく",
+    "くわしく",
+    "細かく",
+    "検討",
+    "見積も",
+    "推測",
+    "予想して",
+    "計算して",
+    "じっくり",
+    "徹底",
 ];
 
 /// What goes with every question answers these.
@@ -335,7 +369,13 @@ mod tests {
         ] {
             assert_eq!(topics(q), [Topic::Handling], "{q}");
         }
-        for q in ["タイヤどう", "ダメージある", "水温は"] {
+        for q in [
+            "タイヤどう",
+            "ダメージある",
+            "水温は",
+            "当てられた",
+            "かたられたんだけど",
+        ] {
             assert_eq!(topics(q), [Topic::Car], "{q}");
         }
         for q in [

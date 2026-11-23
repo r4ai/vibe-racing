@@ -109,6 +109,8 @@ enum Cmd {
     Fuel,
     /// Pit strategy: fade, cost of a stop, plans, undercuts, rivals.
     Strategy,
+    /// Where the race ends at this pace: your place, whom you meet and when.
+    Forecast,
     /// Lap history (yours by default).
     Laps {
         /// Car number (default: you).
@@ -117,6 +119,17 @@ enum Cmd {
         /// Only the last N laps.
         #[arg(long, default_value_t = 10)]
         last: usize,
+    },
+    /// Sector times of you and the cars around, and where the lap is lost.
+    Sectors {
+        /// Car number to compare with (default: the car ahead).
+        #[arg(long)]
+        car: Option<String>,
+    },
+    /// One spoken answer in Japanese, with what the driver would ask next.
+    Say {
+        /// What about.
+        topic: vr_engine::SpeechTopic,
     },
     /// Race events (flags, position changes, pit stops, incidents, laps).
     Events {
@@ -228,6 +241,9 @@ render! {
     GapReport => |_| true,
     FuelReport => |r| r.fuel.is_some(),
     LapsReport => |r| r.car.is_some(),
+    ForecastReport => |r| r.position.is_some(),
+    SectorsReport => |r| r.basis != SectorBasis::None,
+    Speech => |r| !r.text.is_empty(),
     EventsReport => |_| true,
     CarReport => |r| r.car.is_some(),
     ChannelsReport => |r| r.total > 0,
@@ -314,6 +330,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 ),
                 Cmd::Fuel => emit(fmt, api.fuel()),
                 Cmd::Strategy => emit(fmt, api.strategy()),
+                Cmd::Forecast => emit(fmt, api.forecast()),
                 Cmd::Live { .. } => emit(fmt, api.live()),
                 Cmd::Laps { car, last } => emit(
                     fmt,
@@ -322,6 +339,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         last: Some(last),
                     }),
                 ),
+                Cmd::Sectors { car } => emit(fmt, api.sectors(&SectorsParams { car })),
+                Cmd::Say { topic } => {
+                    let corners = (topic == SpeechTopic::Losing)
+                        .then(sessions::live_corners)
+                        .flatten();
+                    emit(fmt, speak_with(api, topic, corners.as_ref()))
+                }
                 Cmd::Events { since, limit } => emit(
                     fmt,
                     api.events(&EventsParams {

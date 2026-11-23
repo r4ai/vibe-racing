@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Subcommand;
-use vr_engine::{LapRecord, RaceState, SessionRecord, SourceKind, render};
+use vr_engine::{CornersReport, LapRecord, RaceState, SessionRecord, SourceKind, render};
 use vr_server::{FindError, SessionStore, read_sessions, sessions_dir};
 
 use crate::{EXIT_NOT_FOUND, Format};
@@ -37,6 +37,18 @@ pub enum SessionsCmd {
     Analyse {
         /// Default: the newest run in which the wheels were measured.
         session: Option<String>,
+    },
+    /// One lap against the best, corner by corner: braking, slowest speed,
+    /// throttle, and where time is usually lost.
+    Corners {
+        /// Default: the newest with laps that were recorded.
+        session: Option<String>,
+        /// Default: the last one at racing speed.
+        #[arg(long)]
+        lap: Option<i32>,
+        /// Default: the fastest of the session.
+        #[arg(long)]
+        against: Option<i32>,
     },
     /// Two sessions side by side, with what differs in the setup.
     Compare { a: String, b: String },
@@ -151,6 +163,17 @@ fn dispatch(store: &SessionStore, cmd: SessionsCmd, fmt: Format) -> anyhow::Resu
                 Format::Text => print!("{}", a.to_text()),
             }
         }
+        SessionsCmd::Corners {
+            session,
+            lap,
+            against,
+        } => {
+            let c = corners(store, session, lap, against)?;
+            match fmt {
+                Format::Json => println!("{}", serde_json::to_string(&c)?),
+                Format::Text => print!("{}", c.to_text()),
+            }
+        }
         SessionsCmd::Compare { a, b } => {
             let (a, b) = (store.find(&a)?, store.find(&b)?);
             match fmt {
@@ -224,6 +247,75 @@ pub fn import(
             Ok(id)
         })
         .collect()
+}
+
+/// Laps that tell what is usual.
+const USUAL: usize = 5;
+/// Slower laps than this, against the fastest, were not driven for time.
+const FOR_TIME: f64 = 1.07;
+
+/// A session saved this long ago is still being driven.
+const LIVE_MS: i64 = 120_000;
+
+/// The corners of the session being driven, when two laps of it were kept.
+pub fn live_corners() -> Option<CornersReport> {
+    let store = SessionStore::new(vr_server::sessions_dir());
+    let now = store.list().into_iter().next()?;
+    (vr_engine::now_ms() - now.updated_ms < LIVE_MS)
+        .then(|| corners(&store, Some(now.id), None, None).ok())
+        .flatten()
+}
+
+fn corners(
+    store: &SessionStore,
+    session: Option<String>,
+    lap: Option<i32>,
+    against: Option<i32>,
+) -> anyhow::Result<CornersReport> {
+    let none = || anyhow::anyhow!("no two laps were recorded in that session yet");
+    let id = match session {
+        Some(key) => store.find(&key)?.id,
+        None => {
+            store
+                .list()
+                .into_iter()
+                .find(|r| store.traces(&r.id).iter().filter(|t| !t.pit).count() >= 2)
+                .ok_or_else(none)?
+                .id
+        }
+    };
+    let all = store.traces(&id);
+    let clean = || all.iter().filter(|t| !t.pit);
+    let fastest = clean()
+        .min_by(|a, b| a.time_s.total_cmp(&b.time_s))
+        .ok_or_else(none)?;
+    let reference = against.unwrap_or(fastest.lap);
+    let last = match lap {
+        Some(l) => l,
+        None => {
+            clean()
+                .rev()
+                .find(|t| t.lap != reference && t.time_s <= fastest.time_s * FOR_TIME)
+                .ok_or_else(none)?
+                .lap
+        }
+    };
+    let load = |l: i32| {
+        store
+            .trace(&id, l)
+            .ok_or_else(|| anyhow::anyhow!("lap {l} of {id} was not recorded"))
+    };
+    let mut laps: Vec<i32> = clean()
+        .filter(|t| t.lap < last && t.time_s <= fastest.time_s * FOR_TIME)
+        .map(|t| t.lap)
+        .collect();
+    laps.drain(..laps.len().saturating_sub(USUAL - 1));
+    laps.push(last);
+    let laps = laps
+        .into_iter()
+        .map(load)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    CornersReport::of(&laps, &load(reference)?).ok_or_else(none)
 }
 
 fn lap(v: Option<f64>) -> String {

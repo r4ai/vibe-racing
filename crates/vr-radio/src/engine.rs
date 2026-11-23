@@ -14,23 +14,46 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::agent::{AgentCmd, AgentEvent, AgentLink, TokenUsage, ToolState, Turn};
+use crate::agent::{AgentCmd, AgentEvent, AgentLink, AgentOption, TokenUsage, ToolState, Turn};
 use crate::audio::{Output, Recorder};
-use crate::config;
-use crate::context::{ContextSource, More};
+use crate::calls::{self, Told};
+use crate::config::{self, AgentOptions};
+use crate::context::{Answer, ContextSource, More};
 use crate::directive::{Directive, MAX_VOLUME, SPEED, Setting, Stripper};
 use crate::early::Early;
 use crate::expr::{Expr, Values};
 use crate::gate::{self, Gate, Wish};
 use crate::live::Feed;
+use crate::quick;
 use crate::rules::{self, Lookout, Rules, Scope, Watch};
+use crate::spotter::{self, Spotter};
 use crate::stt::{SttConfig, Transcriber};
 use crate::text::{self, SentenceSplitter};
 use crate::voicevox::Synth;
 use crate::watch::{self, Dated, Follow, Group, Proactive, Queue, RaceEvent, Timing};
+use crate::wav;
 
 /// What the driver hears while the engineer looks something up.
 pub const STANDBY: &str = "確認する、少し待って。";
+
+/// What the driver hears when the agent has nothing to give any more.
+pub const EXHAUSTED: &str = "AIの利用枠を使い切った。決まった質問には答えられる。";
+/// What the driver hears when the agent does not answer.
+pub const NO_AGENT: &str = "考えて答えるのは今できない、数字だけ伝える。";
+/// What the driver hears when hardly a word was heard.
+pub const UNCLEAR: &str = "聞き取れなかったから状況だけ。";
+
+/// Told to wait once, the driver knows that answers can take a while.
+const STANDBY_GAP: Duration = Duration::from_secs(120);
+
+/// Between two calls the agent makes by itself.
+const AGENT_GAP: Duration = Duration::from_secs(30);
+/// After the limit of the agent was hit, it is left alone for so long.
+const REST: Duration = Duration::from_secs(600);
+/// Values older than this are not how things are.
+const HEARD: Duration = Duration::from_secs(2);
+/// Exchanges an agent that was not there is told of.
+const REMEMBERED: usize = 40;
 
 /// Recordings shorter than this are treated as accidental presses.
 pub const MIN_SPEECH: f32 = 0.3;
@@ -65,7 +88,9 @@ pub enum Command {
     /// Speaks [`SAMPLE`] with a voice, even when muted.
     Preview(u32),
     /// Replaces the agent: the old session ends, a new one starts.
-    SetAgent(String),
+    SetAgent(String, AgentOptions),
+    /// Model, effort and so on of the agent there is.
+    SetAgentOptions(AgentOptions),
     SetStt(SttConfig),
 }
 
@@ -76,6 +101,8 @@ pub enum Event {
     },
     /// Started again after it went away.
     AgentStarting,
+    /// What can be chosen about the agent, and what is.
+    AgentOptions(Vec<AgentOption>),
     AgentClosed {
         error: Option<String>,
     },
@@ -159,7 +186,7 @@ pub enum Outcome {
 }
 
 /// Starts an agent session from its command.
-pub type Connect = Box<dyn Fn(&str) -> AgentLink + Send>;
+pub type Connect = Box<dyn Fn(&str, &AgentOptions) -> AgentLink + Send>;
 pub type MakeTranscriber = Box<dyn Fn(&SttConfig) -> Arc<dyn Transcriber> + Send>;
 
 pub struct Deps {
@@ -171,6 +198,7 @@ pub struct Deps {
     pub agent: AgentLink,
     /// What `agent` was started from, to start it again.
     pub agent_command: String,
+    pub agent_options: AgentOptions,
     pub connect: Connect,
     /// Data for the question, fetched while the speech is transcribed.
     pub context: Option<Arc<dyn ContextSource>>,
@@ -225,6 +253,12 @@ struct Current {
     call: Option<Call>,
     /// The driver was told to wait.
     standby: bool,
+    /// What the driver said.
+    asked: String,
+    /// The reply so far.
+    said: String,
+    /// The agent says that it cannot answer.
+    failed: Option<String>,
 }
 
 /// Why the engineer does something by itself.
@@ -288,16 +322,94 @@ enum Fetched {
     },
     /// The data for a call.
     Call { turn: Turn, data: Option<String> },
+    /// Words for the driver that need no agent.
+    Told {
+        about: String,
+        text: Option<String>,
+        urgent: bool,
+    },
+    /// How things are, for a question the agent did not answer.
+    Instead { turn: Turn, text: Option<String> },
     /// The data for a look at the strategy.
     Plan { turn: Turn, data: Option<String> },
+    /// The data for the desk.
+    Study { turn: Turn, data: Option<String> },
 }
+
+/// Something the desk looks into.
+struct Study {
+    turn: Turn,
+    started: Instant,
+    /// When the desk began on it.
+    began: Instant,
+    asked: String,
+    /// Its data is there, and it was sent to the desk.
+    sent: bool,
+    stripper: Stripper,
+    said: String,
+}
+
+/// Studies that wait for the desk; more are not remembered by the driver either.
+const STUDIES: usize = 3;
+/// What the driver is told at once.
+const STUDYING: &str = "了解、調べる。";
+const STUDYING_YET: &str = "今調べてる。";
+/// A longer call asks for something else to be looked into.
+const NUDGE: usize = 8;
+const STUDY_NEXT: &str = "了解、今の調査の次に調べる。";
+const STUDY_FAILED: &str = "調べきれなかった。もう一度言ってくれれば調べ直す。";
+/// A look-up that goes on longer is stuck: it would only use up the plan.
+const STUDY_LIMIT: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 180 });
+/// The same for what the engineer says by itself.
+const CALL_LIMIT: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 60 });
+
+/// Exchanges the desk is told of.
+const DESK_LOG: usize = 8;
 
 /// Words that fetch the data a plan needs.
 const STRATEGY: &str = "作戦";
 /// Between two looks at the strategy.
-const PLAN_GAP: Duration = Duration::from_secs(40);
+const PLAN_GAP: Duration = Duration::from_secs(180);
 /// From this lap on there is something to plan with.
 const PLAN_FROM_LAP: f64 = 2.0;
+
+/// WAV clips by voice, speed and text.
+type Phrases = Arc<std::sync::Mutex<BTreeMap<(u32, u16, &'static str), Vec<u8>>>>;
+
+/// Something said on the radio, for an agent that was not part of it.
+struct Exchange {
+    driver: String,
+    engineer: String,
+    /// The agent knows of it.
+    known: bool,
+}
+
+impl Exchange {
+    fn line(&self) -> String {
+        if self.driver.is_empty() {
+            format!("連絡「{}」", self.engineer)
+        } else {
+            format!("無線「{}」→ 返答「{}」", self.driver, self.engineer)
+        }
+    }
+}
+
+/// The limit of the agent's plan is used up.
+fn exhausted(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("usage limit")
+        || e.contains("usagelimit")
+        || e.contains("rate limit")
+        || e.contains("quota")
+}
+
+/// The answer that needs no agent.
+async fn local(context: Option<Arc<dyn ContextSource>>, text: String) -> Option<Answer> {
+    let c = context.filter(|_| !text.trim().is_empty())?;
+    tokio::task::spawn_blocking(move || c.answer(&text))
+        .await
+        .ok()?
+}
 
 /// Fetches what the driver's words call for. Adds the usual data, which is on
 /// its way meanwhile.
@@ -320,6 +432,22 @@ async fn with_more(
         data: (!parts.is_empty()).then(|| parts.join("\n\n")),
         ..more
     }
+}
+
+/// What the driver's words call for: the answer, or the data for the agent.
+async fn look_up(
+    quick: bool,
+    context: Option<Arc<dyn ContextSource>>,
+    text: String,
+    data: impl Future<Output = Option<String>>,
+) -> More {
+    if quick && let Some(answer) = local(context.clone(), text.clone()).await {
+        return More {
+            answer: Some(answer),
+            ..More::default()
+        };
+    }
+    with_more(context, text, data).await
 }
 
 /// Starts fetching the data at once; the future waits for it.
@@ -423,6 +551,7 @@ struct Engine {
     make_transcriber: MakeTranscriber,
     agent: AgentLink,
     agent_command: String,
+    agent_options: AgentOptions,
     agent_ready: bool,
     /// When to start the agent again, and how often it was tried.
     reconnect: Option<Instant>,
@@ -478,9 +607,30 @@ struct Engine {
     /// What the agent wrote for the radio and could not be read.
     unreadable: Vec<String>,
     standby: Option<Duration>,
+    /// When the driver was last told to wait.
+    stood_by: Option<Instant>,
     /// A call whose data is being fetched.
     calling: Option<(Turn, Instant, Vec<Dated>)>,
     watching: Option<bool>,
+    spotter: Spotter,
+    /// What the spotter said last: newer words take its place.
+    spotted: Arc<AtomicU64>,
+    /// Its phrases as they sound, by voice and speed.
+    phrases: Phrases,
+    warmed: Option<(u32, u16)>,
+    /// The race as it was when last heard of.
+    now: Values,
+    heard: Option<Instant>,
+    log: VecDeque<Exchange>,
+    /// What was said last, and whether it was a question.
+    last_said: String,
+    /// When the agent spoke of its own accord.
+    last_agent_call: Option<Instant>,
+    /// The agent is left alone until then.
+    resting: Option<Instant>,
+    /// What the desk does, and what it does next.
+    study: Option<Study>,
+    studies: VecDeque<Study>,
 }
 
 impl Engine {
@@ -566,6 +716,18 @@ impl Engine {
         self.held.clear();
         let _ = self.agent.tx.send(AgentCmd::Cancel);
         self.drop_current();
+        if self.study.as_ref().is_some_and(|s| s.sent) {
+            let _ = self.agent.desk.send(AgentCmd::Cancel);
+        }
+        let studies: Vec<Study> = self
+            .study
+            .take()
+            .into_iter()
+            .chain(self.studies.drain(..))
+            .collect();
+        for s in studies {
+            self.done(s.turn, Outcome::Cancelled, s.started);
+        }
         self.calling = None;
         self.planning = None;
         self.plan_due = false;
@@ -622,8 +784,9 @@ impl Engine {
                 let data = fetch(&self.context);
                 let context = self.context.clone();
                 let tx = self.fetched.clone();
+                let quick = self.rules.quick;
                 tokio::spawn(async move {
-                    let more = with_more(context, text.clone(), data).await;
+                    let more = look_up(quick, context, text.clone(), data).await;
                     let _ = tx.send(Fetched::Words {
                         turn,
                         result: Ok(text),
@@ -647,9 +810,29 @@ impl Engine {
                     urgent: false,
                 });
             }
-            Command::SetAgent(command) => {
+            Command::SetAgentOptions(o) => {
+                let changed = |new: &[(String, String)], old: &[(String, String)]| {
+                    let new = new.iter().filter(|o| !old.contains(o));
+                    new.cloned().collect::<Vec<_>>()
+                };
+                let radio = changed(&o.radio, &self.agent_options.radio);
+                // What the desk shares with the radio changes there too.
+                let shared = radio
+                    .iter()
+                    .filter(|(k, _)| o.desk.iter().all(|(d, _)| d != k));
+                let mut desk: Vec<_> = shared.cloned().collect();
+                desk.extend(changed(&o.desk, &self.agent_options.desk));
+                for (tx, new) in [(&self.agent.tx, radio), (&self.agent.desk, desk)] {
+                    if !new.is_empty() {
+                        let _ = tx.send(AgentCmd::Set(new));
+                    }
+                }
+                self.agent_options = o;
+            }
+            Command::SetAgent(command, options) => {
                 self.cancel_all();
                 self.agent_command = command;
+                self.agent_options = options;
                 self.attempts = 0;
                 self.start_agent();
             }
@@ -689,11 +872,12 @@ impl Engine {
         let context = self.context.clone();
         let early = self.early.take().unwrap_or_default();
         let text = early.finish(rec, self.transcriber.clone());
+        let quick = self.rules.quick;
         tokio::spawn(async move {
             let result = text.await;
             let ms = ms(t0);
             let words = result.as_ref().map(String::clone).unwrap_or_default();
-            let more = with_more(context, words, data).await;
+            let more = look_up(quick, context, words, data).await;
             let _ = tx.send(Fetched::Words {
                 turn,
                 result,
@@ -759,6 +943,49 @@ impl Engine {
                     self.call(turn, started, &events, data.as_deref());
                 }
             }
+            Fetched::Told {
+                about,
+                text,
+                urgent,
+            } => {
+                let Some(text) = text else { return };
+                if self.holding() && !urgent {
+                    return;
+                }
+                self.next_turn += 1;
+                let (turn, started) = (self.next_turn, Instant::now());
+                self.emit(Event::CallStarted { turn, about });
+                self.tell(turn, started, &text, Scope::Calls, urgent);
+                self.done(turn, Outcome::Answered, started);
+                self.remember(String::new(), text, false);
+            }
+            Fetched::Instead { turn, text } => {
+                // Unless the driver went on.
+                if let Some(text) = text
+                    && turn >= self.newest
+                    && self.waiting.is_empty()
+                {
+                    self.tell(turn, Instant::now(), &text, Scope::All, false);
+                    self.remember(String::new(), text, false);
+                }
+            }
+            Fetched::Study { turn, data } => {
+                let recent = self.recent();
+                let template = config::STUDY_PROMPT.replace("{radio}", &self.status());
+                let Some(s) = self.study.as_mut().filter(|s| s.turn == turn) else {
+                    return;
+                };
+                s.sent = true;
+                let text = recent + &render_prompt(&template, &s.asked, data.as_deref());
+                let cmd = AgentCmd::Prompt {
+                    turn,
+                    text,
+                    keep: true,
+                };
+                if self.agent.desk.send(cmd).is_err() {
+                    self.study_end(Some("エージェントに接続していません".into()));
+                }
+            }
             Fetched::Plan { turn, data } => {
                 let Some((t, started)) = self.planning.filter(|(t, _)| *t == turn) else {
                     return;
@@ -775,6 +1002,35 @@ impl Engine {
 
     /// Passes the driver's words on.
     fn words(&mut self, turn: Turn, started: Instant, text: String, more: More) {
+        if let Some(answer) = more.answer.clone().and_then(|a| self.answer(a)) {
+            // The agent goes on with what was asked before.
+            if self.current.as_ref().is_some_and(|c| c.call.is_some()) {
+                let _ = self.agent.tx.send(AgentCmd::Cancel);
+                self.drop_current();
+            }
+            self.held.clear();
+            self.tell(turn, started, &answer, Scope::All, false);
+            self.remember(text, answer, false);
+            self.done(turn, Outcome::Answered, started);
+            return;
+        }
+        if more.long && self.agent_ready && self.resting.is_none() {
+            self.held.clear();
+            // Nothing but "look it up": that is what it does.
+            if self.study.is_some() && text.chars().count() <= NUDGE {
+                self.tell(turn, started, STUDYING_YET, Scope::All, false);
+                self.done(turn, Outcome::Answered, started);
+                return;
+            }
+            let said = if self.study.is_some() {
+                STUDY_NEXT
+            } else {
+                STUDYING
+            };
+            self.tell(turn, started, said, Scope::All, false);
+            self.study(turn, started, text);
+            return;
+        }
         if turn < self.newest && self.current.is_some() {
             // A newer question is being answered: this one follows, unspoken.
             self.late.push_back((turn, started, text, more.data));
@@ -784,9 +1040,187 @@ impl Engine {
         self.held.clear();
         let spoken = turn > self.newest;
         self.ask(turn, started, &text, more.data.as_deref(), spoken);
-        if more.long {
-            self.stand_by();
+    }
+
+    /// Has the desk look into something. Nobody waits for it.
+    fn study(&mut self, turn: Turn, started: Instant, asked: String) {
+        let s = Study {
+            turn,
+            started,
+            began: Instant::now(),
+            asked,
+            sent: false,
+            stripper: Stripper::default(),
+            said: String::new(),
+        };
+        if self.study.is_none() {
+            self.begin_study(s);
+        } else if self.studies.len() < STUDIES {
+            self.studies.push_back(s);
+        } else {
+            self.done(turn, Outcome::Cancelled, started);
         }
+    }
+
+    fn begin_study(&mut self, mut s: Study) {
+        s.began = Instant::now();
+        let (turn, text) = (s.turn, s.asked.clone());
+        self.study = Some(s);
+        let context = self.context.clone();
+        let tx = self.fetched.clone();
+        tokio::task::spawn_blocking(move || {
+            let data = context.and_then(|c| c.fetch_all(&text));
+            let _ = tx.send(Fetched::Study { turn, data });
+        });
+    }
+
+    /// The desk is done, or cannot go on.
+    fn study_end(&mut self, error: Option<String>) {
+        let Some(mut s) = self.study.take() else {
+            return;
+        };
+        let (rest, found) = s.stripper.finish();
+        s.said.push_str(&rest);
+        for d in found {
+            match d.and_then(known) {
+                // It is the desk.
+                Ok(Directive::Study(_) | Directive::Plan(_)) => {}
+                Ok(d) => self.apply(d),
+                Err(e) => tracing::warn!("desk: {e}"),
+            }
+        }
+        let said = s.said.trim().to_string();
+        let spent = error.as_deref().is_some_and(exhausted)
+            || (exhausted(&said) && text::foreign(&said, self.language.as_deref()));
+        if spent {
+            self.resting = Some(Instant::now() + REST);
+        }
+        let error = error.or_else(|| spent.then(|| said.clone()));
+        let error = error.or_else(|| said.is_empty().then(|| "no answer".into()));
+        let (text, outcome) = match error {
+            Some(e) => {
+                self.emit(Event::Error(format!("agent: {e}")));
+                let text = if spent { EXHAUSTED } else { STUDY_FAILED };
+                (text.to_string(), Outcome::Failed(e))
+            }
+            None => (said, Outcome::Answered),
+        };
+        self.tell(s.turn, s.started, &text, Scope::Calls, false);
+        self.remember(format!("調査: {}", s.asked), text, false);
+        self.done(s.turn, outcome, s.started);
+        if let Some(next) = self.studies.pop_front() {
+            self.begin_study(next);
+        }
+    }
+
+    /// What was said lately, for the desk.
+    fn recent(&self) -> String {
+        let skip = self.log.len().saturating_sub(DESK_LOG);
+        let lines: Vec<String> = self.log.iter().skip(skip).map(Exchange::line).collect();
+        if lines.is_empty() {
+            return String::new();
+        }
+        format!("直前までの交信（古い順）:\n{}\n\n", lines.join("\n"))
+    }
+
+    /// The words of an answer that needs no agent; `None`: it does.
+    fn answer(&self, a: Answer) -> Option<String> {
+        // Whatever the driver says now is the reply.
+        let asked = self.last_said.trim_end().ends_with(['？', '?']);
+        match a {
+            Answer::Text(t) => Some(t),
+            Answer::Again if self.last_said.is_empty() => None,
+            Answer::Again => Some(self.last_said.clone()),
+            Answer::Ack if asked => None,
+            Answer::Ack => Some("了解。".into()),
+            Answer::Unclear(_) if asked => None,
+            Answer::Unclear(status) => Some(format!("{UNCLEAR}{status}")),
+        }
+    }
+
+    /// Shows and speaks words that are complete.
+    fn tell(&mut self, turn: Turn, started: Instant, text: &str, scope: Scope, urgent: bool) {
+        self.emit(Event::FirstToken {
+            turn,
+            ms: ms(started),
+        });
+        self.emit(Event::Chunk {
+            turn,
+            text: text.into(),
+        });
+        if self.muted {
+            return;
+        }
+        let mut splitter = SentenceSplitter::default();
+        let mut sentences = splitter.push(text);
+        sentences.extend(splitter.finish());
+        for (i, text) in sentences.into_iter().enumerate() {
+            let clip = Clip {
+                turn,
+                generation: self.generation.load(Ordering::SeqCst),
+                started,
+                first: i == 0 && scope == Scope::All,
+                text,
+                voice: None,
+                scope: Some(scope),
+                urgent,
+            };
+            self.speak(clip);
+        }
+    }
+
+    fn remember(&mut self, driver: String, engineer: String, known: bool) {
+        if engineer.trim().is_empty() {
+            return;
+        }
+        self.last_said = engineer.clone();
+        self.log.push_back(Exchange {
+            driver,
+            engineer,
+            known,
+        });
+        while self.log.len() > REMEMBERED {
+            self.log.pop_front();
+        }
+    }
+
+    /// What the agent missed, for the next prompt.
+    fn missed(&mut self) -> String {
+        let lines: Vec<String> = self
+            .log
+            .iter_mut()
+            .filter_map(|e| {
+                if std::mem::replace(&mut e.known, true) {
+                    return None;
+                }
+                Some(e.line())
+            })
+            .collect();
+        if lines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "これまでの交信（済んだこと。古い順）:\n{}\n\n",
+                lines.join("\n")
+            )
+        }
+    }
+
+    /// The agent did not answer: how things are, instead of nothing.
+    fn instead(&mut self, turn: Turn, error: &str) {
+        let spent = exhausted(error);
+        if spent {
+            self.resting = Some(Instant::now() + REST);
+        }
+        let said = if spent { EXHAUSTED } else { NO_AGENT };
+        let Some(c) = self.context.clone() else {
+            return;
+        };
+        let tx = self.fetched.clone();
+        tokio::task::spawn_blocking(move || {
+            let text = c.say("status").map(|s| format!("{said}{s}"));
+            let _ = tx.send(Fetched::Instead { turn, text });
+        });
     }
 
     /// Tells the driver that the answer is coming, unless it already is.
@@ -800,6 +1234,10 @@ impl Engine {
         if self.standby.is_none() || self.muted || !japanese {
             return;
         }
+        if self.stood_by.is_some_and(|t| t.elapsed() < STANDBY_GAP) {
+            return;
+        }
+        self.stood_by = Some(Instant::now());
         let clip = Clip {
             turn: c.turn,
             generation: self.generation.load(Ordering::SeqCst),
@@ -817,7 +1255,7 @@ impl Engine {
     fn ask(&mut self, turn: Turn, started: Instant, text: &str, data: Option<&str>, spoken: bool) {
         self.newest = self.newest.max(turn);
         let template = self.prompt_template.replace("{radio}", &self.status());
-        let prompt = render_prompt(&template, text, data);
+        let prompt = self.missed() + &render_prompt(&template, text, data);
         let mut cmd = AgentCmd::Prompt {
             turn,
             text: prompt,
@@ -834,10 +1272,14 @@ impl Engine {
                 let error = "エージェントに接続していません";
                 self.emit(Event::Error(format!("{error}（設定から接続してください）")));
                 self.done(turn, Outcome::Failed(error.into()), started);
+                self.instead(turn, error);
                 return;
             }
         }
         self.start_turn(turn, started, spoken, None);
+        if let Some(c) = &mut self.current {
+            c.asked = text.into();
+        }
     }
 
     fn start_turn(&mut self, turn: Turn, started: Instant, spoken: bool, call: Option<Call>) {
@@ -851,6 +1293,9 @@ impl Engine {
             spoken,
             call,
             standby: false,
+            asked: String::new(),
+            said: String::new(),
+            failed: None,
         });
     }
 
@@ -862,7 +1307,8 @@ impl Engine {
             .iter()
             .any(|(_, e)| e.urgent() && e.kind != watch::WATCH);
         let template = config::CALL_PROMPT.replace("{radio}", &self.status());
-        let text = render_prompt(&template, &about, data);
+        let text = self.missed() + &render_prompt(&template, &about, data);
+        self.last_agent_call = Some(started);
         self.by_itself(turn, started, text, Call::new(about, Why::Event, urgent));
     }
 
@@ -889,16 +1335,28 @@ impl Engine {
             text,
             keep: false,
         };
-        if self.agent.tx.send(cmd).is_ok() {
+        if self.resting.is_none() && self.agent.tx.send(cmd).is_ok() {
             self.start_turn(turn, started, true, Some(call));
         }
     }
 
     fn start_agent(&mut self) {
         // Dropping the old link ends its process.
-        self.agent = (self.connect)(&self.agent_command);
+        self.agent = (self.connect)(&self.agent_command, &self.agent_options);
         self.agent_ready = false;
         self.reconnect = None;
+        self.forgotten();
+    }
+
+    fn studies_as(&self, turn: Turn) -> bool {
+        self.study.as_ref().is_some_and(|s| s.turn == turn)
+    }
+
+    /// The agent is a new one.
+    fn forgotten(&mut self) {
+        for e in &mut self.log {
+            e.known = false;
+        }
     }
 
     fn agent_event(&mut self, ev: AgentEvent) {
@@ -907,6 +1365,34 @@ impl Engine {
             AgentEvent::Cost {
                 amount, currency, ..
             } => self.emit(Event::Cost { amount, currency }),
+            AgentEvent::Renewed => self.forgotten(),
+            AgentEvent::Options(o) => self.emit(Event::AgentOptions(o)),
+            AgentEvent::Chunk { turn, text } if self.studies_as(turn) => {
+                if let Some(s) = &mut self.study {
+                    let (text, found) = s.stripper.push(&text);
+                    s.said.push_str(&text);
+                    for d in found.into_iter().flatten() {
+                        if !matches!(d, Directive::Study(_) | Directive::Plan(_))
+                            && let Ok(d) = known(d)
+                        {
+                            self.apply(d);
+                        }
+                    }
+                }
+            }
+            AgentEvent::TurnEnd {
+                turn,
+                usage,
+                stop: _,
+            } if self.studies_as(turn) => {
+                if let Some(usage) = usage {
+                    self.emit(Event::Usage { turn, usage });
+                }
+                self.study_end(None);
+            }
+            AgentEvent::TurnFailed { turn, error } if self.studies_as(turn) => {
+                self.study_end(Some(error));
+            }
             AgentEvent::Ready { name } => {
                 self.agent_ready = true;
                 self.attempts = 0;
@@ -916,6 +1402,13 @@ impl Engine {
                 self.agent_ready = false;
                 if let Some(c) = self.current.take() {
                     self.done(c.turn, Outcome::Failed("agent closed".into()), c.started);
+                }
+                for s in self.study.take().into_iter().chain(self.studies.drain(..)) {
+                    let _ = self.events.send(Event::TurnDone {
+                        turn: s.turn,
+                        outcome: Outcome::Failed("agent closed".into()),
+                        ms: ms(s.started),
+                    });
                 }
                 if !permanent(error.as_deref()) {
                     let wait = RECONNECT_S[self.attempts.min(RECONNECT_S.len() - 1)];
@@ -937,9 +1430,12 @@ impl Engine {
                 title,
                 state,
             } => {
-                if mine(&self.current, turn) {
-                    // Looking something up takes two round trips.
-                    self.stand_by();
+                let desk = self.studies_as(turn);
+                if let Some(s) = self.study.as_mut().filter(|_| desk) {
+                    // What it said before was not the answer.
+                    s.said.clear();
+                }
+                if mine(&self.current, turn) || desk {
                     self.emit(Event::Tool {
                         turn,
                         id,
@@ -953,7 +1449,7 @@ impl Engine {
                 title,
                 allowed,
             } => {
-                if mine(&self.current, turn) {
+                if mine(&self.current, turn) || self.studies_as(turn) {
                     self.emit(Event::Permission {
                         turn,
                         title,
@@ -996,6 +1492,23 @@ impl Engine {
             if error.is_none() {
                 self.planned(planned);
             }
+        }
+        let error = error.or(c.failed.take());
+        match (&error, c.call.is_some()) {
+            // Nothing was said: at least how things are.
+            (Some(e), false) if c.said.trim().is_empty() || exhausted(e) => {
+                let e = e.clone();
+                self.instead(c.turn, &e);
+            }
+            (Some(e), _) if exhausted(e) => self.resting = Some(Instant::now() + REST),
+            (None, _) => {
+                let (asked, said) = (std::mem::take(&mut c.asked), std::mem::take(&mut c.said));
+                let shown = c.call.as_ref().is_none_or(|call| call.shown);
+                if shown && c.spoken {
+                    self.remember(asked, said, true);
+                }
+            }
+            _ => {}
         }
         // Once: a model that cannot write it will not learn now.
         let errors = std::mem::take(&mut self.unreadable);
@@ -1047,7 +1560,14 @@ impl Engine {
             });
         }
         let sentences = c.splitter.push(&text);
+        c.said.push_str(&text);
         let _ = self.events.send(Event::Chunk { turn: c.turn, text });
+        // Codex writes its errors into the reply.
+        if exhausted(&c.said) && text::foreign(&c.said, self.language.as_deref()) {
+            c.failed = Some(c.said.clone());
+            c.splitter = SentenceSplitter::default();
+            return;
+        }
         if let Some(c) = self.current.take() {
             for s in sentences {
                 self.say_sentence(&c, s);
@@ -1104,6 +1624,15 @@ impl Engine {
                     }
                 }
                 (Some(Why::Event | Why::Plan), f) => tracing::warn!("call: ignored {f:?}"),
+                (None, Ok(Directive::Study(asked))) => {
+                    self.next_turn += 1;
+                    let turn = self.next_turn;
+                    self.emit(Event::CallStarted {
+                        turn,
+                        about: format!("調査: {asked}"),
+                    });
+                    self.study(turn, Instant::now(), asked);
+                }
                 // It worked the first time.
                 (Some(Why::Fix), Ok(d)) if d.relative() => {}
                 (None | Some(Why::Fix), Ok(d)) => self.apply(d),
@@ -1194,6 +1723,8 @@ impl Engine {
                 self.set_plan(Some(p));
                 return;
             }
+            // Has a turn of its own.
+            Directive::Study(_) => return,
             rule => {
                 let mut rules = self.rules.clone();
                 let Some(setting) = change(&mut rules, rule) else {
@@ -1209,6 +1740,69 @@ impl Engine {
     fn set_volume(&mut self, v: u8) {
         self.volume = v.min(MAX_VOLUME);
         self.output.set_volume(f32::from(self.volume) / 100.0);
+    }
+
+    /// Has the spotter's words ready: a call must not wait for the voice.
+    fn warm_spotter(&mut self) {
+        let key = (self.speaker.load(Ordering::Relaxed), self.speed);
+        if self.warmed == Some(key) || !self.proactive.wants_spotter() {
+            return;
+        }
+        self.warmed = Some(key);
+        let (synth, phrases) = (self.synth.clone(), self.phrases.clone());
+        tokio::task::spawn_blocking(move || {
+            phrases.lock().unwrap().retain(|k, _| (k.0, k.1) == key);
+            for text in spotter::PHRASES {
+                if let Ok(wav) = synth.synthesize(text, key.0) {
+                    let at = (key.0, key.1, text);
+                    let wav = wav::begin_at_once(wav);
+                    phrases.lock().unwrap().insert(at, wav);
+                }
+            }
+        });
+    }
+
+    /// The spotter speaks over everything else.
+    fn spot(&mut self, text: &'static str) {
+        self.next_turn += 1;
+        let (turn, started) = (self.next_turn, Instant::now());
+        self.emit(Event::CallStarted {
+            turn,
+            about: Group::Spotter.label().into(),
+        });
+        self.emit(Event::Chunk {
+            turn,
+            text: text.into(),
+        });
+        self.done(turn, Outcome::Answered, started);
+        let n = self.spotted.fetch_add(1, Ordering::SeqCst) + 1;
+        let (speaker, speed) = (self.speaker.load(Ordering::Relaxed), self.speed);
+        let ready = self
+            .phrases
+            .lock()
+            .unwrap()
+            .get(&(speaker, speed, text))
+            .cloned();
+        if let Some(wav) = ready {
+            self.output.interject(wav);
+            return;
+        }
+        let (synth, output, spotted) = (
+            self.synth.clone(),
+            self.output.clone(),
+            self.spotted.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let wav = synth.synthesize(text, speaker);
+            // Said by now something newer, or too late to be true.
+            let current = spotted.load(Ordering::SeqCst) == n;
+            if let Ok(wav) = wav
+                && current
+                && started.elapsed() < Duration::from_millis(600)
+            {
+                output.interject(wav::begin_at_once(wav));
+            }
+        });
     }
 
     fn set_speed(&mut self, v: u16) {
@@ -1275,11 +1869,7 @@ impl Engine {
                 let rules = self.rules.lasting();
                 self.change_rules(rules);
             }
-            // Thought through before anything is said about it.
-            ("strategy", "plan") if self.rules.planning > 0 => {
-                self.plan_due = true;
-                return;
-            }
+            ("strategy", "plan") if self.rules.planning > 0 => self.plan_due |= self.to_plan(),
             _ => {}
         }
         if self.proactive.wants(&e) {
@@ -1290,11 +1880,33 @@ impl Engine {
         }
     }
 
+    /// There is something to plan: a stop. Without one the plan is to drive.
+    fn to_plan(&self) -> bool {
+        let enough = self.now.get("fuel_spare").is_some_and(|f| *f > 0.0);
+        !enough || self.now.contains_key("stop_in")
+    }
+
     /// The race as it is now.
     fn live(&mut self, v: Values) {
         let now = Instant::now();
+        self.now.clone_from(&v);
+        self.heard = Some(now);
+        let spots = self.proactive.wants_spotter() && !self.muted && !self.recording;
+        if spots && !self.held_back(&v) {
+            self.warm_spotter();
+            if let Some(text) = self.spotter.check(&v, now) {
+                self.spot(text);
+            }
+        }
         for w in self.lookout.check(&v, now) {
-            self.came_true(&w, &v);
+            // The spotter told, or will.
+            let beside = w
+                .when
+                .parse::<Expr>()
+                .is_ok_and(|e| calls::spotters(e.keys()));
+            if !(beside && self.proactive.wants_spotter()) {
+                self.came_true(&w, &v);
+            }
         }
         let on = |k: &str| v.get(k).is_some_and(|x| *x > 0.0);
         if self.rules.planning > 0
@@ -1303,7 +1915,7 @@ impl Engine {
             && let Some(lap) = v.get("lap").copied().filter(|l| *l >= PLAN_FROM_LAP)
         {
             let every = f64::from(self.rules.planning);
-            if self.plan_lap.is_none_or(|l| lap >= l + every || lap < l) {
+            if self.plan_lap.is_none_or(|l| lap >= l + every || lap < l) && self.to_plan() {
                 self.plan_lap = Some(lap);
                 self.plan_due = true;
             }
@@ -1312,12 +1924,31 @@ impl Engine {
         self.gate.update(v, now);
     }
 
+    /// Nothing may be said, whoever says it.
+    fn held_back(&self, v: &Values) -> bool {
+        let hold = self.rules.hold(Scope::All);
+        hold.and_then(|h| h.parse::<Expr>().ok())
+            .is_some_and(|h| h.holds(v))
+    }
+
     /// A watch: told as it is, or a matter for the engineer.
     fn came_true(&mut self, w: &Watch, v: &Values) {
         if w.once {
             let mut rules = self.rules.clone();
             rules.watches.retain(|x| x != w);
             self.change_rules(rules);
+        }
+        let order = w
+            .act
+            .as_deref()
+            .filter(|_| self.rules.quick && !w.planned)
+            .and_then(quick::order);
+        let topic = w.tell.clone().or(order.map(String::from));
+        if w.say.is_none()
+            && let Some(topic) = topic
+        {
+            self.tell_topics(vec![Ok(topic)], format!("見張り: {}", w.when), false);
+            return;
         }
         let Some(say) = &w.say else {
             let act = w.act.as_deref().unwrap_or("今の値を知らせる");
@@ -1336,24 +1967,102 @@ impl Engine {
             turn,
             about: format!("見張り: {}", w.when),
         });
-        self.emit(Event::Chunk {
-            turn,
-            text: text.clone(),
-        });
+        // Told at once, but not on the brakes.
+        self.tell(turn, started, &text, Scope::Calls, false);
         self.done(turn, Outcome::Answered, started);
-        if !self.muted {
-            self.speak(Clip {
-                turn,
-                generation: self.generation.load(Ordering::SeqCst),
-                started,
-                first: false,
+        self.remember(String::new(), text, false);
+    }
+
+    /// Says what needs no agent: words, or topics (`Ok`) of `vr say`.
+    fn tell_topics(&mut self, parts: Vec<Result<String, String>>, about: String, urgent: bool) {
+        let context = self.context.clone();
+        let tx = self.fetched.clone();
+        tokio::task::spawn_blocking(move || {
+            let words: Vec<String> = parts
+                .into_iter()
+                .filter_map(|p| match p {
+                    Ok(topic) => context.as_ref()?.say(&topic),
+                    Err(text) => Some(text),
+                })
+                .collect();
+            let text = (!words.is_empty()).then(|| words.concat());
+            let _ = tx.send(Fetched::Told {
+                about,
                 text,
-                voice: None,
-                scope: Some(Scope::Calls),
-                // Told at once, but not on the brakes.
-                urgent: false,
+                urgent,
             });
+        });
+    }
+
+    /// Events to tell: in words that need no agent, or a matter for it.
+    /// Returns those it has to think about.
+    fn tell_events(&mut self, events: Vec<Dated>) -> Vec<Dated> {
+        let mut ask = Vec::new();
+        let mut parts = Vec::new();
+        // Old gaps are not told as new ones.
+        let fresh = self.heard.is_some_and(|t| t.elapsed() < HEARD);
+        let race = if fresh {
+            self.now.clone()
+        } else {
+            Values::new()
+        };
+        let all: Vec<RaceEvent> = events.iter().map(|(_, e)| e.clone()).collect();
+        let at = events.first().map_or_else(Instant::now, |(t, _)| *t);
+        let mut about: Vec<String> = Vec::new();
+        let mut urgent = false;
+        for e in calls::merge(&all) {
+            let part = match calls::tell(&e, &race) {
+                Told::Nothing => continue,
+                Told::Ask => {
+                    ask.push((at, e));
+                    continue;
+                }
+                Told::Say(text) => Err(text),
+                Told::Topic(topic) => Ok(topic.to_string()),
+            };
+            urgent |= e.urgent();
+            let label = calls::about(&e);
+            if !about.contains(&label) {
+                about.push(label);
+            }
+            if !parts.contains(&part) {
+                parts.push(part);
+            }
         }
+        if !parts.is_empty() {
+            self.tell_topics(parts, about.join("・"), urgent);
+        }
+        ask
+    }
+
+    /// Stops turns of the agent that do not end.
+    fn give_up(&mut self) {
+        if self
+            .study
+            .as_ref()
+            .is_some_and(|s| s.began.elapsed() >= STUDY_LIMIT)
+        {
+            let _ = self.agent.desk.send(AgentCmd::Cancel);
+            self.study_end(Some("時間切れ".into()));
+        }
+        let stuck = |c: &Current| c.call.is_some() && c.started.elapsed() >= CALL_LIMIT;
+        if self.current.as_ref().is_some_and(stuck) {
+            let _ = self.agent.tx.send(AgentCmd::Cancel);
+            if let Some(c) = self.current.take() {
+                // Not tried again: it would be stuck again.
+                tracing::warn!("call: no end after {CALL_LIMIT:?}");
+                self.done(c.turn, Outcome::Failed("時間切れ".into()), c.started);
+            }
+        }
+    }
+
+    /// The agent may speak of its own accord.
+    fn agent_may_call(&self) -> bool {
+        self.agent_ready
+            && self.resting.is_none()
+            && self
+                .last_agent_call
+                .is_none_or(|t| t.elapsed() >= AGENT_GAP)
     }
 
     fn tick(&mut self, telemetry: Option<bool>) {
@@ -1383,15 +2092,24 @@ impl Engine {
         {
             self.stand_by();
         }
-        let idle = self.agent_ready
-            && !self.busy()
+        self.give_up();
+        if self.resting.is_some_and(|t| t <= Instant::now()) {
+            self.resting = None;
+        }
+        let idle = !self.busy()
             && self.calling.is_none()
             && !self.speaking
             && self.pending_clips.load(Ordering::SeqCst) == 0;
         if self.hushed {
             self.queue.keep_urgent();
         }
-        if let Some(events) = self.queue.due(Instant::now(), idle) {
+        let due = self.queue.due(Instant::now(), idle);
+        let ask = due
+            .map(|events| self.tell_events(events))
+            .unwrap_or_default();
+        // What cannot be asked now is old by the time it can.
+        if !ask.is_empty() && self.agent_may_call() {
+            let events = ask;
             self.next_turn += 1;
             let turn = self.next_turn;
             let strategy = events.iter().any(|(_, e)| e.kind == "strategy");
@@ -1404,6 +2122,8 @@ impl Engine {
                 let _ = tx.send(Fetched::Call { turn, data });
             });
         } else if idle
+            && self.agent_ready
+            && self.resting.is_none()
             && self.plan_due
             && self.planning.is_none()
             && self.queue.is_empty()
@@ -1477,6 +2197,10 @@ fn change(r: &mut Rules, d: Directive) -> Option<Setting> {
             r.planning = n;
             Setting::Planning(n)
         }
+        Directive::Quick(on) => {
+            r.quick = on;
+            Setting::Quick(on)
+        }
         _ => return None,
     })
 }
@@ -1504,6 +2228,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         make_transcriber,
         agent,
         agent_command,
+        agent_options,
         connect,
         context,
         prompt_template,
@@ -1545,6 +2270,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         make_transcriber,
         agent,
         agent_command,
+        agent_options,
         agent_ready: false,
         reconnect: None,
         attempts: 0,
@@ -1589,6 +2315,19 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         standby,
         calling: None,
         watching: None,
+        spotter: Spotter::default(),
+        spotted: Arc::default(),
+        phrases: Arc::default(),
+        warmed: None,
+        now: Values::new(),
+        heard: None,
+        log: VecDeque::new(),
+        last_said: String::new(),
+        last_agent_call: None,
+        resting: None,
+        study: None,
+        studies: VecDeque::new(),
+        stood_by: None,
     };
     engine.warm(engine.speaker.load(Ordering::Relaxed));
     engine.set_volume(volume);
@@ -1663,7 +2402,23 @@ mod tests {
             More {
                 data: text.contains("BB").then(|| "BB 54".into()),
                 long: text.contains("調べて"),
+                answer: None,
             }
+        }
+        fn answer(&self, text: &str) -> Option<Answer> {
+            match text {
+                "順位" => Some(Answer::Text("4番手。前まで0.62秒。".into())),
+                "もう一回" => Some(Answer::Again),
+                "はい" => Some(Answer::Ack),
+                "ん" => Some(Answer::Unclear("今4番手。".into())),
+                _ => None,
+            }
+        }
+        fn say(&self, topic: &str) -> Option<String> {
+            Some(format!("{topic}の答え。"))
+        }
+        fn fetch_all(&self, text: &str) -> Option<String> {
+            Some(format!("{text}の全データ"))
         }
     }
 
@@ -1757,6 +2512,9 @@ mod tests {
                     permissions: Permissions::Safe,
                     options: vec![],
                     primer: None,
+                    desk_primer: None,
+                    desk_options: vec![],
+                    renew: crate::agent::Renew::NEVER,
                 },
             )
         };
@@ -1785,8 +2543,9 @@ mod tests {
                 output: out.clone(),
                 agent: link(reply, prompts.clone()),
                 agent_command: "other".into(),
+                agent_options: AgentOptions::default(),
                 standby,
-                connect: Box::new(move |command| {
+                connect: Box::new(move |command, _| {
                     connected.lock().unwrap().push(command.to_string());
                     match command {
                         "other" => link(&["別の返答。"], other.clone()),
@@ -1974,34 +2733,226 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn looking_something_up_is_announced_once() {
+    async fn looking_something_up_is_not_announced() {
         // The fake agent runs a command before it answers.
         let mut h = patient(&["54。"], 60_000);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        h.cmds.send(Command::Ask("調べて".into())).unwrap();
+        h.cmds.send(Command::Ask("何か".into())).unwrap();
         h.until(is_done).await;
-        assert_eq!(h.played(2).await, [waited(), "3:54。".into()]);
+        assert_eq!(h.played(1).await, ["3:54。"]);
         // The answer is what the latency is measured by.
         let events = h.until(|e| matches!(e, Event::FirstAudio { .. })).await;
         assert!(events.iter().all(|e| !matches!(e, Event::Error(_))));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(h.out.played.lock().unwrap().len(), 2);
+        assert_eq!(h.out.played.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn a_long_look_up_is_announced_before_the_agent_moves() {
-        let mut h = patient(&["54。"], 60_000);
+    async fn the_desk_looks_into_it_while_the_driver_asks_on() {
+        let mut h = start(
+            &[
+                "はい。",
+                "@調査@[[radio volume=80]]空力は無傷。",
+                "@見たか@見た。",
+            ],
+            "x",
+            1.0,
+        );
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        h.cmds.send(Command::Ask("slow 調べて".into())).unwrap();
-        assert_eq!(h.played(1).await, [waited()]);
-        // Muted: not a word.
-        let mut h = patient(&["54。"], 60_000);
+        h.cmds.send(Command::Ask("順位".into())).unwrap();
+        h.until(is_done).await;
+        h.played(2).await;
+        h.cmds.send(Command::Ask("空力を調べて".into())).unwrap();
+        let events = h.until(is_done).await;
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Chunk { turn: 2, text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "了解、調べる。空力は無傷。");
+        assert!(events.contains(&Event::Setting(Setting::Volume(80))));
+        assert!(matches!(
+            events.last(),
+            Some(Event::TurnDone {
+                turn: 2,
+                outcome: Outcome::Answered,
+                ..
+            })
+        ));
+        let played = h.played(4).await;
+        assert_eq!(played[2..], ["3:了解、調べる。", "3:空力は無傷。"]);
+        let asked = h.prompts.lock().unwrap()[0].clone();
+        assert!(
+            asked.starts_with("直前までの交信（古い順）:\n無線「順位」→ 返答「4番手。"),
+            "{asked}"
+        );
+        assert!(asked.contains("「空力を調べて」") && asked.contains("空力を調べての全データ"));
+        // The radio knows of it.
+        h.cmds.send(Command::Ask("見たか".into())).unwrap();
+        h.until(is_done).await;
+        let next = h.prompts.lock().unwrap()[1].clone();
+        assert!(
+            next.contains("無線「調査: 空力を調べて」→ 返答「空力は無傷。」"),
+            "{next}"
+        );
+    }
+
+    #[tokio::test]
+    async fn studies_wait_for_each_other_and_not_the_driver_for_them() {
+        let mut h = start(&["はい。"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        h.cmds.send(Command::SetMuted(true)).unwrap();
         h.cmds.send(Command::Ask("slow 調べて".into())).unwrap();
         h.prompted(1).await;
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(h.out.played.lock().unwrap().is_empty());
+        h.cmds.send(Command::Ask("調べて".into())).unwrap();
+        h.until(is_done).await;
+        assert_eq!(h.played(2).await[1], "3:今調べてる。");
+        h.cmds
+            .send(Command::Ask("次はタイヤも調べて".into()))
+            .unwrap();
+        h.played(3).await;
+        // The radio answers meanwhile.
+        h.cmds.send(Command::Ask("何か".into())).unwrap();
+        let events = h.until(is_done).await;
+        assert!(matches!(
+            events.last(),
+            Some(Event::TurnDone { turn: 4, .. })
+        ));
+        assert_eq!(
+            h.played(4).await,
+            [
+                "3:了解、調べる。",
+                "3:今調べてる。",
+                "3:了解、今の調査の次に調べる。",
+                "3:はい。"
+            ]
+        );
+        // Everything stops when the driver says so.
+        h.cmds.send(Command::Cancel).unwrap();
+        for turn in [1, 3] {
+            let e = h.until(is_done).await;
+            let done = Event::TurnDone {
+                turn,
+                outcome: Outcome::Cancelled,
+                ms: 0,
+            };
+            let same = |e: &Event| matches!((e, &done), (Event::TurnDone { turn: a, outcome: x, .. }, Event::TurnDone { turn: b, outcome: y, .. }) if a == b && x == y);
+            assert!(same(e.last().unwrap()), "{e:?}");
+        }
+        // No more than three wait.
+        h.cmds.send(Command::Ask("slow 調べて".into())).unwrap();
+        h.prompted(3).await;
+        for _ in 0..4 {
+            h.cmds
+                .send(Command::Ask("ほかのことも調べて".into()))
+                .unwrap();
+        }
+        let e = h.until(is_done).await;
+        assert!(matches!(
+            e.last(),
+            Some(Event::TurnDone {
+                turn: 6..=9,
+                outcome: Outcome::Cancelled,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_look_up_without_end_is_given_up() {
+        let mut h = start(&["はい。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("slow 調べて".into())).unwrap();
+        h.prompted(1).await;
+        let e = h.until(is_done).await;
+        assert!(
+            matches!(e.last(), Some(Event::TurnDone { turn: 1, outcome: Outcome::Failed(f), ms }) if f == "時間切れ" && *ms >= 2000),
+            "{e:?}"
+        );
+        assert_eq!(
+            h.played(3).await,
+            [
+                "3:了解、調べる。",
+                "3:調べきれなかった。",
+                "3:もう一度言ってくれれば調べ直す。"
+            ]
+        );
+        // The desk is free again.
+        h.cmds.send(Command::Ask("空力を調べて".into())).unwrap();
+        h.prompted(2).await;
+    }
+
+    #[tokio::test]
+    async fn the_engineer_may_have_the_desk_look_into_it() {
+        let mut h = start(
+            &[
+                "左前が減る。[[radio study=\"左前の原因\"]]",
+                "@調査@キャンバーの付けすぎ。",
+            ],
+            "x",
+            1.0,
+        );
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("何か".into())).unwrap();
+        let events = h
+            .until(|e| matches!(e, Event::TurnDone { turn: 2, .. }))
+            .await;
+        assert!(events.contains(&Event::CallStarted {
+            turn: 2,
+            about: "調査: 左前の原因".into()
+        }));
+        assert_eq!(
+            h.played(2).await,
+            ["3:左前が減る。", "3:キャンバーの付けすぎ。"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_study_that_fails_is_told() {
+        let mut h = start(
+            &[
+                "はい。",
+                "@調査@You have hit your usage limit. Try again later.",
+            ],
+            "x",
+            1.0,
+        );
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("調べて".into())).unwrap();
+        let e = h.until(is_done).await;
+        assert!(matches!(
+            e.last(),
+            Some(Event::TurnDone {
+                outcome: Outcome::Failed(_),
+                ..
+            })
+        ));
+        let played = h.played(2).await.concat();
+        assert!(
+            played.contains("調べる。") && played.contains("利用枠"),
+            "{played}"
+        );
+        // While the limit lasts, the radio does not promise anything.
+        h.cmds.send(Command::Ask("調べて".into())).unwrap();
+        h.prompted(2).await;
+        assert!(h.prompts.lock().unwrap()[1].starts_with("これまでの交信"));
+    }
+
+    #[tokio::test]
+    async fn options_of_the_agent_can_be_changed() {
+        let mut h = start(&["はい。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let o = AgentOptions {
+            radio: vec![pair("model", "b")],
+            desk: vec![pair("effort", "high")],
+        };
+        // Nothing to set in an agent that offers nothing: it goes on.
+        h.cmds.send(Command::SetAgentOptions(o)).unwrap();
+        h.cmds.send(Command::Ask("何か".into())).unwrap();
+        let e = h.until(is_done).await;
+        assert!(e.iter().all(|e| !matches!(e, Event::Error(_))));
     }
 
     #[tokio::test]
@@ -2014,6 +2965,11 @@ mod tests {
         assert!(h.out.played.lock().unwrap().is_empty());
         assert_eq!(h.played(1).await, [waited()]);
         tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(h.out.played.lock().unwrap().len(), 1);
+        // Once is enough for a while.
+        h.cmds.send(Command::Ask("slow".into())).unwrap();
+        h.prompted(2).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(h.out.played.lock().unwrap().len(), 1);
     }
 
@@ -2277,7 +3233,7 @@ mod tests {
             })
             .collect();
         assert_eq!(shown, "音量を下げた。");
-        assert_eq!(h.played(1).await, ["3:音量を下げた。"]);
+        assert_eq!(h.played(1).await[0], "3:音量を下げた。");
         assert_eq!(*h.out.volumes.lock().unwrap(), [1.0, 0.8]);
         assert_eq!(*h.speeds.lock().unwrap(), [1.2, 1.3]);
         // What could not be read is written again; what could is not.
@@ -2318,6 +3274,7 @@ mod tests {
             text: "yellow flag".into(),
             flag: Some("yellow".into()),
             advice: None,
+            rest: Default::default(),
         }
     }
 
@@ -2327,37 +3284,55 @@ mod tests {
             text: kind.into(),
             flag: None,
             advice: None,
+            rest: Default::default(),
+        }
+    }
+
+    /// Something only the agent can put into words.
+    fn thought(text: &str) -> RaceEvent {
+        RaceEvent {
+            text: text.into(),
+            advice: Some(watch::Advice {
+                call: "unheard_of".into(),
+                ..Default::default()
+            }),
+            ..race("strategy")
         }
     }
 
     #[tokio::test]
-    async fn the_engineer_calls_about_events() {
-        let mut h = start(&["イエロー。", "[[radio volume=10]]"], "x", 1.0);
+    async fn events_are_told_without_the_agent() {
+        let mut h = start(&["考えた。"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
         h.race.send(yellow()).unwrap();
-        h.race.send(race("lap_completed")).unwrap();
-        h.race.send(race("pit_entry")).unwrap();
+        h.race.send(race("phase_changed")).unwrap();
+        h.race.send(race("weather_changed")).unwrap();
         let events = h.until(is_done).await;
         assert_eq!(
-            events[..1],
-            [Event::Tool {
-                turn: 1,
-                id: "t1".into(),
-                title: Some("`vr brief`".into()),
-                state: ToolState::Running
-            }]
-        );
-        let started = events
-            .iter()
-            .position(|e| matches!(e, Event::CallStarted { .. }))
-            .unwrap();
-        assert_eq!(
-            events[started],
+            events[0],
             Event::CallStarted {
                 turn: 1,
-                about: "yellow flag / pit_entry".into()
+                about: "旗・天候".into()
             }
         );
+        assert!(events.contains(&Event::Chunk {
+            turn: 1,
+            text: "イエロー。weatherの答え。".into()
+        }));
+        assert_eq!(h.played(2).await, ["3:イエロー。", "3:weatherの答え。"]);
+        assert!(h.prompts.lock().unwrap().is_empty(), "nobody was asked");
+    }
+
+    #[tokio::test]
+    async fn the_engineer_calls_about_events() {
+        let mut h = start(&["考えた。", "[[radio volume=10]]"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.race.send(thought("new advice")).unwrap();
+        let events = h.until(is_done).await;
+        assert!(events.contains(&Event::CallStarted {
+            turn: 1,
+            about: "new advice".into()
+        }));
         // Nobody asked for a setting.
         assert!(
             !events
@@ -2369,20 +3344,266 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::TurnStarted { .. }))
         );
-        assert_eq!(h.played(1).await, ["3:イエロー。"]);
+        assert_eq!(h.played(1).await, ["3:考えた。"]);
         assert_eq!(
             *h.prompts.lock().unwrap(),
             [render_prompt(
                 &config::CALL_PROMPT.replace("{radio}", STATUS),
-                "yellow flag / pit_entry",
+                "new advice",
                 Some("P4")
             )]
         );
+        // Not again and again: every prompt costs.
+        h.race.send(thought("more advice")).unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(h.prompts.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_usual_questions_do_not_reach_the_agent() {
+        let mut h = start(&["考えた。"], "順位", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::PttDown).unwrap();
+        h.cmds.send(Command::PttUp).unwrap();
+        let events = h.until(is_done).await;
+        assert!(events.contains(&Event::Chunk {
+            turn: 1,
+            text: "4番手。前まで0.62秒。".into()
+        }));
+        assert!(matches!(
+            events.last(),
+            Some(Event::TurnDone {
+                turn: 1,
+                outcome: Outcome::Answered,
+                ..
+            })
+        ));
+        assert_eq!(h.played(2).await, ["3:4番手。", "3:前まで0.62秒。"]);
+        // Said again, acknowledged, or hardly heard.
+        for (text, want) in [
+            ("もう一回", "4番手。前まで0.62秒。"),
+            ("はい", "了解。"),
+            ("ん", "聞き取れなかったから状況だけ。今4番手。"),
+        ] {
+            h.cmds.send(Command::Ask(text.into())).unwrap();
+            let events = h.until(is_done).await;
+            let said = events
+                .iter()
+                .any(|e| matches!(e, Event::Chunk { text, .. } if text == want));
+            assert!(said, "{text}: {events:?}");
+        }
+        assert!(h.prompts.lock().unwrap().is_empty());
+        // The agent is told what it missed, once.
+        for _ in 0..2 {
+            h.cmds.send(Command::Ask("抜けそう".into())).unwrap();
+            h.until(is_done).await;
+        }
+        let prompts = h.prompts.lock().unwrap().clone();
+        assert!(
+            prompts[0].starts_with(
+                "これまでの交信（済んだこと。古い順）:\n無線「順位」→ 返答「4番手。前まで0.62秒。」\n"
+            ),
+            "{}",
+            prompts[0]
+        );
+        assert!(prompts[0].contains("無線「ん」→ 返答「聞き取れなかった"));
+        assert_eq!(prompts[1], "無線:「抜けそう」取得したての実データ:\nP4");
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_the_engineer_is_for_the_agent() {
+        let mut h = start(&["ピットに入る？"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("どうする".into())).unwrap();
+        h.until(is_done).await;
+        for (i, text) in ["はい", "ん"].into_iter().enumerate() {
+            h.cmds.send(Command::Ask(text.into())).unwrap();
+            h.until(is_done).await;
+            assert_eq!(h.prompts.lock().unwrap().len(), i + 2, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn quick_answers_can_be_switched_off() {
+        let mut h = start(&["考えた。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        let off = Rules {
+            quick: false,
+            ..Rules::default()
+        };
+        h.cmds.send(Command::SetRules(off)).unwrap();
+        h.cmds.send(Command::Ask("順位".into())).unwrap();
+        h.until(is_done).await;
+        assert_eq!(h.played(1).await, ["3:考えた。"]);
+        // Nothing was said yet that could be said again.
+        let mut h = start(&["考えた。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("もう一回".into())).unwrap();
+        h.until(is_done).await;
+        assert_eq!(h.prompts.lock().unwrap().len(), 1);
+        // By talking.
+        let (_, events) = asked(&["[[radio quick=off]]了解。"]).await;
+        assert!(events.contains(&Event::Setting(Setting::Quick(false))));
+        assert!(!rules_of(&events)[0].quick);
+    }
+
+    #[tokio::test]
+    async fn the_driver_hears_when_the_agent_is_used_up() {
+        let mut h = start(
+            &["You have hit your usage limit, try again at 1:24 AM.\n"],
+            "x",
+            1.0,
+        );
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        h.cmds.send(Command::Ask("抜けそう".into())).unwrap();
+        h.until(is_done).await;
+        assert_eq!(
+            h.played(3).await,
+            [
+                "3:AIの利用枠を使い切った。",
+                "3:決まった質問には答えられる。",
+                "3:statusの答え。"
+            ]
+        );
+        // It is left alone, what needs no agent goes on.
+        let mut v = lap(2.0);
+        v.insert("stop_in".into(), 3.0);
+        h.live.send(v).unwrap();
+        h.race.send(thought("new advice")).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(h.prompts.lock().unwrap().len(), 1);
+        h.race.send(yellow()).unwrap();
+        assert_eq!(h.played(4).await[3], "3:イエロー。");
+        h.cmds.send(Command::Ask("順位".into())).unwrap();
+        assert_eq!(h.played(5).await[4], "3:4番手。");
+    }
+
+    #[test]
+    fn limits_of_the_plan_are_recognized() {
+        for e in [
+            "You've hit your usage limit.",
+            "usageLimitExceeded",
+            "Rate limit reached",
+            "insufficient_quota",
+        ] {
+            assert!(exhausted(e), "{e}");
+        }
+        assert!(!exhausted("agent closed"));
+    }
+
+    fn beside(left: f64, right: f64) -> Values {
+        values(&[
+            ("left", left),
+            ("right", right),
+            ("alongside", (left + right).min(1.0)),
+            ("on_track", 1.0),
+            ("speed", 150.0),
+        ])
+    }
+
+    #[tokio::test]
+    async fn the_spotter_speaks_at_once_and_without_the_agent() {
+        let mut h = start(&["了解。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        // What the driver asked for once is the spotter's work now.
+        let rules = Rules {
+            watches: vec![Watch {
+                when: "alongside == 1".into(),
+                act: Some("左右を知らせる".into()),
+                ..Watch::default()
+            }],
+            ..Rules::default()
+        };
+        h.cmds.send(Command::SetRules(rules.clone())).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.live.send(beside(0.0, 0.0)).unwrap();
+        // On the brakes, too.
+        let mut v = beside(1.0, 0.0);
+        v.insert("brake".into(), 80.0);
+        h.live.send(v).unwrap();
+        let events = h.until(is_done).await;
+        assert!(events.contains(&Event::CallStarted {
+            turn: 1,
+            about: "スポッター".into()
+        }));
+        assert_eq!(h.played(1).await, ["3:左。"]);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(h.prompts.lock().unwrap().is_empty());
+        // Muted, talking, held, or switched off: not a word.
+        h.cmds.send(Command::SetMuted(true)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.live.send(beside(0.0, 1.0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.out.played.lock().unwrap().len(), 1);
+        h.cmds.send(Command::SetMuted(false)).unwrap();
+        let hold = Rules {
+            hold: Some("speed > 100".into()),
+            ..Rules::default()
+        };
+        h.cmds.send(Command::SetRules(hold)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.live.send(beside(0.0, 1.0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.out.played.lock().unwrap().len(), 1);
+        h.cmds.send(Command::SetRules(rules)).unwrap();
+        let off = Proactive {
+            spotter: false,
+            ..Proactive::default()
+        };
+        h.cmds.send(Command::SetProactive(off)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Without the spotter the driver's own watch counts again.
+        h.live.send(beside(0.0, 0.0)).unwrap();
+        h.live.send(beside(0.0, 1.0)).unwrap();
+        h.prompted(1).await;
+    }
+
+    #[tokio::test]
+    async fn a_watch_may_tell_a_topic() {
+        let (mut h, events) = asked(&["[[radio when=\"lap_pct > 5\" tell=lap]]了解。"]).await;
+        assert_eq!(rules_of(&events)[0].watches[0].tell.as_deref(), Some("lap"));
+        h.played(1).await;
+        h.live.send(values(&[("lap_pct", 2.0)])).unwrap();
+        h.live.send(values(&[("lap_pct", 6.0)])).unwrap();
+        h.until(is_done).await;
+        assert_eq!(h.played(2).await[1], "3:lapの答え。");
+        assert_eq!(h.prompts.lock().unwrap().len(), 1);
+        // So does an order that takes no thought.
+        let (mut h, _) =
+            asked(&["[[radio when=\"lap_pct > 5\" do=\"トップとの差を言う\"]]了解。"]).await;
+        h.played(1).await;
+        h.live.send(values(&[("lap_pct", 2.0)])).unwrap();
+        h.live.send(values(&[("lap_pct", 6.0)])).unwrap();
+        h.until(is_done).await;
+        assert_eq!(h.played(2).await[1], "3:leaderの答え。");
+        assert_eq!(h.prompts.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn there_is_no_planning_without_a_stop() {
+        let h = start(PLANS, "x", 1.0);
+        let mut v = lap(2.0);
+        v.insert("fuel_spare".into(), 0.1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.live.send(v.clone()).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(h.prompts.lock().unwrap().is_empty());
+        // Short of fuel, or with a stop planned.
+        v.insert("fuel_spare".into(), 0.0);
+        h.live.send(v).unwrap();
+        h.prompted(1).await;
+        let h = start(PLANS, "x", 1.0);
+        let mut v = lap(2.0);
+        v.insert("fuel_spare".into(), 5.0);
+        v.insert("stop_in".into(), 4.0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.live.send(v).unwrap();
+        h.prompted(1).await;
     }
 
     const STATUS: &str = "ラジオの現在値: volume=100 mute=off speed=1.20 proactive=on\
         （オフの event: lap, adjustment） interval=8 hold=\"off\" hold_calls=\"brake > 10\" \
-        quiet=\"off\" hold_max=8 planning=2";
+        quiet=\"off\" hold_max=8 quick=on planning=2";
 
     fn values(pairs: &[(&str, f64)]) -> Values {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
@@ -2495,19 +3716,19 @@ mod tests {
 
     #[tokio::test]
     async fn answers_do_not_wait_where_only_calls_do() {
-        let mut h = start(&["答え。", "@出来事@イエロー。"], "x", 1.0);
+        let mut h = start(&["答え。"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
         h.live.send(values(&[("brake", 80.0)])).unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;
         h.cmds.send(Command::Ask("前は".into())).unwrap();
         assert_eq!(h.played(1).await, ["3:答え。"]);
         h.until(is_done).await;
-        h.race.send(race("pit_entry")).unwrap();
+        h.race.send(race("weather_changed")).unwrap();
         h.until(is_done).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(h.out.played.lock().unwrap().len(), 1);
         h.live.send(values(&[("brake", 5.0)])).unwrap();
-        assert_eq!(h.played(2).await[1], "3:イエロー。");
+        assert_eq!(h.played(2).await[1], "3:weatherの答え。");
     }
 
     #[tokio::test]
@@ -2584,13 +3805,13 @@ mod tests {
         let status =
             format!("{STATUS}\n見張り w1: stop_in == 0 → ピットと言う\n作戦メモ: 15周目に入る");
         let template = config::CALL_PROMPT.replace("{radio}", &status);
-        h.race.send(yellow()).unwrap();
+        h.race.send(thought("new advice")).unwrap();
         h.until(is_done).await;
         let prompts = h.prompts.lock().unwrap().clone();
         assert!(prompts[0].starts_with("作戦会議") && prompts[0].contains("P4"));
         assert_eq!(
             prompts[2],
-            render_prompt(&template, "yellow flag", Some("P4"))
+            render_prompt(&template, "new advice", Some("P4"))
         );
         // Another race, another plan.
         h.race.send(race("session_changed")).unwrap();
@@ -2661,42 +3882,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_new_plan_is_thought_through_and_other_advice_is_told() {
-        let mut h = start(
-            &[
-                "-",
-                "@box now@この周ピット。",
-                "@作戦会議@[[radio plan=\"今\"]]-",
-            ],
-            "x",
-            1.0,
-        );
+    async fn advice_is_told_at_once_and_a_new_plan_thought_through() {
+        let mut h = start(&["-", "@作戦会議@[[radio plan=\"今\"]]-"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        let strategy = |call: &str, text: &str| RaceEvent {
-            advice: Some(watch::Advice { call: call.into() }),
-            text: text.into(),
+        let strategy = |call: &str| RaceEvent {
+            advice: Some(watch::Advice {
+                call: call.into(),
+                ..Default::default()
+            }),
             ..race("strategy")
         };
-        h.race.send(strategy("plan", "plan: lap 15")).unwrap();
-        let events = h.until(is_done).await;
+        h.race.send(strategy("plan")).unwrap();
+        let events = h.until(|e| matches!(e, Event::Plan(_))).await;
         assert!(events.contains(&Event::Plan(Some("今".into()))));
-        h.race.send(strategy("box_this_lap", "box now")).unwrap();
-        h.until(is_done).await;
-        assert_eq!(h.played(1).await, ["3:この周ピット。"]);
+        h.race.send(strategy("box_this_lap")).unwrap();
+        let played = h.played(2).await;
+        assert!(
+            played.contains(&"3:ピット無しで完走する。".to_string()),
+            "{played:?}"
+        );
+        assert!(played.contains(&"3:ボックス、この周ピット。".to_string()));
+        assert_eq!(h.prompts.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn quiet_drops_what_can_wait() {
-        let (mut h, _) = asked(&["[[radio quiet=\"lap < 13\"]]了解。", "@出来事@連絡。"]).await;
+        let (mut h, _) = asked(&["[[radio quiet=\"lap < 13\"]]了解。"]).await;
+        h.played(1).await;
         h.live.send(lap(1.0)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        h.race.send(race("pit_entry")).unwrap();
+        h.race.send(race("weather_changed")).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(h.prompts.lock().unwrap().len(), 1);
+        assert_eq!(h.out.played.lock().unwrap().len(), 1);
         // A flag is told all the same.
         h.race.send(yellow()).unwrap();
         h.until(is_done).await;
-        assert_eq!(h.prompts.lock().unwrap().len(), 2);
+        assert_eq!(h.played(2).await[1], "3:イエロー。");
     }
 
     #[tokio::test]
@@ -2729,7 +3950,7 @@ mod tests {
     async fn a_call_may_say_nothing() {
         let mut h = start(&[" ", "-", "\n"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        h.race.send(yellow()).unwrap();
+        h.race.send(thought("new advice")).unwrap();
         let events = h.until(is_done).await;
         assert!(matches!(
             events.last(),
@@ -2779,14 +4000,17 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         h.race.send(yellow()).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(h.prompts.lock().unwrap().len(), 2);
+        assert_eq!(h.prompts.lock().unwrap().len(), 1);
+        assert_eq!(h.out.played.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn an_agent_that_went_away_is_started_again_for_a_question() {
         let mut h = start(&["了解。"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        h.cmds.send(Command::SetAgent("broken".into())).unwrap();
+        h.cmds
+            .send(Command::SetAgent("broken".into(), AgentOptions::default()))
+            .unwrap();
         h.until(|e| matches!(e, Event::AgentClosed { .. })).await;
         h.cmds.send(Command::Ask("a".into())).unwrap();
         let events = h.until(is_done).await;
@@ -2798,13 +4022,18 @@ mod tests {
     async fn an_agent_that_went_away_is_started_again_by_itself() {
         let mut h = start(&["了解。"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        h.cmds.send(Command::SetAgent("broken".into())).unwrap();
+        h.cmds
+            .send(Command::SetAgent("broken".into(), AgentOptions::default()))
+            .unwrap();
         let t = Instant::now();
         h.until(|e| matches!(e, Event::AgentStarting)).await;
         assert!((2000..3500).contains(&ms(t)), "{}", ms(t));
         // Not after an expired login, which would end the same way.
         h.cmds
-            .send(Command::SetAgent("Authentication required".into()))
+            .send(Command::SetAgent(
+                "Authentication required".into(),
+                AgentOptions::default(),
+            ))
             .unwrap();
         h.until(|e| matches!(e, Event::AgentClosed { error: Some(e) } if e.starts_with("Auth")))
             .await;
@@ -2858,7 +4087,9 @@ mod tests {
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
         h.cmds.send(Command::Ask("slow".into())).unwrap();
         h.until(|e| matches!(e, Event::TurnStarted { .. })).await;
-        h.cmds.send(Command::SetAgent("other".into())).unwrap();
+        h.cmds
+            .send(Command::SetAgent("other".into(), AgentOptions::default()))
+            .unwrap();
         let events = h.until(|e| matches!(e, Event::AgentReady { .. })).await;
         assert!(events.iter().any(|e| matches!(
             e,
@@ -2883,7 +4114,9 @@ mod tests {
     async fn a_question_without_an_agent_fails_instead_of_waiting() {
         let mut h = start(&["了解。"], "x", 1.0);
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
-        h.cmds.send(Command::SetAgent("broken".into())).unwrap();
+        h.cmds
+            .send(Command::SetAgent("broken".into(), AgentOptions::default()))
+            .unwrap();
         let events = h.until(|e| matches!(e, Event::AgentClosed { .. })).await;
         assert_eq!(
             events.last(),
@@ -2904,12 +4137,23 @@ mod tests {
             Outcome::Failed("エージェントに接続していません".into())
         );
         assert!(events.iter().any(|e| matches!(e, Event::Error(_))));
+        // Until then at least the numbers are told.
+        assert_eq!(
+            h.played(3).await,
+            [
+                "3:考えて答えるのは今できない、",
+                "3:数字だけ伝える。",
+                "3:statusの答え。"
+            ]
+        );
         // Connecting makes it usable again.
-        h.cmds.send(Command::SetAgent("other".into())).unwrap();
+        h.cmds
+            .send(Command::SetAgent("other".into(), AgentOptions::default()))
+            .unwrap();
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
         h.cmds.send(Command::Ask("c".into())).unwrap();
         h.until(is_done).await;
-        assert_eq!(h.played(1).await, vec!["3:別の返答。"]);
+        assert_eq!(h.played(4).await[3], "3:別の返答。");
     }
 
     #[tokio::test]

@@ -285,7 +285,10 @@ impl SetupReport {
         let car = self.car_name.as_deref().unwrap_or("--");
         match &self.setup {
             None => {
-                let _ = writeln!(out, "{car}: no setup available");
+                let _ = writeln!(
+                    out,
+                    "{car}: no setup available (the game tells it for your own car, once you have been in it)"
+                );
             }
             Some(s) => {
                 let _ = writeln!(
@@ -311,6 +314,9 @@ impl SetupReport {
                         let _ = writeln!(out, "{dir}:");
                     }
                     let _ = writeln!(out, "  {key}: {}", i.value);
+                }
+                if !s.unavailable.is_empty() {
+                    let _ = writeln!(out, "not told by the game: {}", s.unavailable.join(", "));
                 }
             }
         }

@@ -9,6 +9,7 @@ use crate::chassis::{Chassis, ChassisTracker};
 use crate::handling::HandlingTracker;
 use crate::report::*;
 use crate::strategy::{self, StrategyCall, StrategyReport};
+use crate::timing::Timing;
 use crate::trace::{LapTrace, TraceRecorder};
 use crate::util::{mean, now_ms, positive, wrap_half};
 use crate::{Event, EventKind, EventLog};
@@ -118,6 +119,7 @@ pub struct RaceState {
     extras: Option<Extras>,
     handling: HandlingTracker,
     traces: TraceRecorder,
+    timing: Timing,
     chassis: ChassisTracker,
     /// Pit loss of earlier sessions on the track.
     prior_pit_loss: Option<f64>,
@@ -168,6 +170,7 @@ impl RaceState {
             extras: None,
             handling: HandlingTracker::default(),
             traces: TraceRecorder::default(),
+            timing: Timing::default(),
             chassis: ChassisTracker::default(),
             prior_pit_loss: None,
             strategy_calls: BTreeMap::new(),
@@ -215,6 +218,10 @@ impl RaceState {
     /// Events of the session in progress.
     pub(crate) fn session_events(&self) -> Vec<Event> {
         self.events.since(self.session_start_seq, usize::MAX)
+    }
+
+    pub(crate) fn timing(&self) -> &Timing {
+        &self.timing
     }
 
     /// Laps completed since the last call, place by place.
@@ -339,6 +346,7 @@ impl RaceState {
         self.handling.ingest(&frame);
         self.chassis.ingest(&frame);
         self.traces.ingest(&frame);
+        self.timing.ingest(&frame);
         self.detect_car_events(&frame);
 
         self.frame = Some(frame);
@@ -562,6 +570,7 @@ impl RaceState {
         self.session_start_seq = self.events.last_seq();
         self.handling = HandlingTracker::default();
         self.traces.restart();
+        self.timing.restart();
         self.chassis = ChassisTracker::default();
         self.strategy_calls.clear();
         self.plan = None;
@@ -960,6 +969,7 @@ impl RaceState {
             incidents: p.incidents,
             on_pit_road: car.on_pit_road,
             on_track: p.on_track,
+            live_position: self.live_position(frame),
         })
     }
 
@@ -1019,6 +1029,19 @@ impl RaceState {
             Some((newest.1.abs() - oldest.1.abs()) / dl as f64)
         });
 
+        // As it is now, where the two are racing each other on track.
+        let live = ahead_by_progress
+            .filter(|d| frame.session.kind == SessionKind::Race && d.abs() < 1.0)
+            .and_then(|d| {
+                let (a, b) = if d >= 0.0 {
+                    (other.idx, player.idx)
+                } else {
+                    (player.idx, other.idx)
+                };
+                let (gap, change) = self.timing.gap(a, b)?;
+                Some((gap, change, d >= 0.0))
+            });
+
         let their_last = positive(other.last_lap_s);
         GapInfo {
             car: car_ref(other),
@@ -1031,7 +1054,51 @@ impl RaceState {
                 .zip(positive(player.last_lap_s))
                 .map(|(o, p)| o - p),
             on_pit_road: other.on_pit_road,
+            live_s: live.map(|l| l.0),
+            live_change_s: live.and_then(|l| l.1),
+            live_ahead: live.map(|l| l.2),
         }
+    }
+
+    /// The cars of the player's class as they run on track now; races only.
+    /// Official places change at the line, these at once.
+    fn running_order<'a>(&self, frame: &'a Frame) -> Vec<&'a CarState> {
+        let Some(player) = frame.player_car() else {
+            return Vec::new();
+        };
+        if frame.session.kind != SessionKind::Race || frame.session.phase != SessionPhase::Racing {
+            return Vec::new();
+        }
+        let progress = |c: &CarState| {
+            c.laps_completed
+                .map(f64::from)
+                .zip(c.lap_dist_pct)
+                .map(|(l, p)| l + p)
+        };
+        let mut cars: Vec<(f64, &CarState)> = frame
+            .cars
+            .iter()
+            .filter(|c| c.class_id == player.class_id)
+            .filter_map(|c| Some((progress(c)?, c)))
+            .collect();
+        cars.sort_by(|a, b| b.0.total_cmp(&a.0));
+        cars.into_iter().map(|(_, c)| c).collect()
+    }
+
+    /// The player's place as the cars run now.
+    pub(crate) fn live_position(&self, frame: &Frame) -> Option<u32> {
+        let i = frame.player_car_idx?;
+        let at = self.running_order(frame).iter().position(|c| c.idx == i)?;
+        Some(at as u32 + 1)
+    }
+
+    /// The car so many places ahead (negative) or behind as they run now.
+    pub(crate) fn running(&self, frame: &Frame, offset: i32) -> Option<GapInfo> {
+        let player = frame.player_car()?;
+        let order = self.running_order(frame);
+        let at = order.iter().position(|c| c.idx == player.idx)? as i32 + offset;
+        let other = order.get(usize::try_from(at).ok()?)?;
+        Some(self.gap_between(frame, player, other))
     }
 
     /// Car one position ahead/behind the player (class scope in multi-class).
@@ -1050,6 +1117,22 @@ impl RaceState {
             .filter(|c| !multi || c.class_id == player.class_id)
             .find(|c| pos_of(c) == Some(target as u32))?;
         Some(self.gap_between(frame, player, other))
+    }
+
+    /// The leader of the class, unless it is the player or the car ahead.
+    pub(crate) fn leader(&self, frame: &Frame) -> Option<GapInfo> {
+        let player = frame.player_car()?;
+        let multi = is_multi_class(frame);
+        let pos_of = |c: &CarState| if multi { c.class_position } else { c.position };
+        if pos_of(player)? <= 2 {
+            return None;
+        }
+        let first = frame
+            .cars
+            .iter()
+            .filter(|c| !multi || c.class_id == player.class_id)
+            .find(|c| pos_of(c) == Some(1))?;
+        Some(self.gap_between(frame, player, first))
     }
 
     pub(crate) fn nearby(&self, frame: &Frame, window_s: Option<f64>) -> Vec<RelativeCar> {
@@ -1087,6 +1170,32 @@ impl RaceState {
             .collect();
         out.sort_by(|a, b| a.rel_s.abs().total_cmp(&b.rel_s.abs()));
         out
+    }
+
+    /// Metres along the track to the next car ahead and behind, whoever they
+    /// are. From the middle of one car to that of the other.
+    pub(crate) fn near_m(&self, frame: &Frame) -> (Option<f64>, Option<f64>) {
+        let length = frame.session.track.as_ref().and_then(|t| t.length_m);
+        let at = frame
+            .player_car()
+            .and_then(|p| Some((p, p.lap_dist_pct?, length?)));
+        let Some((player, pct, length)) = at else {
+            return (None, None);
+        };
+        let all = frame
+            .cars
+            .iter()
+            .filter(|c| c.idx != player.idx && c.surface != vr_core::TrackSurface::NotInWorld)
+            .filter(|c| !c.on_pit_road || player.on_pit_road)
+            .filter_map(|c| Some(wrap_half(c.lap_dist_pct? - pct) * length));
+        all.fold((None, None), |(ahead, behind), m| {
+            let nearer = |was: Option<f64>| Some(was.map_or(m.abs(), |w: f64| w.min(m.abs())));
+            if m >= 0.0 {
+                (nearer(ahead), behind)
+            } else {
+                (ahead, nearer(behind))
+            }
+        })
     }
 
     pub(crate) fn fuel_info(&self, frame: &Frame) -> Option<FuelInfo> {

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::decide::Decide;
+use crate::quick::{self, Quick};
 use crate::{child, topic};
 
 /// Data later than this is not worth waiting for: the agent looks it up.
@@ -26,6 +27,20 @@ pub struct More {
     pub data: Option<String>,
     /// The answer will take its time.
     pub long: bool,
+    /// The answer itself, worked out without the agent.
+    pub answer: Option<Answer>,
+}
+
+/// An answer that needs no agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    Text(String),
+    /// What was said last, once more.
+    Again,
+    /// A word of agreement, unless something was asked.
+    Ack,
+    /// Hardly anything was heard: how things are.
+    Unclear(String),
 }
 
 pub trait ContextSource: Send + Sync + 'static {
@@ -37,6 +52,21 @@ pub trait ContextSource: Send + Sync + 'static {
         More::default()
     }
 
+    /// The answer to the words, if they need no agent. Blocking.
+    fn answer(&self, _text: &str) -> Option<Answer> {
+        None
+    }
+
+    /// Everything worth knowing for a closer look at something. Blocking.
+    fn fetch_all(&self, _text: &str) -> Option<String> {
+        None
+    }
+
+    /// What `vr say` says about a topic. Blocking.
+    fn say(&self, _topic: &str) -> Option<String> {
+        None
+    }
+
     /// The driver begins to speak. Blocking.
     fn prepare(&self) {}
 }
@@ -44,6 +74,9 @@ pub trait ContextSource: Send + Sync + 'static {
 /// Runs commands at the same time and joins what they print.
 pub struct Commands {
     pub commands: Vec<String>,
+    /// Says a topic, which is added to it; empty: nothing is said without the
+    /// agent.
+    pub say: String,
     /// Also those for what the question is about.
     pub topics: bool,
     /// Asked when the words do not tell what the question is about.
@@ -74,7 +107,50 @@ impl ContextSource for Commands {
         More {
             data: self.output(&commands),
             long: found.long,
+            answer: None,
         }
+    }
+
+    fn fetch_all(&self, text: &str) -> Option<String> {
+        if self.commands.is_empty() {
+            return None;
+        }
+        let found = topic::read(text).unwrap_or_default();
+        let mut commands: Vec<String> = self
+            .commands
+            .iter()
+            .filter(|c| !topic::STUDY.iter().any(|s| within(c, s)))
+            .cloned()
+            .collect();
+        commands.extend(topic::STUDY.iter().map(|c| c.to_string()));
+        for c in topic::commands(&found, text) {
+            if !commands.iter().any(|x| within(&c, x)) {
+                commands.push(c);
+            }
+        }
+        self.output(&commands)
+    }
+
+    fn answer(&self, text: &str) -> Option<Answer> {
+        if self.say.is_empty() {
+            return None;
+        }
+        Some(match quick::read(text)? {
+            Quick::Say(topic) => Answer::Text(self.say(topic)?),
+            Quick::Ack => Answer::Ack,
+            Quick::Here(text) => Answer::Text(text.into()),
+            Quick::Again => Answer::Again,
+            Quick::Unclear => Answer::Unclear(self.say("status")?),
+        })
+    }
+
+    fn say(&self, topic: &str) -> Option<String> {
+        if self.say.is_empty() {
+            return None;
+        }
+        // Also when there is no game: it says so.
+        let out = output_of(&format!("{} {topic}", self.say), &self.cwd, TIMEOUT)?;
+        (!out.is_empty()).then_some(out)
     }
 
     fn prepare(&self) {
@@ -100,8 +176,25 @@ impl Commands {
     }
 }
 
+/// The same command, perhaps with other options.
+fn within(a: &str, b: &str) -> bool {
+    let name = |c: &str| -> Vec<String> {
+        c.split(' ')
+            .take_while(|w| !w.starts_with('-'))
+            .map(String::from)
+            .collect()
+    };
+    name(a) == name(b)
+}
+
 /// `$ command` and its output; `None` when it fails or prints nothing.
 fn run(command: &str, cwd: &Path, timeout: Duration) -> Option<String> {
+    let text = output_of(command, cwd, timeout)?;
+    (!text.is_empty()).then(|| format!("$ {command}\n{text}"))
+}
+
+/// What the command prints; `None` when it fails.
+fn output_of(command: &str, cwd: &Path, timeout: Duration) -> Option<String> {
     let mut cmd = child::command(command, cwd)?;
     cmd.stdout(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
@@ -127,7 +220,7 @@ fn run(command: &str, cwd: &Path, timeout: Duration) -> Option<String> {
     };
     let out = reader.join().ok()?;
     let text = String::from_utf8_lossy(&out).trim().to_string();
-    (ok && !text.is_empty()).then(|| format!("$ {command}\n{text}"))
+    ok.then_some(text)
 }
 
 #[cfg(test)]
@@ -137,6 +230,7 @@ mod tests {
     fn commands(list: &[&str]) -> Commands {
         Commands {
             commands: list.iter().map(|c| c.to_string()).collect(),
+            say: String::new(),
             topics: true,
             decide: None,
             cwd: std::env::temp_dir(),
@@ -192,6 +286,32 @@ mod tests {
         assert_eq!(failed.fetch_for(unclear), More::default());
         assert_eq!(commands(&[]).fetch_for(unclear), More::default());
         assert!(commands(&[]).fetch_for("コースレコード調べて").long);
+    }
+
+    #[test]
+    fn plain_questions_are_answered_by_the_command() {
+        let echo = if cfg!(windows) { "cmd /c echo" } else { "echo" };
+        let c = Commands {
+            say: echo.into(),
+            ..commands(&[])
+        };
+        assert_eq!(c.say("fuel").as_deref(), Some("fuel"));
+        let text = |t: &str| Some(Answer::Text(t.into()));
+        assert_eq!(c.answer("前との差は"), text("ahead"));
+        assert_eq!(c.answer("今ない。"), text("position"));
+        assert_eq!(c.answer("了解"), Some(Answer::Ack));
+        assert_eq!(c.answer("もう一回"), Some(Answer::Again));
+        assert_eq!(c.answer("んん"), Some(Answer::Unclear("status".into())));
+        assert_eq!(c.answer("なんで遅いの"), None);
+        // Not switched on, or not there.
+        assert_eq!(commands(&[]).answer("前との差は"), None);
+        assert_eq!(commands(&[]).say("fuel"), None);
+        let broken = Commands {
+            say: "vr-no-such-program say".into(),
+            ..commands(&[])
+        };
+        assert_eq!(broken.answer("前との差は"), None);
+        assert_eq!(broken.answer("了解"), Some(Answer::Ack));
     }
 
     #[test]

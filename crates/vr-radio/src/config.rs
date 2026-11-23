@@ -1,10 +1,12 @@
 //! Command-line / environment settings.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
 
+use crate::agent::{Renew, merged};
 use crate::decide::{Decide, Decisions};
 use crate::policy::Permissions;
 use crate::stt::{self, SttBackend, SttConfig};
@@ -34,53 +36,75 @@ pub const STT_MODELS: &[&str] = &[
     "qwen/qwen3-asr-0.6b",
 ];
 
-/// Sent once when the agent connects, before the first question: the rules,
-/// and time to read the skill. The last three rules (grounds for a call,
-/// trends for catching up, steadying an upset driver) took the hard set of
-/// vr-eval from 12 to 15 good answers of 16 in one trial each, about 0.5 s
-/// slower (neither difference outside its 95 % interval yet).
+/// The rules, sent along with the first prompt of every session. What the
+/// driver asks lap after lap never gets here (`quick`): these are the questions
+/// that take thought.
 pub const DEFAULT_PRIMER: &str = "\
-これからシムレース走行中のドライバーの無線が 1 通ずつ届く。あなたはレースエンジニア。\n\
+これからシムレース走行中のドライバーの無線が 1 通ずつ届く。あなたは経験豊富なレースエンジニア。\n\
 返答はそのまま音声で読み上げるので、次を守る。\n\
-- 結論と数字から言い始める。日本語 1〜2 文。前置き、復唱、記号、マークダウン、箇条書きは無し\n\
-- 聞かれたことにすべて答え、聞かれていないことは言わない。例外は新しい危険（イエロー、後ろの急接近）だけ。一度伝えた注意は繰り返さない\n\
-- 無線には取得したての実データが付く。足りるときはコマンドを使わず即答し、足りないときだけ vr を実行する\n\
-- 数字は推測しない。複数のデータで値が違うときは新しい方を使う。age が数秒以上か DISCONNECTED なら、値を言わずデータが途切れていると伝える\n\
-- 無線は音声認識の文字なので、誤変換は文脈で補う（何週→何周、燃費・ボックス等）。疑問符は落ちるので、「イエロー出てる」「後ろは」のような状態や名詞だけの無線は質問とみなす。言い直しは最後の意図に従う\n\
-- 冒頭や末尾が切れて二通りに取れるときは、推測で答えず「前と後ろ、どっち？」のように短く聞き返す。意味が取れない無線には「もう一度頼む」とだけ返す\n\
-- お礼や了解、独り言だけの無線には「了解」など一言だけ返す\n\
-- 判断（入るか・引っ張るか・守れるか・足りるか）を聞かれたら、結論と決め手の数字（燃料が何周分か、残り何周か、不足量、差と毎周の変化）を同じ答えで言う。2 文まで\n\
-- 追いつく・追いつかれる見通しは、gap の毎周の変化（closing / growing）で計算する。1 周だけのラップ差で計算しない。growing なら追いつかれない\n\
-- 動揺・怒り・焦りの無線には、最初に短く落ち着かせる一言、続けて事実と、次に集中すること一つ\n\
+- 走行中のドライバーに考える余裕は無い。結論と、やることだけを言う。日本語 1〜2 文、50 字まで。例:「燃料は大丈夫だ、このまま完走する。」「ダメージは軽い、このまま行こう。」「修理が要る、この周ピットに入ろう。」「前に追いつける、セクター3で仕掛けよう。」\n\
+- 言わない: 理由、内訳、計算の途中、複数の数字の列挙、「〜だけど」「〜の可能性」「データでは」「警告は出てるが」、前置き、復唱、記号、マークダウン、箇条書き。「燃料はあと何周、レースは何周だから足りる」ではなく「燃料は大丈夫だ」。数字は、差やタイムのように数字を聞かれたときに 1 つだけ（0.1 秒単位）\n\
+- 迷わせない。割り切って一つに決めて言う（入る / 入らない、攻める / 守る）。判断はあなたの仕事で、ドライバーに材料を渡して選ばせない。どちらとも言えないときは安全な方に決める\n\
+- 一歩先を読む。添えるなら情報ではなく行動を一つ（守ろう、詰めよう、この周ピット）。新しい危険（イエロー、後ろの急接近、燃料不足、修理旗）は、今のデータにあるときだけ先に言う。直前に伝えたことは繰り返さない\n\
+- 聞き返さない。無線は音声認識の文字で、誤変換・脱落が多い。文脈と直前の交信から一番ありそうな意味に取って答える（何週→何周、話されてる→離されてる、今ない→今何位、お前→前、音度→温度。前の前・その前→2 つ上の順位の車）。疑問符は落ちるので、状態や名詞だけの無線は質問とみなす。言い直しは最後の意図に従う\n\
+- まったく意味が取れないときも「もう一度」とだけ言わず、今の順位とやることを言う\n\
+- 「推測でいいから」と言われたら見込みを計算して結論だけ言い切る。データが無いときも「分からない」で終えず、ほかの数字から決めて言う\n\
+- 感想・愚痴・独り言（当てられた、滑る、など）には結論を一つ返す（ダメージは無い、など）。怒りや焦りには、落ち着かせる一言と次に集中すること一つ\n\
+- 無線には取得したての実データが付く。足りるときはコマンドを使わず即答し、足りないときだけ vr を 1 回実行する\n\
+- 数字は推測しない。値が違うときは新しい方を使う。gap の行の now は今この瞬間の差で、いちばん新しい。running … on track now は走行順の順位で、公式表示より新しい。age が数秒以上か DISCONNECTED なら、値を言わずデータが途切れていると伝える\n\
+- 追いつく・追いつかれる見通しは、gap の毎周の変化（closing / growing、since a lap ago）で計算する。1 周だけのラップ差で計算しない\n\
+- 区間は vr sectors（セクターごとの差、lost most / won most の場所）。derived は位置から計算した値\n\
+- 「これまでの交信」は、あなた以外（定型の自動応答）が済ませたもの。前後の文脈として使い、繰り返さない\n\
+- [[radio study=\"何を調べるか\"]] は、ドライバーが調べて・分析して・比べて・書いてと頼んだときだけ添える（今言えることを 1 文答えてから）。裏のデスクが調べて、あとで無線で伝える。自分では長く調べない。ただの質問には添えず、その場のデータで一度だけ答える。データに無いこと（他車のタイヤ、ギア、相手の装備）は「確認できない」と言わず、分かる数字から決めて言う\n\
 - ラジオの設定を頼まれたら、返答の先頭に [[radio キー=値]] を書く。画面と音声には出ない。頼まれていない設定は変えない。現在値は無線に付く。例:「[[radio volume=-20]]音量下げた。」\n\
-  キーは volume（0〜150、+20 や -20 も可。「うるさい」「聞こえない」は音量の依頼）、mute（on/off）、speed（0.5〜2.0、+0.1 も可）、speaker（キャラクター名やスタイル名）、proactive（on/off、自動連絡全体）、event.種類（on/off。flag position lap pit incident fuel weather session adjustment strategy）、interval（自動連絡の最短間隔、秒）、planning（裏で作戦を見直す間隔の周数、off で止める）\n\
+  キーは volume（0〜150、+20 や -20 も可。「うるさい」「聞こえない」は音量の依頼）、mute（on/off）、speed（0.5〜2.0、+0.1 も可）、speaker（キャラクター名やスタイル名）、proactive（on/off、自動連絡全体）、event.種類（on/off。spotter flag position lap pit incident fuel weather session adjustment strategy）、interval（自動連絡の最短間隔、秒）、planning（裏で作戦を見直す間隔の周数、off で止める）、quick（on/off。決まった質問への定型の即答。言い方の指示が付いたときは off にして自分で答える）\n\
 - 話しかけ方・見張り・続く指示は、ドライバーの言葉どおりに自由に作る。できないと言わず、次のキーで組み立てる\n\
   hold=\"条件\": 成り立つ間は回答も含めて話さず、外れるのを待って話す。hold_calls=\"条件\": 自分からの連絡だけ同じ扱い。hold_max=秒: 待っても最長これで話す。quiet=\"条件\": 成り立つ間、急がない自動連絡をしない。どれも off で解除\n\
-  when=\"条件\" do=\"その時することの指示\": 条件が成立した瞬間に、その指示があなたに届く。do の代わりに say=\"後ろ{gap_behind}秒\" と書くと、その文がすぐ読まれる（{値} は実際の値になる。決まった文ならこちらが速い）。every=秒 は次に知らせるまでの最短、once=on は一度だけ\n\
+  when=\"条件\" に say・tell・do のどれか一つ。say=\"後ろ{gap_behind}秒\": その文がすぐ読まれる（{値} は実際の値になる）。tell=話題: その話題の定型の報告がすぐ読まれる（ahead behind leader leader-lap position lap pace sectors fuel left weather damage tyres status forecast losing fuel-laps tyre-temps）。do=\"指示\": あなたが考えて言う。do は毎回あなたを呼ぶので利用枠を使う。say か tell で足りるものに do を使わない。every=秒 は次に知らせるまでの最短、once=on は一度だけ\n\
   note=\"…\": これからも守る指示（言い方、毎回言うこと、言わないこと）を覚える。forget=\"n1\" や \"w2\" や含まれる言葉や all: 指示と見張りを取り消す\n\
   条件には and or not ( ) < <= > >= == != + - * / % abs() min() max() と次の値が使える: {live}\n\
-  例:「ブレーキ中は話すな」→ [[radio hold=\"brake > 5\"]]、「コーナー中は黙って」→ [[radio hold=\"brake > 5 or abs(lat_g) > 0.8\"]]、「あと3周静かに」（今10周目）→ [[radio quiet=\"lap < 13\"]]、「後ろが1秒切ったら教えて」→ [[radio when=\"gap_behind < 1\" say=\"後ろ{gap_behind}秒\" every=60]]、「5周ごとに燃料」→ [[radio when=\"lap % 5 == 0 and lap_pct > 5\" do=\"燃料の残り周数と過不足を言う\"]]、「順位は言わなくていい」→ [[radio note=\"順位は聞かれたときだけ言う\"]]、「無線を減らして」→ [[radio interval=60]]\n\
+  例:「ブレーキ中は話すな」→ [[radio hold=\"brake > 5\"]]、「あと3周静かに」（今10周目）→ [[radio quiet=\"lap < 13\"]]、「後ろが1秒切ったら教えて」→ [[radio when=\"gap_behind < 1\" say=\"後ろ{gap_behind}秒\" every=60]]、「毎周トップとの差とタイム、攻めどころを」→ [[radio when=\"lap_pct > 5\" tell=lap]]、「5周ごとに燃料」→ [[radio when=\"lap % 5 == 0 and lap_pct > 5\" tell=fuel]]、「スポッターして」→ [[radio event.spotter=on]]、「順位は言わなくていい」→ [[radio note=\"順位は聞かれたときだけ言う\"]]、「無線を減らして」→ [[radio interval=60]]\n\
 - 無線に付く「指示 n」は、以後のすべての返答と連絡で守る。「作戦メモ」は裏で立てた作戦。作戦を聞かれたら、付いている vr strategy の最新の値と合わせて答える\n\
-- 作戦では、自分と他車のラップの落ち方（fade）、ピットの損失、燃料、戻る位置、前後の車が先に入ったときの得失（undercut / overcut / its stop gains）を根拠にする。net は同じ回数止まった後の差。数字の根拠が無いことは言わない。止まる周は plans と fuel window の中から選び、calls に無いアンダーカットを自分から勧めない\n\
-- ときどき「出来事」がドライバーの無線の代わりに届く。そのときだけ、今知らせるべきことを 1 文で言う。不要なら - だけを返す。「見張り」の出来事はドライバーに頼まれたものなので、必ず指示のとおりに言う\n\
-- ときどき「作戦会議」が届く。読み上げない裏の仕事で、書き方はそこにある\n\
-race-engineer スキルがあれば今読んで、データの読み方を把握しておくこと。コマンドはまだ実行しない。終わったら「了解」とだけ返す。";
+- 作戦では、自分と他車のラップの落ち方（fade）、ピットの損失、燃料、戻る位置、前後の車が先に入ったときの得失（undercut / overcut / its stop gains）を根拠にする。net は同じ回数止まった後の差。止まる周は plans と fuel window の中から選び、calls に無いアンダーカットを自分から勧めない\n\
+- ときどき「出来事」や「作戦会議」がドライバーの無線の代わりに届く。返し方はそこにある";
 
 pub const DEFAULT_PROMPT: &str = "\
 無線:「{text}」\n\n\
 {context}\n\n\
 {radio}\n\n\
-結論と数字から、日本語 1〜2 文で即答。";
+結論と、やることだけ。50 字まで。理由・内訳・聞き返しは無し。";
 
-/// Sent when something happened that the driver may have to know.
+/// Sent when something happened that takes thought before the driver is told.
 pub const CALL_PROMPT: &str = "\
 出来事（ドライバーの無線ではない）: {text}\n\n\
 {context}\n\n\
 {radio}\n\n\
-ドライバーが今知るべきことだけを、日本語の短い 1 文で言う。前に伝えたこと、本人に見えていること、\
-行動が変わらないことなら - だけを返す。「見張り」は頼まれたことなので、指示のとおりに必ず言う（「作戦で決めた見張り」は自分の覚え書きで、新しく言うことがあるときだけ言う）。\
-作戦の出来事（plan・undercut・overcut・box・answer・fuel）は計算で確かめた結果。期限のあるもの（best plan: stop at the end of this lap、answer within、fuel: stop by）は、何をするかと決め手の数字を必ず言う。ほかは作戦が変わるときだけ言う。\
+ドライバーが今やることだけを、日本語の短い 1 文（30 字まで）で言う。理由や数字の内訳は言わない。前に伝えたこと、行動が変わらないことなら - だけを返す。\
+「見張り」は頼まれたことなので、指示のとおりに必ず言う（「作戦で決めた見張り」は自分の覚え書きで、新しく言うことがあるときだけ言う）。\
 「指示 n」を守る。ラジオの設定は変えない。コマンドは使わない。";
+
+/// The rules of the desk: what a race engineer does between two calls.
+pub const DESK_PRIMER: &str = "\
+あなたはシムレースのチームのデスクにいるレースエンジニア。無線は別の担当が受け、時間のかかる調査だけがここに届く。\n\
+最後の返答だけが、走行中のドライバーにそのまま音声で読み上げられる。途中経過は書かない。\n\
+- 進め方: 何が分かればドライバーの行動が変わるかを決める → 仮説を 2〜3 個立てる → データで確かめて絞る → 原因、やること、期待できる秒数を出す。1 つの数字で決めつけず、別のデータでも裏を取る\n\
+- データはまず付いたものを読む。足りないものは vr をシェルで実行して取る。独立したコマンドは 1 回の実行にまとめる\n\
+  vr laps --car 番号 --last 10（誰のラップでも） / vr sectors --car 番号（その車との区間差） / vr gap --car 番号 / vr forecast（このままだと何位か、誰にいつ追いつくか）\n\
+  vr sessions corners（自分の直前の周と自己ベストの、コーナーごとの差: ブレーキ開始、最低速度、アクセル、出口。--lap 周 --against 周 で選べる） / vr sessions list・show 番号・analyse 番号・compare 番号 番号（過去の走行とセットアップ）\n\
+  vr handling（アンダー・オーバー・ロック・空転） / vr setup / vr car（タイヤ、損傷、温度） / vr strategy / vr events --limit 30 / vr channels 英単語（ゲームの生の値） / vr info\n\
+- 無いデータは、代わりの証拠で判断する。空力の損傷は、最高速と高速コーナーの最低速度が前の周から落ちたか。タイヤの適正温度は、内・中・外の差、左右前後の差、速かった周との差、内圧。追いつけるかは、最近数周のラップ差と残り周回。それでも決まらなければ一般的な目安で「推定で」と言い切る。分からないだけで終えない\n\
+- 車やコースの知識、規則は Web で調べてよい。マニュアルの検索は 2 回まで\n\
+- 読み取りは自由。ドライバーが頼んだ書き込み（イシュー、メモ）は実行し、結果を 1 文で言う。頼まれていない書き込みはしない\n\
+- 返答: 日本語 2〜3 文、90 字まで。原因を一言で言い切り、やることを一つ、取れる秒数を一つ。走りながら聞いてすぐ動ける形にする。調べた過程、根拠の数字の列挙、留保（〜の可能性、データでは、確認できない、取得できない）、訂正、言い訳は書かない。例:「最終シケインの立ち上がりで0.3秒失ってる。アクセルが遅い、次は早めに開けよう。」「空力は無傷だ、今まで通り攻めていい。」聞き返さない。見出し、記号、マークダウン、箇条書き、URL は無し。数字は推測しない（推定は推定と言う）\n\
+- コーナーは、コース名から確実に分かるときだけ名前で、それ以外は「ライン後 1200m」のように距離で言う。車は番号で呼ぶ\n\
+- 無線に付く「指示 n」を守る";
+
+/// Sent to the desk.
+pub const STUDY_PROMPT: &str = "\
+調査の依頼（ドライバーの無線）:「{text}」\n\n\
+{context}\n\n\
+{radio}\n\n\
+調べて、読み上げる返答だけを書く。";
 
 /// Sent from time to time, so that the engineer has a plan before it is asked.
 pub const PLAN_PROMPT: &str = "\
@@ -88,9 +112,9 @@ pub const PLAN_PROMPT: &str = "\
 {context}\n\n\
 {radio}\n\n\
 このデータで作戦を立て直し、次のとおりに返す。コマンドは使わない。\n\
-1. [[radio plan=\"…\"]] に作戦メモを 120 字以内で書く: いつ止まるか（第一案と、外れたときの第二案）、決め手の数字（落ち方、ピットの損失、燃料の窓、戻る位置）、警戒する車と狙う車（番号・名前・net の差・何周以内にどうするか）。データに無いことは書かない\n\
-2. 見張りが要るなら 4 つまで [[radio when=\"条件\" do=\"…\"]] を書く。前回の作戦の見張りは消える。ドライバーの見張りと重ねない\n\
-3. ドライバーに今言うべきこと（初めての作戦、作戦の変更、次の 2 周の間に決めること、アンダーカットの危険や好機）があれば、その後に短い 1 文で言う。前に伝えたこと、まだ先のことなら - だけを書く";
+1. [[radio plan=\"…\"]] に作戦メモを 120 字以内で書く: いつ止まるか（第一案と、外れたときの第二案）、決め手の数字（落ち方、ピットの損失、燃料の窓、戻る位置）、警戒する車と狙う車（番号・net の差・何周以内にどうするか）。データに無いことは書かない\n\
+2. 見張りが要るなら 2 つまで [[radio when=\"条件\" say=\"…\"]] を書く。前回の作戦の見張りは消える。ドライバーの見張りと重ねない\n\
+3. 初めての作戦か、作戦が変わったときだけ、その後に短い 1 文（やることだけ）で言う。ピットの時期・アンダーカットは計算結果が別に読まれるので言わない。無ければ - だけを書く";
 
 /// Sent when the agent wrote a setting that cannot be read.
 pub const FIX_PROMPT: &str = "\
@@ -103,7 +127,8 @@ speed(km/h) throttle brake(0〜100) steer(度、左が正) lat_g(左が正) long
 lap lap_pct(周の何%) lap_m(m) lap_time last_lap best_lap delta_best(秒、負が速い) \
 position cars laps_left time_left(秒) session_time(秒) \
 gap_ahead gap_behind(秒、順位が前後の車) trend_ahead trend_behind(秒/周、負は縮む) \
-near_ahead near_behind(秒、コース上で前後の車) lapping_behind(秒、周回上の後ろの車) alongside(横に車 0/1) \
+near_ahead near_behind(秒、コース上で前後の車) lapping_behind(秒、周回上の後ろの車) near_ahead_m near_behind_m(m、コース上の距離) alongside(横に車 0/1) left right(横の台数) \
+live_position(走行順の順位) gap_leader(秒) leader_lap ahead_lap(トップ・前の車の前周、秒) \
 fuel(L) fuel_laps(周) fuel_spare(完走時に余るL、負は不足) stops tyre_age(周) stop_in(予定のピットまでの周、0はこの周) \
 on_pit in_stall on_track off_track(0/1) incidents water oil(℃) track_temp rain(0〜100) p2p \
 yellow caution blue white racing(0/1)";
@@ -118,13 +143,48 @@ pub fn live_key(name: &str) -> bool {
 /// nearly everything a driver asks while driving.
 pub const DEFAULT_CONTEXT: &[&str] = &[
     "vr brief",
-    "vr standings",
-    "vr laps --last 5",
-    "vr events --limit 10",
+    "vr standings --around 3",
+    "vr laps --last 4",
+    "vr sectors",
 ];
 
-pub const DEFAULT_VOCABULARY: &str = "シムレースの無線。ギャップ、燃費、給油、ピット、ボックス、\
-イエローフラッグ、アンダーカット、周回遅れ、ラップタイム、スティント。";
+pub const DEFAULT_VOCABULARY: &str = "シムレース走行中の無線。今何位、何番手、前の車との差、\
+後ろ、トップとのタイム差、トップのラップタイム、離されてる、縮まってる、追いつく、あと何周、\
+ダメージ、タイヤの温度、セクタータイム、ギャップ、燃費、給油、ピット、ボックス、\
+イエローフラッグ、アンダーカット、周回遅れ、スティント、アンダー、オーバー、スポッター。";
+
+/// Options of the agent's sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AgentOptions {
+    pub radio: Vec<(String, String)>,
+    /// What differs at the desk.
+    pub desk: Vec<(String, String)>,
+}
+
+impl AgentOptions {
+    /// A radio answers at once, and often: a small model that thinks little.
+    /// The desk has the time to think.
+    fn suited_to(command: &str) -> Self {
+        let of = |list: &[(&str, &str)]| {
+            list.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        if command.contains("codex") {
+            Self {
+                radio: of(&[
+                    ("model", "gpt-6.1-terra"),
+                    ("reasoning_effort", "low"),
+                    ("fast-mode", "off"),
+                ]),
+                desk: of(&[("reasoning_effort", "medium")]),
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -150,15 +210,43 @@ pub struct Config {
     #[arg(long = "agent-option", env = "VR_RADIO_AGENT_OPTIONS", value_delimiter = ';', value_parser = parse_option)]
     pub agent_options: Vec<(String, String)>,
 
-    /// Sent once when the agent connects, so that the first question does
-    /// not wait for it. Empty: nothing is sent.
+    /// The same for the desk, where the engineer looks into something at
+    /// length, e.g. `reasoning_effort=high`.
+    #[arg(long = "desk-option", env = "VR_RADIO_DESK_OPTIONS", value_delimiter = ';', value_parser = parse_option)]
+    pub desk_options: Vec<(String, String)>,
+
+    /// Chosen in the settings, by the command of the agent.
+    #[arg(skip)]
+    pub saved_options: BTreeMap<String, AgentOptions>,
+
+    /// Goes with the first question of a session. Empty: nothing is sent.
     #[arg(long, env = "VR_RADIO_PRIMER", default_value = DEFAULT_PRIMER)]
     pub primer: String,
+
+    /// The same for the desk.
+    #[arg(long, env = "VR_RADIO_DESK_PRIMER", default_value = DESK_PRIMER)]
+    pub desk_primer: String,
 
     /// Command whose output goes with every question, e.g. `vr brief`
     /// (repeatable). One empty value: none.
     #[arg(long, env = "VR_RADIO_CONTEXT", value_delimiter = ';', default_values = DEFAULT_CONTEXT)]
     pub context: Vec<String>,
+
+    /// Answers the usual questions without the agent: a topic is added to it.
+    /// Empty: the agent is asked every time.
+    #[arg(long, env = "VR_RADIO_SAY", default_value = "vr say")]
+    pub say: String,
+
+    /// Prompts after which the agent begins a new session, which forgets what
+    /// was said (the radio tells it the last exchanges). 0: never.
+    #[arg(long, env = "VR_RADIO_RENEW_TURNS", default_value_t = 0)]
+    pub renew_turns: u32,
+
+    /// Tokens of one prompt from which on the agent begins a new session.
+    /// What was said before comes from the cache, so a session lasts several
+    /// races. 0: never.
+    #[arg(long, env = "VR_RADIO_RENEW_TOKENS", default_value_t = 256_000)]
+    pub renew_tokens: u64,
 
     /// Also fetch data for what the question is about (setup, tyres, past
     /// sessions, a car number), told from its words.
@@ -171,9 +259,9 @@ pub struct Config {
     #[arg(long, env = "VR_RADIO_DECIDE_MODEL", default_value = DEFAULT_DECIDE_MODEL)]
     pub decide_model: String,
 
-    /// Seconds without an answer after which the driver is told to wait; told
-    /// at once when the agent looks something up. 0: never told.
-    #[arg(long, env = "VR_RADIO_STANDBY", default_value_t = 4.0, value_parser = seconds)]
+    /// Seconds without an answer after which the driver is told to wait, at
+    /// most once in two minutes. 0: never told.
+    #[arg(long, env = "VR_RADIO_STANDBY", default_value_t = 8.0, value_parser = seconds)]
     pub standby: f64,
 
     /// Prompt sent to the agent; `{text}` is what the driver said, `{context}`
@@ -246,7 +334,7 @@ pub struct Config {
     pub watch: String,
 
     /// Tells the values that conditions are checked against. Empty: none are.
-    #[arg(long, env = "VR_RADIO_LIVE", default_value = "vr live --hz 10")]
+    #[arg(long, env = "VR_RADIO_LIVE", default_value = "vr live --hz 60")]
     pub live: String,
 
     /// Global push-to-talk key, held while speaking (e.g. F9, Ctrl+Shift+Space).
@@ -308,12 +396,34 @@ impl Config {
         )))
     }
 
-    pub fn session(&self) -> crate::agent::SessionConfig {
+    pub fn session(&self, options: &AgentOptions) -> crate::agent::SessionConfig {
         crate::agent::SessionConfig {
             cwd: self.agent_cwd(),
             permissions: self.permissions,
-            options: self.agent_options.clone(),
+            options: options.radio.clone(),
             primer: Some(self.primer.replace("{live}", LIVE)).filter(|p| !p.trim().is_empty()),
+            desk_primer: Some(self.desk_primer.clone()).filter(|p| !p.trim().is_empty()),
+            desk_options: options.desk.clone(),
+            renew: Renew {
+                turns: self.renew_turns,
+                tokens: self.renew_tokens,
+            },
+        }
+    }
+
+    /// The options of an agent: what suits a radio, what was chosen in the
+    /// settings, what the command line says.
+    pub fn options_of(&self, command: &str) -> AgentOptions {
+        let mut o = AgentOptions::suited_to(command);
+        if let Some(saved) = self.saved_options.get(command) {
+            o = AgentOptions {
+                radio: merged(&o.radio, &saved.radio),
+                desk: merged(&o.desk, &saved.desk),
+            };
+        }
+        AgentOptions {
+            radio: merged(&o.radio, &self.agent_options),
+            desk: merged(&o.desk, &self.desk_options),
         }
     }
 
@@ -382,16 +492,76 @@ pub fn resolve_program(
     None
 }
 
-/// Codex without its plugins: a third fewer tokens in every turn, and no tools
-/// the radio has no use for. The user's own configuration stays as it is.
-const CODEX_CONFIG: &str = r#"{"features":{"apps":false,"plugins":false}}"#;
+/// What Codex is told instead of how to write programs. The rules of the radio
+/// come with the first prompt.
+const CODEX_INSTRUCTIONS: &str = "\
+You are a race engineer on the radio of a sim racer. Your final message is read \
+aloud to a driver who cannot look away from the track: send nothing but the \
+answer. Follow the rules of the first user message. Answer from the data in \
+the message; only when it does not suffice, run `vr` with the shell (PowerShell \
+on Windows). Use other commands or the web only when the driver asks to look \
+something up or to write something down.\n";
 
-/// Adds `CODEX_CONFIG` to a plain Codex command, unless the user has their own.
-fn with_codex_config(command: String, own: bool) -> String {
+/// Features of Codex the radio has no use for. Every one of them is paid for
+/// with every prompt.
+const CODEX_OFF: [&str; 14] = [
+    "apps",
+    "browser_use",
+    "computer_use",
+    "goals",
+    "image_generation",
+    "in_app_browser",
+    "memories",
+    "multi_agent",
+    "multi_agent_v2",
+    "plugins",
+    "skill_search",
+    "sleep_tool",
+    "tool_suggest",
+    "view_image",
+];
+
+/// Codex as a race engineer: 6 000 tokens before the first question instead of
+/// 20 000. The user's own configuration stays as it is.
+fn codex_config(instructions: Option<&Path>) -> String {
+    let off: serde_json::Map<String, serde_json::Value> = CODEX_OFF
+        .iter()
+        .map(|f| (f.to_string(), false.into()))
+        .collect();
+    let mut c = serde_json::json!({
+        "features": off,
+        "agents": {"enabled": false},
+        "skills": {"include_instructions": false},
+        "project_doc_max_bytes": 0,
+        "include_collaboration_mode_instructions": false,
+        "include_permissions_instructions": false,
+        "include_environment_context": false,
+        "model_verbosity": "low",
+    });
+    // Quoted for a shell: no path with a quote in it.
+    let path = instructions.map(|p| p.to_string_lossy().replace('\\', "/"));
+    if let Some(path) = path.filter(|p| !p.contains('\'')) {
+        c["model_instructions_file"] = path.into();
+    }
+    c.to_string()
+}
+
+/// Writes `CODEX_INSTRUCTIONS` next to the settings.
+fn codex_instructions() -> Option<PathBuf> {
+    let path = crate::settings::default_path()?.with_file_name("codex-instructions.md");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(CODEX_INSTRUCTIONS) {
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, CODEX_INSTRUCTIONS).ok()?;
+    }
+    Some(path)
+}
+
+/// Adds a `CODEX_CONFIG` to a plain Codex command, unless the user has their own.
+fn with_codex_config(command: String, own: bool, instructions: Option<&Path>) -> String {
     if own || command.starts_with('{') || !command.contains("codex-acp") {
         return command;
     }
-    format!("CODEX_CONFIG='{CODEX_CONFIG}' {command}")
+    format!("CODEX_CONFIG='{}' {command}", codex_config(instructions))
 }
 
 /// Rewrites the program of a plain command line for Windows; JSON configs and
@@ -401,7 +571,9 @@ pub fn agent_command(command: &str) -> String {
     let pathext = std::env::var("PATHEXT").ok();
     let resolved = agent_command_with(command, cfg!(windows), path.as_deref(), pathext.as_deref());
     let own = command.contains("CODEX_CONFIG") || std::env::var_os("CODEX_CONFIG").is_some();
-    with_codex_config(resolved, own)
+    let codex = resolved.contains("codex-acp") && !own;
+    let instructions = codex.then(codex_instructions).flatten();
+    with_codex_config(resolved, own, instructions.as_deref())
 }
 
 fn agent_command_with(
@@ -439,8 +611,8 @@ mod tests {
         assert_eq!(c.volume, 100);
         assert_eq!(c.serve, "vr serve --if-needed");
         assert_eq!(c.watch, "vr watch -f json");
-        assert_eq!(c.live, "vr live --hz 10");
-        let primer = c.session().primer.unwrap();
+        assert_eq!(c.live, "vr live --hz 60");
+        let primer = c.session(&AgentOptions::default()).primer.unwrap();
         assert!(primer.contains("gap_behind(秒") && !primer.contains("{live}"));
         assert!(live_key("gap_behind") && live_key("lap_pct") && live_key("racing"));
         assert!(!live_key("gap") && !live_key("秒") && !live_key(""));
@@ -454,10 +626,18 @@ mod tests {
         assert!(c.prompt.contains("{text}") && c.prompt.contains("{context}"));
         assert_eq!(c.context_commands()[0], "vr brief");
         assert_eq!(c.context_commands().len(), 4);
+        assert_eq!(c.say, "vr say");
+        assert_eq!(
+            c.session(&AgentOptions::default()).renew,
+            Renew {
+                turns: 0,
+                tokens: 256_000
+            }
+        );
         assert!(c.agent_options.is_empty());
         assert!(c.topics);
         assert_eq!(c.decide_model, "typesafe/jev-1.14");
-        assert_eq!(c.standby, 4.0);
+        assert_eq!(c.standby, 8.0);
         let stt = c.stt();
         assert_eq!(stt.model, "openai/gpt-transcribe");
         assert_eq!(stt.base_url, "https://openrouter.ai/api/v1");
@@ -599,20 +779,35 @@ mod tests {
     }
 
     #[test]
-    fn codex_runs_without_plugins() {
-        let codex = with_codex_config("npx codex-acp".into(), false);
-        assert_eq!(
-            codex,
-            r#"CODEX_CONFIG='{"features":{"apps":false,"plugins":false}}' npx codex-acp"#
-        );
+    fn codex_runs_as_a_race_engineer() {
+        let file = Path::new("C:\\Users\\a b\\codex.md");
+        let codex = with_codex_config("npx codex-acp".into(), false, Some(file));
+        assert!(codex.ends_with("' npx codex-acp"), "{codex}");
+        let json = codex
+            .strip_prefix("CODEX_CONFIG='")
+            .and_then(|c| c.strip_suffix("' npx codex-acp"))
+            .unwrap();
+        let c: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(c["model_instructions_file"], "C:/Users/a b/codex.md");
+        // An option of the session.
+        assert!(c.get("model_reasoning_effort").is_none());
+        assert_eq!(c["project_doc_max_bytes"], 0);
+        assert_eq!(c["features"]["plugins"], false);
+        assert_eq!(c["features"].as_object().unwrap().len(), CODEX_OFF.len());
+        // The model stays the user's choice.
+        assert!(c.get("model").is_none());
         let acp: agent_client_protocol::AcpAgent = codex.parse().unwrap();
         assert!(format!("{acp:?}").contains("CODEX_CONFIG"));
+        for file in [None, Some(Path::new("/o'brien/codex.md"))] {
+            let c = with_codex_config("codex-acp".into(), false, file);
+            assert!(!c.contains("model_instructions_file"), "{c}");
+        }
         for (command, own) in [
             ("npx codex-acp", true),
             ("npx claude-agent-acp", false),
             (r#"{"command":"codex-acp"}"#, false),
         ] {
-            assert_eq!(with_codex_config(command.into(), own), command);
+            assert_eq!(with_codex_config(command.into(), own, Some(file)), command);
         }
     }
 
@@ -644,5 +839,50 @@ mod tests {
             "missing x"
         );
         assert_eq!(agent_command(json), json);
+    }
+
+    #[test]
+    fn options_come_from_the_agent_the_settings_and_the_command_line() {
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let mut c = Config::try_parse_from(["vr-radio"]).unwrap();
+        assert_eq!(c.options_of(DEFAULT_AGENT), AgentOptions::default());
+        let codex = c.options_of(CODEX_AGENT);
+        let suited = [
+            ("model", "gpt-6.1-terra"),
+            ("reasoning_effort", "low"),
+            ("fast-mode", "off"),
+        ];
+        assert_eq!(codex.radio, pairs(&suited));
+        assert_eq!(codex.desk, pairs(&[("reasoning_effort", "medium")]));
+        let session = c.session(&codex);
+        assert_eq!(
+            (session.options, session.desk_options),
+            (codex.radio, codex.desk)
+        );
+        assert!(session.desk_primer.unwrap().contains("vr sessions corners"));
+        // Chosen in the settings, for this agent only.
+        c.saved_options.insert(
+            CODEX_AGENT.into(),
+            AgentOptions {
+                radio: pairs(&[("fast-mode", "on")]),
+                desk: pairs(&[("reasoning_effort", "high")]),
+            },
+        );
+        let o = c.options_of(CODEX_AGENT);
+        assert_eq!(o.radio[2], ("fast-mode".into(), "on".into()));
+        assert_eq!(o.radio[0], ("model".into(), "gpt-6.1-terra".into()));
+        assert_eq!(o.desk, pairs(&[("reasoning_effort", "high")]));
+        assert_eq!(c.options_of(DEFAULT_AGENT), AgentOptions::default());
+        // The command line has the last word.
+        c.agent_options = pairs(&[("model", "gpt-6-luna"), ("x", "y")]);
+        c.desk_options = pairs(&[("reasoning_effort", "max")]);
+        let o = c.options_of(CODEX_AGENT);
+        assert_eq!(o.radio[0], ("model".into(), "gpt-6-luna".into()));
+        assert_eq!(o.radio[3], ("x".into(), "y".into()));
+        assert_eq!(o.desk, pairs(&[("reasoning_effort", "max")]));
     }
 }

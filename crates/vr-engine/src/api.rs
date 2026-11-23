@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::RaceState;
+use crate::forecast::ForecastReport;
 use crate::handling::{Behaviour, HandlingLap};
 use crate::live::LiveReport;
 use crate::report::*;
@@ -33,6 +34,12 @@ pub struct LapsParams {
     pub car: Option<String>,
     /// Only the last N laps (default 10).
     pub last: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SectorsParams {
+    /// Car number to compare with (default: the car ahead, or the leader).
+    pub car: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -82,6 +89,7 @@ pub trait RaceApi {
     fn gaps(&self, p: &GapParams) -> ApiResult<GapReport>;
     fn fuel(&self) -> ApiResult<FuelReport>;
     fn laps(&self, p: &LapsParams) -> ApiResult<LapsReport>;
+    fn sectors(&self, p: &SectorsParams) -> ApiResult<SectorsReport>;
     fn events(&self, p: &EventsParams) -> ApiResult<EventsReport>;
     fn snapshot(&self) -> ApiResult<SnapshotReport>;
     fn car(&self) -> ApiResult<CarReport>;
@@ -90,8 +98,12 @@ pub trait RaceApi {
     fn setup(&self) -> ApiResult<SetupReport>;
     fn handling(&self, p: &HandlingParams) -> ApiResult<HandlingReport>;
     fn strategy(&self) -> ApiResult<StrategyReport>;
+    fn forecast(&self) -> ApiResult<ForecastReport>;
     fn live(&self) -> ApiResult<LiveReport>;
 }
+
+/// Stretches of the lap that differ by less are the same.
+const WORTH_S: f64 = 0.03;
 
 /// Thread-safe handle used by long-running collectors.
 pub type SharedState = Arc<RwLock<RaceState>>;
@@ -112,16 +124,27 @@ impl RaceApi for RaceState {
                 weather: None,
                 rain_trend: None,
                 car: None,
+                leader: None,
+                running_ahead: None,
+                running_behind: None,
             });
         };
         let mut nearby = self.nearby(f, None);
         nearby.truncate(4);
+        let (ahead, behind) = (self.adjacent(f, -1), self.adjacent(f, 1));
+        // Only where it is news.
+        let other = |now: Option<GapInfo>, official: &Option<GapInfo>| {
+            now.filter(|g| official.as_ref().is_none_or(|o| o.car.idx != g.car.idx))
+        };
         Ok(Brief {
             meta,
             session: Some(self.session_summary(f)),
             player: self.player_summary(f),
-            ahead: self.adjacent(f, -1),
-            behind: self.adjacent(f, 1),
+            running_ahead: other(self.running(f, -1), &ahead),
+            running_behind: other(self.running(f, 1), &behind),
+            leader: self.leader(f),
+            ahead,
+            behind,
             nearby,
             fuel: self.fuel_info(f),
             recent_events: self.event_log().last(5),
@@ -289,6 +312,114 @@ impl RaceApi for RaceState {
         })
     }
 
+    fn sectors(&self, p: &SectorsParams) -> ApiResult<SectorsReport> {
+        let meta = self.meta();
+        let timing = self.timing();
+        let mut out = SectorsReport {
+            meta,
+            basis: SectorBasis::None,
+            starts: Vec::new(),
+            rows: Vec::new(),
+            versus: None,
+            delta: Vec::new(),
+            losses: Vec::new(),
+            gains: Vec::new(),
+        };
+        let Some((f, me)) = self.frame().and_then(|f| Some((f, f.player_car()?))) else {
+            return Ok(out);
+        };
+        let asked = match &p.car {
+            Some(num) => {
+                let num = num.trim_start_matches('#');
+                let car = f.cars.iter().find(|c| c.number == num);
+                Some(car.ok_or_else(|| ApiError::NotFound(format!("car #{num}")))?)
+            }
+            None => None,
+        };
+        out.starts = timing.sector_starts();
+        let mut add = |role: &str, idx: usize| {
+            if out.rows.iter().any(|r| r.car.idx == idx) {
+                return;
+            }
+            let Some(c) = f.car(idx) else { return };
+            out.rows.push(SectorRow {
+                car: car_ref(c),
+                role: role.into(),
+                last_lap_s: c.last_lap_s.filter(|x| *x > 0.0),
+                lap: timing.last(idx).and_then(|(l, _)| l.lap),
+                last: timing.last_sectors(idx),
+                best: timing.best(idx),
+                current: timing.current_sectors(idx),
+            });
+        };
+        add("you", me.idx);
+        if let Some(c) = asked {
+            add("asked", c.idx);
+        }
+        for (role, g) in [
+            ("ahead", self.adjacent(f, -1)),
+            ("behind", self.adjacent(f, 1)),
+            ("leader", self.leader(f)),
+        ] {
+            if let Some(g) = g {
+                add(role, g.car.idx);
+            }
+        }
+        let known = |r: &SectorRow| r.last.iter().chain(&r.current).any(Option::is_some);
+        out.basis = match (out.rows.iter().any(known), timing.told()) {
+            (false, _) => SectorBasis::None,
+            (true, true) => SectorBasis::GameLines,
+            (true, false) => SectorBasis::Thirds,
+        };
+        let versus = out
+            .rows
+            .iter()
+            .find(|r| match asked {
+                Some(c) => r.car.idx == c.idx,
+                None => matches!(r.role.as_str(), "ahead" | "leader"),
+            })
+            .or_else(|| out.rows.iter().find(|r| r.role == "behind"));
+        if let (Some(mine), Some(theirs)) = (out.rows.first(), versus) {
+            out.delta = mine
+                .last
+                .iter()
+                .zip(&theirs.last)
+                .map(|(a, b)| Some((*a)? - (*b)?))
+                .collect();
+            out.versus = Some(theirs.car.clone());
+            let length = f.session.track.as_ref().and_then(|t| t.length_m);
+            let all: Vec<StretchLoss> = timing
+                .compare(me.idx, theirs.car.idx)
+                .into_iter()
+                .map(|s| StretchLoss {
+                    from: s.from,
+                    to: s.to,
+                    from_m: length.map(|l| l * s.from),
+                    to_m: length.map(|l| l * s.to),
+                    sector: out.starts.iter().filter(|x| **x <= s.from).count().max(1),
+                    lost_s: s.lost_s,
+                })
+                .collect();
+            let worth = |s: &&StretchLoss| s.lost_s.abs() >= WORTH_S;
+            out.losses = all
+                .iter()
+                .filter(|s| s.lost_s > 0.0)
+                .filter(worth)
+                .take(3)
+                .cloned()
+                .collect();
+            out.gains = all
+                .iter()
+                .rev()
+                .filter(|s| s.lost_s < 0.0)
+                .filter(worth)
+                .take(3)
+                .cloned()
+                .collect();
+        }
+        Ok(out)
+    }
+
     fn events(&self, p: &EventsParams) -> ApiResult<EventsReport> {
         Ok(EventsReport {
             meta: self.meta(),
@@ -376,6 +507,10 @@ impl RaceApi for RaceState {
         Ok(self.strategy_report())
     }
 
+    fn forecast(&self) -> ApiResult<ForecastReport> {
+        Ok(crate::forecast::forecast(self))
+    }
+
     fn live(&self) -> ApiResult<LiveReport> {
         Ok(crate::live::live(self))
     }
@@ -430,6 +565,7 @@ delegate_locked! {
     gaps(p: &GapParams) -> GapReport;
     fuel() -> FuelReport;
     laps(p: &LapsParams) -> LapsReport;
+    sectors(p: &SectorsParams) -> SectorsReport;
     events(p: &EventsParams) -> EventsReport;
     snapshot() -> SnapshotReport;
     car() -> CarReport;
@@ -439,4 +575,5 @@ delegate_locked! {
     handling(p: &HandlingParams) -> HandlingReport;
     live() -> LiveReport;
     strategy() -> StrategyReport;
+    forecast() -> ForecastReport;
 }
