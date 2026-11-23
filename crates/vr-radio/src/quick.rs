@@ -161,6 +161,17 @@ const MORE: &[&str] = &[
     "三位",
     "#",
     "号車",
+    // Someone's best lap is no gap, and no lap just driven.
+    "ファステスト",
+    "ファストラップ",
+    "最速",
+    // About an earlier answer, or asking for all of it.
+    "その",
+    "それ",
+    "だから",
+    "発言",
+    "全部",
+    "詳しく",
 ];
 
 const LEADER: &[&str] = &["トップ", "1位", "一位", "首位", "リーダー", "先頭"];
@@ -414,11 +425,16 @@ fn topic(s: &str) -> Option<&'static str> {
     if behind && lap && !any(&["ペース", "上げ", "速"]) {
         return None;
     }
+    // Where, when, with whom or what it does: the state of the car is no answer.
+    let cause = why || any(&["いつ", "誰", "影響", "せい", "原因", "どれだけ遅"]);
     Some(if losing {
         "losing"
     } else if sectors && !why {
         "sectors"
     } else if hurt {
+        if cause {
+            return None;
+        }
         "damage"
     } else if any(&["タイヤ"]) {
         if !any(&["温度", "摩耗", "減り", "減って", "状態", "どう", "タイヤは"]) {
@@ -564,9 +580,60 @@ fn chars_at_most(s: &str, n: usize) -> bool {
     s.chars().count() <= n
 }
 
+/// What the report of a topic tells, in English for the decision model:
+/// whether it answers a call is asked before it is read out.
+pub fn about(topic: &str) -> &'static str {
+    match topic {
+        "status" => "where the car is in the race now: position and the gaps around it",
+        "position" => "the driver's current position",
+        "ahead" => "the gap to the car directly ahead and whether it shrinks",
+        "behind" => "the gap to the car directly behind and whether it shrinks",
+        "leader" => "the gap to the race leader and whether it shrinks",
+        "pace" => "the driver's own last lap time against their best",
+        "ahead-lap" => "the last lap time of the car directly ahead",
+        "leader-lap" => "the last lap time of the race leader",
+        "lap" => "the driver's last lap time and the gap to the leader",
+        "sectors" => "which sector of the last lap was slower than the driver's best",
+        "fuel" => "whether the fuel lasts to the end",
+        "left" => "how many laps or minutes of the race are left",
+        "flags" => "which flags are out now",
+        "weather" => "whether it rains and how wet the track is now",
+        "damage" => "whether the car is damaged now and needs a repair",
+        "tyres" => "how worn the tyres are",
+        "forecast" => "where the driver will finish if everyone goes on as now",
+        "losing" => "the corner where the driver loses most time and what to do there",
+        "fuel-laps" => "how many laps the fuel lasts",
+        "tyre-temps" => "the tyre temperatures",
+        _ => "something else",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Calls of a race where the words answered something else.
+    #[test]
+    fn what_the_words_alone_answered_wrong() {
+        for q in [
+            "これどこでダメージ食らったんだ、俺。",
+            "どこでダメージ食らったの。",
+            "マシンダメージの影響は。",
+            "これマシンダメージのせいでしょ。",
+            "トップのファステストは何秒なの。",
+            "そのファステストラップは1位のやつなの。",
+            "じゃさっきのあの発言は何だったの。",
+            "いつダメージ受けた？",
+        ] {
+            assert_eq!(say(q), None, "{q}");
+        }
+        // The plain questions still are answered at once.
+        assert_eq!(say("ダメージは。"), Some("damage"));
+        assert_eq!(say("これダメージ食らった。"), Some("damage"));
+        assert_eq!(say("どこで失ってんの。"), Some("losing"));
+        assert_eq!(say("トップ何秒。"), Some("leader"));
+        assert!(TOPICS.iter().all(|t| about(t) != "something else"));
+    }
 
     fn say(text: &str) -> Option<&'static str> {
         match read(text) {

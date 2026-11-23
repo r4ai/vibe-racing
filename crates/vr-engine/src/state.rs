@@ -1087,6 +1087,8 @@ impl RaceState {
             live_s: live.map(|l| l.0),
             live_change_s: live.and_then(|l| l.1),
             live_ahead: live.map(|l| l.2),
+            p2p_left: other.extra.p2p_count,
+            p2p_active: other.extra.p2p_active,
         }
     }
 

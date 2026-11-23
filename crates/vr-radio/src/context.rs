@@ -136,7 +136,21 @@ impl ContextSource for Commands {
             return None;
         }
         Some(match quick::read(text)? {
-            Quick::Say(topic) => Answer::Text(self.say(topic)?),
+            Quick::Say(topic) => {
+                // The words found a topic; the decision model tells whether its
+                // report is what was asked. Unsure, the agent answers.
+                if let Some(d) = &self.decide {
+                    match d.fits(text, quick::about(topic)) {
+                        Ok(true) => {}
+                        Ok(false) => return None,
+                        Err(e) => {
+                            tracing::warn!("{e:#}");
+                            return None;
+                        }
+                    }
+                }
+                Answer::Text(self.say(topic)?)
+            }
             Quick::Ack => Answer::Ack,
             Quick::Here(text) => Answer::Text(text.into()),
             Quick::Again => Answer::Again,
@@ -312,6 +326,36 @@ mod tests {
         };
         assert_eq!(broken.answer("前との差は"), None);
         assert_eq!(broken.answer("了解"), Some(Answer::Ack));
+    }
+
+    /// Says whether a report answers a call: yes, no, or it is not there.
+    struct Fits(Option<bool>);
+    impl Decide for Fits {
+        fn decide(&self, _: &str) -> anyhow::Result<topic::Found> {
+            Ok(topic::Found::default())
+        }
+        fn fits(&self, _: &str, _: &str) -> anyhow::Result<bool> {
+            self.0.ok_or_else(|| anyhow::anyhow!("offline"))
+        }
+    }
+
+    #[test]
+    fn a_report_is_read_out_only_when_it_answers_the_call() {
+        let echo = if cfg!(windows) { "cmd /c echo" } else { "echo" };
+        let with = |fits| Commands {
+            say: echo.into(),
+            decide: Some(Arc::new(Fits(fits))),
+            ..commands(&[])
+        };
+        assert_eq!(
+            with(Some(true)).answer("ダメージは"),
+            Some(Answer::Text("damage".into()))
+        );
+        // Not what was asked, or not known: the agent answers.
+        assert_eq!(with(Some(false)).answer("ダメージは"), None);
+        assert_eq!(with(None).answer("ダメージは"), None);
+        // Words that need no report need no decision.
+        assert_eq!(with(Some(false)).answer("了解"), Some(Answer::Ack));
     }
 
     #[test]

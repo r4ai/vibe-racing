@@ -147,6 +147,8 @@ const SOON_LAPS: f64 = 3.0;
 const TIGHT_L: f64 = 1.0;
 /// Laps slower than the best by more come from the damage.
 const HURT_S: f64 = 1.0;
+/// A stop when nobody has made one yet: the pit lane of most tracks.
+const TYPICAL_STOP_S: f64 = 25.0;
 /// Tread left: think of the tyre, stop for it.
 const WORN: f64 = 0.4;
 const GONE: f64 = 0.2;
@@ -199,7 +201,7 @@ fn corner_advice(r: &CornersReport) -> Option<String> {
     Some(format!("{name}で{}失ってる。{todo}", sec(loss(i))))
 }
 
-const PIT_LAP: &str = "ピットか黄旗の周は比べられない、次の周で伝える。";
+const PIT_LAP: &str = "ピットかイエローの周は比べられない、次の周で伝える。";
 const NO_SECTORS: &str = "区間タイムは1周走り切ってから出せる。";
 
 pub fn speak(api: &dyn RaceApi, topic: Topic) -> ApiResult<Speech> {
@@ -868,12 +870,30 @@ impl Voice<'_> {
         // No game tells what the wings have lost; the laps do.
         let p = self.b.player.as_ref();
         let lost = p.and_then(|p| Some(p.last_lap_s? - p.best_lap_s?));
-        Ok(match lost {
-            Some(d) if d > HURT_S => "ダメージでペースが落ちてる、ピットで直そう。",
-            Some(_) => "ダメージは軽い、このまま行こう。",
-            None => "ダメージがある、1周様子を見よう。",
-        }
-        .into())
+        let s = self.session();
+        let laps_left = s
+            .laps_remaining
+            .map(f64::from)
+            .or_else(|| Some(s.time_remaining_s? / p?.last_lap_s?));
+        // A repair pays when the time lost over the laps left is more than
+        // the stop and the repair together.
+        let stop = self.api.strategy().ok().and_then(|s| s.pit_loss.seconds);
+        let cost = optional.unwrap_or(0.0) + stop.unwrap_or(TYPICAL_STOP_S);
+        Ok(match (lost, laps_left) {
+            (Some(d), Some(n)) if d > HURT_S && d * n <= cost => format!(
+                "ダメージで毎周{}落ち。残り{}周なら直さない方が速い、このまま行こう。",
+                sec(d),
+                n.ceil()
+            ),
+            (Some(d), _) if d > HURT_S => {
+                format!(
+                    "ダメージで毎周{}落ちてる。直した方が速い、ピットで直そう。",
+                    sec(d)
+                )
+            }
+            (Some(_), _) => "ダメージは軽い、このまま行こう。".into(),
+            (None, _) => "ダメージがある。まだ周のタイムが無い、次の周で影響を伝える。".into(),
+        })
     }
 
     /// Where a tyre is, and what it shows.
@@ -969,14 +989,14 @@ fn act_on(f: Flag) -> &'static str {
         Flag::Yellow => "イエロー、気をつけて",
         Flag::YellowWaving => "近くでイエロー、抑えて",
         Flag::Caution => "フルコースコーション、追い抜き禁止",
-        Flag::Red => "赤旗、減速",
-        Flag::Blue => "青旗、後ろに譲ろう",
+        Flag::Red => "レッドフラッグ、減速",
+        Flag::Blue => "ブルーフラッグ、後ろに譲ろう",
         Flag::White => "ファイナルラップ",
         Flag::Checkered => "チェッカー",
-        Flag::Black => "黒旗、ペナルティだ",
-        Flag::Repair => "修理旗、この周ピットに入ろう",
+        Flag::Black => "ブラックフラッグ、ペナルティだ",
+        Flag::Repair => "ミートボールフラッグ、修理が要る。この周ピットに入ろう",
         Flag::Disqualify => "失格だ",
-        Flag::Debris => "落下物に注意",
+        Flag::Debris => "デブリに注意",
         Flag::OneLapToGreen => "次の周でグリーン",
     }
 }
