@@ -12,6 +12,11 @@ use vr_replay::{ReplaySource, SynthConfig, SynthSource};
 pub enum Game {
     /// iRacing via its shared-memory telemetry (Windows).
     Iracing,
+    /// Assetto Corsa via its shared memory (Windows), with every car when
+    /// CrewChief's in-game app runs.
+    Assetto,
+    /// Assetto Corsa's UDP telemetry from the game's PC (`--host`), from any OS.
+    AssettoUdp,
     /// Replay an NDJSON file recorded with `vr record` / `vr serve --record`.
     Replay,
     /// A generated demo race (no game needed).
@@ -21,9 +26,12 @@ pub enum Game {
 #[derive(Debug, Clone, Args)]
 pub struct SourceArgs {
     /// Telemetry source. Without it, query commands use a running `vr serve`
-    /// and fall back to a one-shot iRacing read.
+    /// and fall back to a one-shot read of iRacing, then of Assetto Corsa.
     #[arg(long, value_enum, global = true)]
     pub game: Option<Game>,
+    /// The game's PC for `--game assetto-udp` (port 9996 unless given).
+    #[arg(long, global = true, default_value = "127.0.0.1")]
+    pub host: String,
     /// Recording to replay (implies `--game replay`).
     #[arg(long, global = true)]
     pub file: Option<PathBuf>,
@@ -52,14 +60,14 @@ impl SourceArgs {
     pub fn recordings(&self) -> Option<PathBuf> {
         match self.game() {
             Game::Iracing => Some(vr_iracing::telemetry_dir(&dirs::document_dir()?)),
-            Game::Replay | Game::Synthetic => None,
+            Game::Assetto | Game::AssettoUdp | Game::Replay | Game::Synthetic => None,
         }
     }
 
     pub fn source_kind(&self, live: bool) -> SourceKind {
         match self.game() {
-            Game::Iracing if live => SourceKind::Live,
-            Game::Iracing => SourceKind::Oneshot,
+            Game::Iracing | Game::Assetto | Game::AssettoUdp if live => SourceKind::Live,
+            Game::Iracing | Game::Assetto | Game::AssettoUdp => SourceKind::Oneshot,
             Game::Replay => SourceKind::Replay,
             Game::Synthetic => SourceKind::Synthetic,
         }
@@ -68,6 +76,7 @@ impl SourceArgs {
     pub fn game_id(&self) -> &'static str {
         match self.game() {
             Game::Iracing => "iracing",
+            Game::Assetto | Game::AssettoUdp => vr_assetto::GAME,
             Game::Replay => "replay",
             Game::Synthetic => "synthetic",
         }
@@ -77,9 +86,17 @@ impl SourceArgs {
     pub fn factory(&self, default_speed: f64) -> anyhow::Result<SourceFactory> {
         let speed = self.speed.unwrap_or(default_speed);
         Ok(match self.game() {
+            Game::Iracing if !self.explicit() => Box::new(open_any_live),
             Game::Iracing => Box::new(|| {
                 vr_iracing::open_live().map(|s| Box::new(s) as Box<dyn TelemetrySource>)
             }),
+            Game::Assetto => Box::new(open_assetto),
+            Game::AssettoUdp => {
+                let host = self.host.clone();
+                Box::new(move || {
+                    vr_assetto::open_udp(&host).map(|s| Box::new(s) as Box<dyn TelemetrySource>)
+                })
+            }
             Game::Replay => {
                 let file = self.file.clone().ok_or_else(|| {
                     anyhow::anyhow!("--game replay needs --file <recording.ndjson>")
@@ -95,5 +112,93 @@ impl SourceArgs {
                 })
             }
         })
+    }
+}
+
+/// A user writes the results of their sessions in their documents.
+fn open_assetto() -> Result<Box<dyn TelemetrySource>, SourceError> {
+    let docs = dirs::document_dir();
+    vr_assetto::open_live(docs.as_deref()).map(|s| Box::new(s) as Box<dyn TelemetrySource>)
+}
+
+/// Whichever game is running: iRacing, else Assetto Corsa.
+fn open_any_live() -> Result<Box<dyn TelemetrySource>, SourceError> {
+    let iracing = match vr_iracing::open_live() {
+        Ok(s) => return Ok(Box::new(s)),
+        Err(e) => e,
+    };
+    let assetto = match open_assetto() {
+        Ok(s) => return Ok(s),
+        Err(e) => e,
+    };
+    Err(either_failed(iracing, assetto))
+}
+
+/// Unsupported only when neither game could ever run here.
+fn either_failed(iracing: SourceError, assetto: SourceError) -> SourceError {
+    let both = format!("{iracing}; {assetto}");
+    match (&iracing, &assetto) {
+        (SourceError::Unsupported(_), SourceError::Unsupported(_)) => {
+            SourceError::Unsupported(both)
+        }
+        _ => SourceError::NotRunning(both),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        src: SourceArgs,
+    }
+
+    fn parse(args: &[&str]) -> SourceArgs {
+        Cli::parse_from(std::iter::once("vr").chain(args.iter().copied())).src
+    }
+
+    #[test]
+    fn assetto_corsa_is_a_live_game() {
+        let s = parse(&["--game", "assetto"]);
+        assert_eq!(s.game(), Game::Assetto);
+        assert_eq!(s.game_id(), "assetto");
+        assert_eq!(s.source_kind(true), SourceKind::Live);
+        assert_eq!(s.source_kind(false), SourceKind::Oneshot);
+        assert_eq!(s.recordings(), None);
+        let s = parse(&["--game", "assetto-udp", "--host", "gamepc:9000"]);
+        assert_eq!(
+            (s.game(), s.host.as_str()),
+            (Game::AssettoUdp, "gamepc:9000")
+        );
+        assert_eq!(s.source_kind(true), SourceKind::Live);
+        let s = parse(&[]);
+        assert_eq!(
+            (s.game(), s.host.as_str(), s.explicit()),
+            (Game::Iracing, "127.0.0.1", false)
+        );
+    }
+
+    #[test]
+    fn neither_game_running() {
+        let ns = |m: &str| SourceError::NotRunning(m.into());
+        let un = |m: &str| SourceError::Unsupported(m.into());
+        let e = either_failed(un("a"), un("b"));
+        assert!(
+            matches!(&e, SourceError::Unsupported(m) if m == "not supported on this platform: a; not supported on this platform: b"),
+            "{e}"
+        );
+        assert!(matches!(
+            either_failed(ns("a"), un("b")),
+            SourceError::NotRunning(_)
+        ));
+        assert!(matches!(
+            either_failed(un("a"), ns("b")),
+            SourceError::NotRunning(_)
+        ));
+        #[cfg(not(windows))]
+        assert!(matches!(open_any_live(), Err(SourceError::Unsupported(_))));
     }
 }

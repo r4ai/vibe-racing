@@ -441,6 +441,7 @@ impl SynthSource {
             temp_c: [Some(84.0), Some(86.0), Some(90.0)],
             tread: [Some(tread); 3],
             distance_m: Some(age * 4500.0),
+            core_c: None,
         };
         CarTelemetry {
             clutch: Some(1.0),

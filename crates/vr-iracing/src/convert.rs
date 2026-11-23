@@ -246,6 +246,7 @@ fn tyre(v: &VarView<'_>, corner: &str) -> Tyre {
         temp_c: across("tempC"),
         tread: across("wear"),
         distance_m: v.f64(&format!("{corner}odometer")),
+        core_c: None,
     }
 }
 
@@ -265,6 +266,7 @@ fn wheel(v: &VarView<'_>, corner: &str) -> Wheel {
         // Some cars have third springs ("SH") instead.
         shock_mps: of("shockVel").or_else(|| of("SHshockVel")),
         brake_bar: of("brakeLinePress"),
+        ..Default::default()
     }
 }
 
@@ -323,6 +325,7 @@ fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
             fast_repairs_available: limited(v.i32("FastRepairAvailable")),
             requested: pit_request(v.u32("PitSvFlags").unwrap_or(0)),
             requested_fuel_l: v.f64("PitSvFuel"),
+            ..Default::default()
         },
         controls: controls(v),
         p2p_count: v.i32("P2P_Count"),
@@ -337,6 +340,7 @@ fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
         alongside: alongside(v.i32("CarLeftRight")),
         team_incidents: v.i32("PlayerCarTeamIncidentCount"),
         wheels: wheels(v),
+        ..Default::default()
     }
 }
 
@@ -504,6 +508,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
             wind_dir_deg: v.f64("WindDir").map(|r| r.to_degrees().rem_euclid(360.0)),
             skies: skies(v.i32("Skies")),
             fog: v.f64("FogLevel"),
+            track_grip: None,
         }),
     }
 }

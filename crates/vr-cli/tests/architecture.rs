@@ -12,6 +12,7 @@ use serde_json::Value;
 const ALLOWED: &[(&str, &[&str])] = &[
     ("vr-core", &[]),
     ("vr-iracing", &["vr-core"]),
+    ("vr-assetto", &["vr-core"]),
     ("vr-replay", &["vr-core"]),
     // The analysis layer never depends on input adapters.
     ("vr-engine", &["vr-core"]),
@@ -19,6 +20,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
     (
         "vr-cli",
         &[
+            "vr-assetto",
             "vr-core",
             "vr-engine",
             "vr-iracing",

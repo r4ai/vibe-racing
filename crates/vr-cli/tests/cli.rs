@@ -450,8 +450,10 @@ fn doctor_without_server() {
             .iter()
             .any(|h| h.as_str().unwrap().contains("vr serve"))
     );
+    assert!(d["assetto"]["ok"].is_boolean(), "{d}");
     let o = run(&disc, &["doctor"]);
     assert!(stdout(&o).contains("-- server:"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("assetto: "), "{}", stdout(&o));
     let o = vr(&disc)
         .env("VR_SERVER", "http://127.0.0.1:9")
         .args(["doctor"])
@@ -668,4 +670,97 @@ fn sessions_can_be_managed() {
     assert_eq!(o.status.code(), Some(4));
     let o = run(&disc, &["sessions", "import", "no-such.ibt"]);
     assert_eq!(o.status.code(), Some(1));
+}
+
+/// A stand-in for the game's UDP telemetry: answers the handshake and sends
+/// the car until the test ends.
+fn fake_assetto_udp() -> std::net::SocketAddr {
+    use vr_assetto::layout::{HANDSHAKE_RESPONSE, RT_CAR_INFO, RT_LAP, Writer};
+    let game = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = game.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut hello = Writer::new(&HANDSHAKE_RESPONSE);
+        hello
+            .text("carName", "ks_mazda_mx5_cup")
+            .text("driverName", "Ada Lovelace")
+            .i32("identifier", 4242)
+            .text("trackName", "magione");
+        let mut car = Writer::new(&RT_CAR_INFO);
+        car.text("identifier", "a")
+            .i32("size", 328)
+            .f32("speed_Ms", 40.0)
+            .i32("lapCount", 3)
+            .i32("lastLap", 70_100)
+            .i32("gear", 4)
+            .f32("carPositionNormalized", 0.5);
+        let mut lap = Writer::new(&RT_LAP);
+        lap.i32("carIdentifierNumber", 2)
+            .i32("lap", 3)
+            .text("driverName", "Grace Hopper")
+            .i32("time", 70_900);
+        let mut buf = [0u8; 64];
+        let mut subscribed = Vec::new();
+        game.set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        loop {
+            if let Ok((12, from)) = game.recv_from(&mut buf) {
+                match i32::from_le_bytes(buf[8..12].try_into().unwrap()) {
+                    0 => {
+                        let _ = game.send_to(&hello.bytes, from);
+                    }
+                    1 => subscribed.push(from),
+                    2 => {
+                        let _ = game.send_to(&lap.bytes, from);
+                    }
+                    _ => subscribed.retain(|f| *f != from),
+                }
+            }
+            for to in &subscribed {
+                let _ = game.send_to(&car.bytes, *to);
+            }
+        }
+    });
+    addr
+}
+
+#[test]
+fn assetto_corsa_over_udp() {
+    let (_d, disc) = tmp();
+    let host = fake_assetto_udp().to_string();
+    let o = run(
+        &disc,
+        &[
+            "standings",
+            "--game",
+            "assetto-udp",
+            "--host",
+            &host,
+            "-f",
+            "json",
+        ],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let s = json(&o);
+    assert_eq!(s["meta"]["game"], "assetto", "{s}");
+    assert_eq!(s["meta"]["source"], "oneshot");
+    let text = run(&disc, &["brief", "--game", "assetto-udp", "--host", &host]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert!(
+        stdout(&text).starts_with("[assetto oneshot"),
+        "{}",
+        stdout(&text)
+    );
+    assert!(stdout(&text).contains("magione"), "{}", stdout(&text));
+}
+
+#[test]
+fn assetto_corsa_without_the_game() {
+    let (_d, disc) = tmp();
+    let o = run(&disc, &["brief", "--game", "assetto"]);
+    if o.status.success() {
+        eprintln!("live Assetto Corsa session detected; skipping no-data assertion");
+        return;
+    }
+    assert_eq!(o.status.code(), Some(3), "{}", stderr(&o));
+    assert!(stderr(&o).contains("Assetto Corsa"), "{}", stderr(&o));
 }

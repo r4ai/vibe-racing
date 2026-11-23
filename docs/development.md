@@ -12,7 +12,9 @@
 | cargo-llvm-cov | 任意                                             | カバレッジ計測             |
 | cargo-mutants  | 任意                                             | ミューテーションテスト     |
 
-iRacing の実機接続は Windows のみ（他 OS では `Unsupported`）。
+iRacing と Assetto Corsa の共有メモリは Windows のみ（他 OS では `Unsupported`）。
+Assetto Corsa の UDP（`--game assetto-udp`）はどの OS でも読める。テストは偽のゲームを UDP の loopback に立てる。
+Win32 のコードは `rustup target add x86_64-pc-windows-gnu` の後、`cargo check -p vr-iracing -p vr-assetto --target x86_64-pc-windows-gnu` で型検査できる。
 Linux で `vr-radio` をビルドするには ALSA の開発パッケージ（`libasound2-dev`、`pkg-config`）が必要。
 
 ## ビルドと実行
@@ -117,7 +119,7 @@ CLI テストは `VR_DISCOVERY` を一時ファイルに向け、手元の `vr s
 cargo llvm-cov --workspace --summary-only
 ```
 
-主な未到達: Win32 マッピング（`crates/vr-iracing/src/shm.rs`）、音声デバイス（`crates/vr-radio/src/audio.rs`）、`vr-radio` の `main.rs`、Ctrl-C で終わる経路。
+主な未到達: Win32 マッピング（`crates/vr-iracing/src/shm.rs`、`crates/vr-assetto/src/pages.rs`）、音声デバイス（`crates/vr-radio/src/audio.rs`）、`vr-radio` の `main.rs`、Ctrl-C で終わる経路。
 CI はこれらを除いた行カバレッジ 90% 未満で失敗する。
 
 ## ミューテーションテスト

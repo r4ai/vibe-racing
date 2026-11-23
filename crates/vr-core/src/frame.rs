@@ -253,6 +253,52 @@ pub struct CarTelemetry {
     /// What each wheel does, where the game tells it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wheels: Option<Wheels>,
+    /// Damage to the body, where the game tells how much.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damage: Option<Damage>,
+    /// Time penalty to serve or added at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub penalty_s: Option<f64>,
+}
+
+/// How badly each part of the body is hurt, in the game's own unit; 0 is
+/// undamaged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Damage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub front: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rear: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub centre: Option<f64>,
+}
+
+impl Damage {
+    pub fn parts(&self) -> [(&'static str, Option<f64>); 5] {
+        [
+            ("front", self.front),
+            ("rear", self.rear),
+            ("left", self.left),
+            ("right", self.right),
+            ("centre", self.centre),
+        ]
+    }
+
+    /// The parts that are hurt, the worst first.
+    pub fn hurt(&self) -> Vec<(&'static str, f64)> {
+        let mut v: Vec<(&'static str, f64)> = self
+            .parts()
+            .into_iter()
+            .filter_map(|(n, d)| Some((n, d.filter(|d| *d > 0.0)?)))
+            .collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        v
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -277,6 +323,16 @@ pub struct Wheel {
     /// Positive in bump.
     pub shock_mps: Option<f64>,
     pub brake_bar: Option<f64>,
+    /// Vertical load on the tyre.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_n: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camber_rad: Option<f64>,
+    /// How far the suspension is compressed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub travel_m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brake_temp_c: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -333,6 +389,9 @@ pub struct Tyre {
     /// Tread left, 0.0..1.0.
     pub tread: [Option<f64>; 3],
     pub distance_m: Option<f64>,
+    /// Inside the rubber, as it is now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core_c: Option<f64>,
 }
 
 impl Tyre {
@@ -367,6 +426,27 @@ pub struct PitState {
     /// What the next stop will do, e.g. `["lf tyre", "fuel"]`.
     pub requested: Vec<String>,
     pub requested_fuel_l: Option<f64>,
+    /// When the rules let the car stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<PitWindow>,
+    /// The stop the rules require has been made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mandatory_done: Option<bool>,
+}
+
+/// From and to, both included, in laps or in minutes of the session.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PitWindow {
+    pub from: f64,
+    pub to: f64,
+    pub unit: WindowUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowUnit {
+    Lap,
+    Minute,
 }
 
 /// One in-car adjustment.
@@ -445,4 +525,7 @@ pub struct Weather {
     /// 0.0..1.0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fog: Option<f64>,
+    /// Rubber laid down on the track, 0.0..1.0 (1 is fully grippy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_grip: Option<f64>,
 }

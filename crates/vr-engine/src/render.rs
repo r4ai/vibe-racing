@@ -212,6 +212,9 @@ fn weather_line(w: &vr_core::Weather, trend: Option<&RainTrend>) -> Option<Strin
     if let Some(t) = w.track_temp_c {
         parts.push(format!("track {t:.1}C"));
     }
+    if let Some(g) = w.track_grip {
+        parts.push(format!("grip {:.1}%", g * 100.0));
+    }
     (!parts.is_empty()).then(|| format!("weather: {}", parts.join(" | ")))
 }
 
@@ -890,6 +893,15 @@ mod tests {
             Some("weather: dry")
         );
         assert_eq!(w(None, Some(0.5), None, None), None);
+        let grippy = vr_core::Weather {
+            air_temp_c: Some(20.0),
+            track_grip: Some(0.985),
+            ..Default::default()
+        };
+        assert_eq!(
+            weather_line(&grippy, None).as_deref(),
+            Some("weather: air 20.0C | grip 98.5%")
+        );
         let mut b = brief();
         assert!(!b.to_text().contains("weather"));
         b.weather = Some(vr_core::Weather {

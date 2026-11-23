@@ -264,8 +264,7 @@ pub fn load_local(src: &SourceArgs) -> anyhow::Result<RaceState> {
             Poll::Disconnected => {
                 if live {
                     return Err(NoData(
-                        "iRacing telemetry is present but not live (the sim is not in a session)"
-                            .into(),
+                        "the game's telemetry is present but not live (not in a session)".into(),
                     )
                     .into());
                 }

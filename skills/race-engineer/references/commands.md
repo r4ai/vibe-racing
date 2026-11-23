@@ -2,17 +2,18 @@
 
 ## 共通オプション
 
-| オプション                                         | 内容                                                   |
-| -------------------------------------------------- | ------------------------------------------------------ |
-| `-f, --format text\|json`                          | 既定 `text`（簡潔テキスト）。`json` は 1 オブジェクト  |
-| `--server <URL>` / `VR_SERVER`                     | 問い合わせ先の `vr serve`。既定は自動検出              |
-| `--game iracing\|replay\|synthetic`                | データソースを明示（サーバーを使わずプロセス内で処理） |
-| `--file <ndjson>` / `--speed <x>` / `--until <秒>` | 記録の再生、再生速度、停止するセッション時刻           |
+| オプション                                                | 内容                                                   |
+| --------------------------------------------------------- | ------------------------------------------------------ |
+| `-f, --format text\|json`                                 | 既定 `text`（簡潔テキスト）。`json` は 1 オブジェクト  |
+| `--server <URL>` / `VR_SERVER`                            | 問い合わせ先の `vr serve`。既定は自動検出              |
+| `--game iracing\|assetto\|assetto-udp\|replay\|synthetic` | データソースを明示（サーバーを使わずプロセス内で処理） |
+| `--host <PC[:port]>`                                      | `assetto-udp` の読み先。既定 `127.0.0.1`（9996 番）    |
+| `--file <ndjson>` / `--speed <x>` / `--until <秒>`        | 記録の再生、再生速度、停止するセッション時刻           |
 
 ## データの取り方
 
 1. `--game` / `--file` 指定なし: 起動中の `vr serve`（履歴あり）
-2. サーバー無し: iRacing の共有メモリを 1 回読む（`history=unavailable`）
+2. サーバー無し: iRacing、無ければ Assetto Corsa の共有メモリを 1 回読む（`history=unavailable`）
 3. `--file` / `--game synthetic`: 記録・デモレースを最後（または `--until`）まで流して回答
 
 ## コマンド
@@ -35,7 +36,7 @@
 | `vr setup`                                                           | ガレージのセットアップ全項目、走行中に変えられる設定                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `vr handling [--last 3]`                                             | アンダー・オーバー・空転・ロックの傾向（秒/周）、場所（既知のコースはコーナー名）、変更案                                                                                                                                                                                                                                                                                                                                                                                 |
 | `vr channels [語...]`                                                | ゲームが出す全変数（名前・値・単位・説明）。語は名前・単位・説明の部分一致（AND）                                                                                                                                                                                                                                                                                                                                                                                         |
-| `vr info [パス]`                                                     | ゲーム自身のセッション情報。例 `WeekendInfo/TrackNumTurns`、`DriverInfo/Drivers/0`                                                                                                                                                                                                                                                                                                                                                                                        |
+| `vr info [パス]`                                                     | ゲーム自身のセッション情報。例 `WeekendInfo/TrackNumTurns`、`DriverInfo/Drivers/0`（iRacing）、`static/carModel`・`results/sessions/0`（Assetto Corsa）                                                                                                                                                                                                                                                                                                                   |
 | `vr sessions list [--limit N] [--track 語] [--car 語] [--kind 種別]` | 過去のセッション（新しい順）                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `vr sessions show\|setup <指定>`                                     | 結果・ラップ・イベント／セットアップ。指定は ID、ID の先頭、`last`、番号（1 が最新）                                                                                                                                                                                                                                                                                                                                                                                      |
 | `vr query "SQL"` / `vr query --schema`                               | 保存した全セッションに SQL（DuckDB）で何でも聞く。表は sessions・laps（全車）・events・corners（周ごとのコーナー）・telemetry（自車の毎フレーム）・cars（全車 10 Hz）・car_corners（全車のコーナータイム）・brakes（自車の 60 Hz のブレーキ位置）。他車との比較は corner_field（コーナーごとの最速との差と誰か）。まず集計済みの lap_stats（車ごとのベスト・安定度・終盤の落ち）と corner_stats（コーナーごとのロス合計・ベスト・全開か）を使う。読み取り専用、200 行まで |
