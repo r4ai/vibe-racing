@@ -799,6 +799,21 @@ mod tests {
     }
 
     #[test]
+    fn time_left_below_six_days_only() {
+        let left = |ms: f32| {
+            let mut g = crate::layout::Writer::new(&GRAPHICS);
+            g.f32("sessionTimeLeft", ms);
+            time_left(&View::new(&GRAPHICS, &g.bytes))
+        };
+        // Six days in ms is exact in an f32; the next one below is 32 less.
+        assert_eq!(left(518_400_000.0), None, "six days: unlimited");
+        assert_eq!(left(518_399_968.0), Some(518_399.968));
+        assert_eq!(left(0.0), Some(0.0));
+        assert_eq!(left(-0.5), None);
+        assert_eq!(left(1_500.0), Some(1.5));
+    }
+
+    #[test]
     fn sessions_flags_and_phases() {
         let (p, mut g, mut s) = snapshot();
         let mut t = Tracker::default();
