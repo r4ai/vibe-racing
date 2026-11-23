@@ -441,6 +441,7 @@ impl SynthSource {
             temp_c: [Some(84.0), Some(86.0), Some(90.0)],
             tread: [Some(tread); 3],
             distance_m: Some(age * 4500.0),
+            ..Default::default()
         };
         CarTelemetry {
             clutch: Some(1.0),
@@ -456,6 +457,7 @@ impl SynthSource {
                 rf: tyre.clone(),
                 lr: tyre.clone(),
                 rr: tyre,
+                live: false,
             },
             pit: PitState {
                 open: Some(true),

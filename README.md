@@ -16,7 +16,7 @@ CLI `vr` がゲームのテレメトリを解析し、Claude Code / Codex 用ス
 - **常駐コレクター**: `vr serve` が 60 Hz で読み続け、周回・燃費・ギャップ推移を蓄積
 - **1 コマンド回答**: エージェントは原則 `vr brief` だけを実行
 - **スキル**: 返答の長さ・丸め・推測禁止の規範
-- **ゲーム非依存**: ゲーム固有の処理は入力アダプタに限定。対応は iRacing（Windows）
+- **ゲーム非依存**: ゲーム固有の処理は入力アダプタに限定。対応は iRacing と Automobilista 2（どちらも Windows）
 
 ```mermaid
 flowchart LR
@@ -24,7 +24,7 @@ flowchart LR
     Agent["Claude Code / Codex<br/>＋ race-engineer スキル"]
     Vr["vr"]
     Serve["vr serve<br/>（履歴を保持）"]
-    Game["iRacing"]
+    Game["iRacing / Automobilista 2"]
 
     Driver -->|質問| Agent
     Agent -->|返答| Driver
@@ -121,6 +121,7 @@ flowchart LR
 | ------------------------ | ------------------- | ---------------------------- |
 | Rust                     | stable（1.88 以上） | [rustup](https://rustup.rs/) |
 | iRacing                  | 現行版              | 実走時のみ。Windows 専用     |
+| Automobilista 2          | 共有メモリ v14 以降 | 実走時のみ。Windows 専用     |
 | Claude Code または Codex | 現行版              |                              |
 | VOICEVOX                 | 0.25 以上           | 音声無線のみ                 |
 
@@ -154,6 +155,13 @@ vr serve
 
 あとはエージェントに「燃料あと何周？」などと聞く。
 接続の確認は `vr doctor`。
+
+### Automobilista 2 で使う
+
+ゲームの Options → System → Shared Memory を「Project CARS 2」にする。
+あとは iRacing と同じで、`vr serve` はセッション中のゲームを自動で選ぶ（`--game ams2` で固定）。
+AMS2 は舵角・インシデント・セットアップを出さないため、挙動の傾向と変更案は使えない。
+各項目の扱いは [crates/vr-ams2/docs/telemetry.md](crates/vr-ams2/docs/telemetry.md)。
 
 ### 声で聞く
 

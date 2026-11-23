@@ -31,7 +31,7 @@ description: シムレース走行中のドライバーの無線（「前との�
 - `(est)`: 推定値。`(best-lap delta)`: 予選・練習のベストラップ差（走行中の差ではない）
 - `+1L`: 1 周差
 - `fuel: ... lasts 5.3 laps (to lap 11) | 13.4 laps to go: SHORT 20.7L, add 22.0L incl. margin`: 残り 5.3 周分（11 周目まで）、ゴールまで 20.7L 不足、余裕込みで 22L 給油。`(instant estimate)` は瞬間燃費からの推定で精度が低い
-- `car: Hard LF 91% ... (as of the last stop) | P2P/OTS 138 left | brake_bias 57.3 | traction_control 2`: タイヤの溝（ピットで止まった時点）、OTS などの残り、車内で変えられる設定の現在値。`WARNING`・`repairs`・`BEING TOWED` は損傷
+- `car: Hard LF 91% ... (as of the last stop) | P2P/OTS 138 left | brake_bias 57.3 | traction_control 2`: タイヤの溝（`as of the last stop` はピットで止まった時点、`now` は今）、OTS などの残り、車内で変えられる設定の現在値。`WARNING`・`repairs`・`damage`・`BEING TOWED` は損傷
 - `weather: lightly wet (rain 31%, rising 4%/min) | air 21.1C | track 28.5C`: 路面の濡れ（dry・lightly wet・moderately wet・very wet）、雨量と直近 2 分の増減（`rising`・`steady`・`easing`）、気温と路面温度
 - 終了コード `3`: ゲーム未接続・データ無し。`4`: 指定した車番が無い
 

@@ -1,6 +1,6 @@
 [package]
 name = "vr-cli"
-description = "vr: race-engineer telemetry CLI for AI agents (iRacing and more)"
+description = "vr: race-engineer telemetry CLI for AI agents (iRacing, Automobilista 2 and more)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ vr-core.workspace = true
 vr-engine.workspace = true
 vr-replay.workspace = true
 vr-iracing.workspace = true
+vr-ams2.workspace = true
 vr-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true

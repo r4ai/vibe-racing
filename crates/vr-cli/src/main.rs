@@ -38,7 +38,7 @@ enum Format {
 #[command(
     name = "vr",
     version,
-    about = "Race-engineer telemetry for AI agents (iRacing and more)"
+    about = "Race-engineer telemetry for AI agents (iRacing, Automobilista 2 and more)"
 )]
 #[command(
     long_about = "Reads live race telemetry and answers the questions a race engineer gets on the radio.\n\n\
@@ -325,7 +325,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             // Demo races are not the driver's.
-            let keep = !no_sessions && cli.src.game() == sources::Game::Iracing;
+            let keep = !no_sessions && cli.src.live_game();
             let record = record.map(|p| (p, record_hz));
             serve(&cli.src, port, record, keep, !no_import)
         }

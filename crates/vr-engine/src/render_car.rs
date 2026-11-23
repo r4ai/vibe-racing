@@ -59,7 +59,18 @@ fn tyre_line(name: &str, t: &Tyre) -> String {
     if let Some(d) = t.distance_m.filter(|d| *d > 0.0) {
         let _ = write!(s, " | {:.1}km", d / 1000.0);
     }
+    if let Some(c) = t.carcass_c {
+        let _ = write!(s, " | carcass {c:.0}C");
+    }
+    if let Some(b) = t.brake_c {
+        let _ = write!(s, " | brake {b:.0}C");
+    }
     s
+}
+
+/// When the tyre values were taken.
+fn tyres_when(t: &vr_core::Tyres) -> &'static str {
+    if t.live { "now" } else { "as of the last stop" }
 }
 
 /// One line for the brief; `None` when there is nothing to say.
@@ -77,6 +88,9 @@ pub(crate) fn car_line(c: &CarTelemetry) -> Option<String> {
     if let Some(s) = c.pit.repair_left_s.filter(|s| *s > 0.0) {
         parts.push(format!("repairs {s:.0}s"));
     }
+    if let Some(d) = c.damage.as_ref().and_then(damage_text) {
+        parts.push(format!("damage {d}"));
+    }
     if let Some(s) = c.pit.tow_s.filter(|s| *s > 0.0) {
         parts.push(format!("BEING TOWED {s:.0}s"));
     }
@@ -88,7 +102,11 @@ pub(crate) fn car_line(c: &CarTelemetry) -> Option<String> {
         .collect();
     if !tread.is_empty() {
         let name = c.tyre_compound.as_deref().unwrap_or("tyres");
-        parts.push(format!("{name} {} (as of the last stop)", tread.join(" ")));
+        parts.push(format!(
+            "{name} {} ({})",
+            tread.join(" "),
+            tyres_when(&c.tyres)
+        ));
     }
     if let Some(n) = c.p2p_count {
         let active = if c.p2p_active == Some(true) {
@@ -152,7 +170,33 @@ fn pit_line(p: &vr_core::PitState) -> String {
     if let Some(l) = p.requested_fuel_l.filter(|l| *l > 0.0) {
         let _ = write!(s, " ({l:.1}L)");
     }
+    if let Some(why) = &p.planned {
+        let _ = write!(s, " | due in: {why}");
+    }
+    if let Some(l) = p.mandatory_lap {
+        let _ = write!(s, " | mandatory stop on lap {l}");
+    }
     s
+}
+
+/// The parts that are hurt, e.g. `"aero 25% | RR suspension 60%"`.
+fn damage_text(d: &vr_core::Damage) -> Option<String> {
+    const CORNERS: [&str; 4] = ["LF", "RF", "LR", "RR"];
+    let pct = |v: f64| format!("{:.0}%", v * 100.0);
+    let mut parts = Vec::new();
+    for (name, v) in [("aero", d.aero), ("engine", d.engine)] {
+        if let Some(v) = v.filter(|v| *v > 0.0) {
+            parts.push(format!("{name} {}", pct(v)));
+        }
+    }
+    for (what, v) in [("suspension", d.suspension), ("brake", d.brakes)] {
+        for (corner, v) in CORNERS.iter().zip(v) {
+            if let Some(v) = v.filter(|v| *v > 0.0) {
+                parts.push(format!("{corner} {what} {}", pct(v)));
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" | "))
 }
 
 fn damage_line(p: &vr_core::PitState) -> String {
@@ -201,14 +245,22 @@ impl CarReport {
         };
         let _ = writeln!(
             out,
-            "tyres: {}{sets} (tread and temperatures are as of the last stop)",
-            c.tyre_compound.as_deref().unwrap_or("--")
+            "tyres: {}{sets} (tread and temperatures are {})",
+            c.tyre_compound.as_deref().unwrap_or("--"),
+            tyres_when(&c.tyres)
         );
         for (name, t) in c.tyres.all() {
             let _ = writeln!(out, "{}", tyre_line(name, t));
         }
         let _ = writeln!(out, "{}", pit_line(&c.pit));
         let _ = writeln!(out, "{}", damage_line(&c.pit));
+        if let Some(d) = &c.damage {
+            let _ = writeln!(
+                out,
+                "damage to the car: {}",
+                damage_text(d).unwrap_or_else(|| "none".into())
+            );
+        }
         if let Some(n) = c.p2p_count {
             let active = if c.p2p_active == Some(true) {
                 " (ACTIVE)"
@@ -218,10 +270,11 @@ impl CarReport {
             let _ = writeln!(out, "P2P/OTS: {n} left{active}");
         }
         if c.drs_active.is_some() || c.battery_pct.is_some() {
-            let drs = match c.drs_active {
-                Some(true) => "open",
-                Some(false) => "closed",
-                None => "--",
+            let drs = match (c.drs_active, c.drs_available) {
+                (Some(true), _) => "open",
+                (Some(false), Some(true)) => "closed (available)",
+                (Some(false), _) => "closed",
+                (None, _) => "--",
             };
             let battery = opt(c.battery_pct.map(|b| b * 100.0), "%", 0);
             let _ = writeln!(out, "DRS {drs} | battery {battery}");

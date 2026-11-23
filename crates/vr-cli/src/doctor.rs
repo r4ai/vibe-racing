@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use serde::Serialize;
-use vr_core::{Poll, TelemetrySource as _};
+use vr_core::{Poll, SourceError, TelemetrySource};
 
 use crate::Format;
 use crate::client;
@@ -15,6 +15,7 @@ struct Report {
     version: String,
     platform: String,
     iracing: Check,
+    ams2: Check,
     server: Check,
     skills: Vec<String>,
     hints: Vec<String>,
@@ -33,40 +34,8 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
         ..Default::default()
     };
 
-    r.iracing = match vr_iracing::open_live() {
-        Err(e) => Check {
-            ok: false,
-            detail: e.to_string(),
-        },
-        Ok(mut s) => match s.poll(Duration::from_secs(1)) {
-            Ok(Poll::Frame(f)) => {
-                let si = s.session_info();
-                Check {
-                    ok: true,
-                    detail: format!(
-                        "connected: {} | session {:?} {:?} | {} cars | player idx {:?}",
-                        si.track_name.as_deref().unwrap_or("?"),
-                        f.session.kind,
-                        f.session.phase,
-                        f.cars.len(),
-                        f.player_car_idx
-                    ),
-                }
-            }
-            Ok(Poll::Idle) => Check {
-                ok: false,
-                detail: "shared memory present but no new data within 1s".into(),
-            },
-            Ok(Poll::Disconnected) => Check {
-                ok: false,
-                detail: "sim running but not in a session (status disconnected)".into(),
-            },
-            Err(e) => Check {
-                ok: false,
-                detail: format!("read error: {e}"),
-            },
-        },
-    };
+    r.iracing = check(vr_iracing::open_live());
+    r.ams2 = check(vr_ams2::open_live());
 
     r.server = match client::server_url(server) {
         None => Check {
@@ -108,10 +77,15 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
     if !r.server.ok {
         r.hints.push("run `vr serve` in a separate terminal while racing for lap history, fuel averages and gap trends".into());
     }
-    if !r.iracing.ok {
+    if !r.iracing.ok && !r.ams2.ok {
         r.hints.push(
-            "no live iRacing session; `vr serve --game synthetic --speed 10` gives a demo race"
+            "no live iRacing or Automobilista 2 session; `vr serve --game synthetic --speed 10` gives a demo race"
                 .into(),
+        );
+    }
+    if !r.ams2.ok && r.ams2.detail.contains("Project CARS 2") {
+        r.hints.push(
+            "in Automobilista 2, set Options > System > Shared Memory to \"Project CARS 2\"".into(),
         );
     }
     if r.skills.is_empty() {
@@ -125,6 +99,7 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
             let mark = |c: &Check| if c.ok { "ok " } else { "-- " };
             println!("vr {} ({})", r.version, r.platform);
             println!("{}iracing: {}", mark(&r.iracing), r.iracing.detail);
+            println!("{}ams2:    {}", mark(&r.ams2), r.ams2.detail);
             println!("{}server:  {}", mark(&r.server), r.server.detail);
             if r.skills.is_empty() {
                 println!("-- skill:   not installed");
@@ -138,4 +113,42 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Whether a live game can be read, and what it shows.
+fn check<S: TelemetrySource>(opened: Result<S, SourceError>) -> Check {
+    let mut s = match opened {
+        Err(e) => {
+            return Check {
+                ok: false,
+                detail: e.to_string(),
+            };
+        }
+        Ok(s) => s,
+    };
+    match s.poll(Duration::from_secs(1)) {
+        Ok(Poll::Frame(f)) => Check {
+            ok: true,
+            detail: format!(
+                "connected: {} | session {:?} {:?} | {} cars | player idx {:?}",
+                f.session.track.as_ref().map_or("?", |t| t.name.as_str()),
+                f.session.kind,
+                f.session.phase,
+                f.cars.len(),
+                f.player_car_idx
+            ),
+        },
+        Ok(Poll::Idle) => Check {
+            ok: false,
+            detail: "shared memory present but no new data within 1s".into(),
+        },
+        Ok(Poll::Disconnected) => Check {
+            ok: false,
+            detail: "sim running but not in a session (status disconnected)".into(),
+        },
+        Err(e) => Check {
+            ok: false,
+            detail: format!("read error: {e}"),
+        },
+    }
 }

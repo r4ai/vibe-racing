@@ -246,6 +246,7 @@ fn tyre(v: &VarView<'_>, corner: &str) -> Tyre {
         temp_c: across("tempC"),
         tread: across("wear"),
         distance_m: v.f64(&format!("{corner}odometer")),
+        ..Default::default()
     }
 }
 
@@ -306,6 +307,7 @@ fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
             rf: tyre(v, "RF"),
             lr: tyre(v, "LR"),
             rr: tyre(v, "RR"),
+            live: false,
         },
         tyre_compound: compound(si, v.i32("PlayerTireCompound"), true),
         tyre_sets_used: v.i32("TireSetsUsed"),
@@ -323,6 +325,7 @@ fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
             fast_repairs_available: limited(v.i32("FastRepairAvailable")),
             requested: pit_request(v.u32("PitSvFlags").unwrap_or(0)),
             requested_fuel_l: v.f64("PitSvFuel"),
+            ..Default::default()
         },
         controls: controls(v),
         p2p_count: v.i32("P2P_Count"),
@@ -337,6 +340,7 @@ fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
         alongside: alongside(v.i32("CarLeftRight")),
         team_incidents: v.i32("PlayerCarTeamIncidentCount"),
         wheels: wheels(v),
+        ..Default::default()
     }
 }
 
@@ -436,6 +440,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
                 flags: personal_flags(v.i32_at("CarIdxSessionFlags", i).unwrap_or(0) as u32),
                 gear: v.i32_at("CarIdxGear", i),
                 rpm: v.f64_at("CarIdxRPM", i).filter(|r| *r >= 0.0),
+                ..Default::default()
             },
         });
     }

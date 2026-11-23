@@ -263,10 +263,10 @@ pub fn load_local(src: &SourceArgs) -> anyhow::Result<RaceState> {
             Poll::Idle => {}
             Poll::Disconnected => {
                 if live {
-                    return Err(NoData(
-                        "iRacing telemetry is present but not live (the sim is not in a session)"
-                            .into(),
-                    )
+                    return Err(NoData(format!(
+                        "{} telemetry is present but not live (the sim is not in a session)",
+                        game_name(source.game())
+                    ))
                     .into());
                 }
                 st.set_connected(false);
@@ -278,4 +278,13 @@ pub fn load_local(src: &SourceArgs) -> anyhow::Result<RaceState> {
         }
     }
     Ok(st)
+}
+
+/// How a game is called in messages.
+fn game_name(id: &str) -> &str {
+    match id {
+        "iracing" => "iRacing",
+        "ams2" => "Automobilista 2",
+        other => other,
+    }
 }

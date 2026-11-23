@@ -380,6 +380,7 @@ fn tyre_temperatures_suggest_pressure_and_camber() {
         rf: tyre([80.0, 85.9, 80.0]),
         lr: tyre([80.0, 87.5, 95.0]),
         rr: tyre([90.0, 79.0, 80.0]),
+        live: false,
     };
     s.run(DT, |_, _| {});
     let a = s.handling().advice;

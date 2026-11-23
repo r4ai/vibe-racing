@@ -426,6 +426,7 @@ impl Voice<'_> {
             Flag::Yellow,
             Flag::Repair,
             Flag::Black,
+            Flag::BlackWhite,
         ];
         if let Some(f) = hot.into_iter().find(|f| flags.contains(f)) {
             return Some(format!("{}。", act_on(f)));
@@ -978,6 +979,8 @@ fn act_on(f: Flag) -> &'static str {
         Flag::Disqualify => "失格だ",
         Flag::Debris => "落下物に注意",
         Flag::OneLapToGreen => "次の周でグリーン",
+        Flag::SlowCar => "前に遅い車、注意",
+        Flag::BlackWhite => "白黒旗、走り方の警告だ",
     }
 }
 
@@ -1001,6 +1004,9 @@ fn warning(w: Warning) -> Option<&'static str> {
         Warning::OilPressure => "油圧が低い、止めた方がいい。",
         Warning::FuelPressure => "燃圧が低い、ガス欠に注意。",
         Warning::Stalled => "エンジンが止まってる、かけ直そう。",
+        Warning::Engine => "エンジンの警告灯、回転を抑えよう。",
+        Warning::FlatTyre => "パンクだ、ピットへ。",
+        Warning::Clutch => "クラッチが熱い、発進は丁寧に。",
         Warning::PitLimiter | Warning::RevLimiter | Warning::Damage => return None,
     })
 }

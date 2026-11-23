@@ -1349,6 +1349,8 @@ pub(crate) fn flag_label(f: Flag) -> &'static str {
         Flag::Disqualify => "disqualify",
         Flag::Debris => "debris",
         Flag::OneLapToGreen => "one lap to green",
+        Flag::SlowCar => "slow car",
+        Flag::BlackWhite => "black and white (warning)",
     }
 }
 
@@ -1362,6 +1364,9 @@ pub(crate) fn warning_label(w: Warning) -> &'static str {
         Warning::PitLimiter => "pit limiter",
         Warning::RevLimiter => "rev limiter",
         Warning::Damage => "repairs needed",
+        Warning::Engine => "engine warning",
+        Warning::FlatTyre => "flat tyre",
+        Warning::Clutch => "clutch overheating",
     }
 }
 

@@ -94,6 +94,10 @@ pub enum Flag {
     Disqualify,
     Debris,
     OneLapToGreen,
+    /// A slow car ahead (a white flag that is not the last lap).
+    SlowCar,
+    /// Black and white: a warning for the way the car is driven.
+    BlackWhite,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -172,6 +176,20 @@ pub struct CarExtra {
     pub gear: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rpm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_mps: Option<f64>,
+    /// The current lap will not count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lap_invalidated: Option<bool>,
+    /// Out of the race (retired, did not finish).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired: Option<bool>,
+    /// The game's sector times: the latest of each sector, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sector_s: Vec<Option<f64>>,
+    /// The best of each sector this session.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub best_sector_s: Vec<Option<f64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -253,6 +271,39 @@ pub struct CarTelemetry {
     /// What each wheel does, where the game tells it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wheels: Option<Wheels>,
+    /// Traction control is cutting in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tc_active: Option<bool>,
+    /// DRS may be opened now (or on the next zone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drs_available: Option<bool>,
+    /// How hurt the car is, where the game tells it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damage: Option<Damage>,
+}
+
+/// Damage, 0.0 (none) .. 1.0 (broken).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Damage {
+    pub aero: Option<f64>,
+    pub engine: Option<f64>,
+    /// LF, RF, LR, RR.
+    pub suspension: [Option<f64>; 4],
+    /// LF, RF, LR, RR.
+    pub brakes: [Option<f64>; 4],
+}
+
+impl Damage {
+    /// The worst part, if anything is known.
+    pub fn worst(&self) -> Option<f64> {
+        [self.aero, self.engine]
+            .into_iter()
+            .chain(self.suspension)
+            .chain(self.brakes)
+            .flatten()
+            .max_by(f64::total_cmp)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -291,6 +342,12 @@ pub enum Warning {
     RevLimiter,
     /// The game wants the car repaired, or repairs are pending.
     Damage,
+    /// The engine's warning light.
+    Engine,
+    /// A tyre is deflated or has come off.
+    FlatTyre,
+    /// The clutch is overheated.
+    Clutch,
 }
 
 impl Warning {
@@ -298,7 +355,13 @@ impl Warning {
     pub fn is_damage(self) -> bool {
         matches!(
             self,
-            Self::WaterTemp | Self::FuelPressure | Self::OilPressure | Self::OilTemp | Self::Damage
+            Self::WaterTemp
+                | Self::FuelPressure
+                | Self::OilPressure
+                | Self::OilTemp
+                | Self::Damage
+                | Self::Engine
+                | Self::FlatTyre
         )
     }
 }
@@ -310,6 +373,10 @@ pub struct Tyres {
     pub rf: Tyre,
     pub lr: Tyre,
     pub rr: Tyre,
+    /// Tread and temperatures change while driving, rather than only at
+    /// the stops.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub live: bool,
 }
 
 impl Tyres {
@@ -333,6 +400,12 @@ pub struct Tyre {
     /// Tread left, 0.0..1.0.
     pub tread: [Option<f64>; 3],
     pub distance_m: Option<f64>,
+    /// Inside the rubber.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carcass_c: Option<f64>,
+    /// The brake disc of this wheel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brake_c: Option<f64>,
 }
 
 impl Tyre {
@@ -367,6 +440,12 @@ pub struct PitState {
     /// What the next stop will do, e.g. `["lf tyre", "fuel"]`.
     pub requested: Vec<String>,
     pub requested_fuel_l: Option<f64>,
+    /// Why the car is due in, e.g. `"player requested"`, `"drive through"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned: Option<String>,
+    /// The lap the rules make the car stop on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mandatory_lap: Option<i32>,
 }
 
 /// One in-car adjustment.

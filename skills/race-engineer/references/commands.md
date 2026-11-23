@@ -6,13 +6,13 @@
 | -------------------------------------------------- | ------------------------------------------------------ |
 | `-f, --format text\|json`                          | 既定 `text`（簡潔テキスト）。`json` は 1 オブジェクト  |
 | `--server <URL>` / `VR_SERVER`                     | 問い合わせ先の `vr serve`。既定は自動検出              |
-| `--game iracing\|replay\|synthetic`                | データソースを明示（サーバーを使わずプロセス内で処理） |
+| `--game iracing\|ams2\|replay\|synthetic`          | データソースを明示（サーバーを使わずプロセス内で処理） |
 | `--file <ndjson>` / `--speed <x>` / `--until <秒>` | 記録の再生、再生速度、停止するセッション時刻           |
 
 ## データの取り方
 
 1. `--game` / `--file` 指定なし: 起動中の `vr serve`（履歴あり）
-2. サーバー無し: iRacing の共有メモリを 1 回読む（`history=unavailable`）
+2. サーバー無し: iRacing、Automobilista 2 の順に、セッション中のゲームの共有メモリを 1 回読む（`history=unavailable`）
 3. `--file` / `--game synthetic`: 記録・デモレースを最後（または `--until`）まで流して回答
 
 ## コマンド
@@ -70,7 +70,8 @@
 - `recent_events[]`: `seq`, `session_time_s`, `type`, `text`
 - `car`: 自車の詳細（`vr car` の `car` と同じ）
 
-`car`: `car{tyres{lf,rf,lr,rr}{cold_kpa,hot_kpa,temp_c[外,中,内],tread[外,中,内]},tyre_compound,warnings[],pit{...},controls[]{id,value},p2p_count,p2p_active,drs_active,battery_pct,...}`, `water_temp_c`, `oil_temp_c`, `adjustments[]`。
+`car`: `car{tyres{lf,rf,lr,rr}{cold_kpa,hot_kpa,temp_c[外,中,内],tread[外,中,内],carcass_c,brake_c},live,tyre_compound,warnings[],pit{...,planned,mandatory_lap},controls[]{id,value},p2p_count,p2p_active,drs_active,drs_available,tc_active,battery_pct,damage{aero,engine,suspension[4],brakes[4]},...}`, `water_temp_c`, `oil_temp_c`, `adjustments[]`。
+`tyres.live` が真なら溝と温度は今の値（AMS2）、偽ならピットで止まった時点の値（iRacing）。`damage` は 0〜1（LF・RF・LR・RR の順）。
 
 `handling`: `ready`, `laps_sampled`, `mean{understeer{entry,mid,exit},oversteer{...},wheelspin_s,rear_lock_s,abs_s,max_slip_deg}`, `laps[]`, `zones[]`, `controls[]`, `adjustments[]`, `advice[]{place(in_car|pit|garage),target,current,change,reason,risk}`。
 
