@@ -10,10 +10,10 @@ use shadcn_iced::trace::{self, trace, trace_line};
 use shadcn_iced::typography::muted_text;
 
 use super::{
-    AgentChoice, AgentStatus, App, Capture, HoldChoice, Message, Phase, PlanChoice, Readiness,
-    SCROLLER, TurnView, VoiceState, latency,
+    AgentChoice, AgentStatus, App, Capture, HoldChoice, Message, OptionChoice, Phase, PlanChoice,
+    Readiness, SCROLLER, TurnView, VoiceState, latency,
 };
-use crate::agent::ToolState;
+use crate::agent::{AgentOption, OptionKind, ToolState};
 use crate::chrome;
 use crate::directive::{MAX_VOLUME, SPEED};
 use crate::engine::Outcome;
@@ -599,6 +599,9 @@ impl App {
             field("自動連絡のタイミング", self.hold_settings(Scope::Calls)),
             field("回答のタイミング", self.hold_settings(Scope::All)),
             field("裏での作戦立案", plan),
+            switch(r.quick)
+                .label("決まった質問にはAIを使わず即答")
+                .on_toggle(Message::Quick),
             field("覚えている指示", self.note_settings()),
             field("見張り", self.watch_settings()),
         ]
@@ -702,7 +705,39 @@ impl App {
                     .on_submit(Message::Connect),
             );
         }
-        col.push(muted(status, 12.0)).into()
+        col.push(muted(status, 12.0))
+            .push(self.option_settings())
+            .into()
+    }
+
+    /// What the agent lets choose: model, effort, speed. The desk thinks with
+    /// an effort of its own.
+    fn option_settings(&self) -> Element<'_, Message> {
+        let mut col = column![].spacing(8);
+        for o in &self.offered {
+            col = match o.kind {
+                OptionKind::Model => col.push(self.option_row("モデル", o, false)),
+                OptionKind::Effort => col
+                    .push(self.option_row("考える量（無線）", o, false))
+                    .push(self.option_row("考える量（調査）", o, true)),
+                OptionKind::Speed => col.push(self.option_row("速度", o, false)),
+            };
+        }
+        col.into()
+    }
+
+    fn option_row<'a>(&self, label: &'a str, o: &AgentOption, desk: bool) -> Element<'a, Message> {
+        let own = self.config.options_of(&self.config.agent).desk;
+        let own = own.into_iter().find(|(id, _)| desk && *id == o.id);
+        let value = own.map_or(o.value.clone(), |(_, v)| v);
+        let all = OptionChoice::all(o, desk);
+        let now = all.iter().find(|c| c.value == value).cloned();
+        let mut pick = select(now, Message::AgentOption).width(Length::Fill);
+        for c in all {
+            let label = c.to_string();
+            pick = pick.option(c, label);
+        }
+        field(label, pick).into()
     }
 
     fn stt_settings(&self) -> Element<'_, Message> {

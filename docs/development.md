@@ -93,6 +93,8 @@ cargo test --workspace
 | 解析（物語）    | `crates/vr-engine/tests/engine.rs`          | 合成レース 1 本を通した周回・燃費・ギャップ・イベント            |
 | 解析（境界値）  | `crates/vr-engine/tests/scenarios.rs`       | 手組みのフレームによる練習走行・マルチクラス・時間制レース・閾値 |
 | テキスト整形    | `crates/vr-engine/src/render.rs`            | 構築したレポートに対する期待文字列                               |
+| 区間・今の差    | `crates/vr-engine/tests/timing.rs`          | 一定速度で走る車のフレームによる区間タイム・差・走行順・欠落     |
+| 定型の答え      | `crates/vr-engine/tests/speech.rs`          | 作ったレポートに対する文の完全一致                               |
 | 車・挙動        | `crates/vr-engine/tests/car.rs`             | 手組みのフレームによる挙動・警告・車内設定・セッション記録       |
 | セッション保存  | `crates/vr-server/tests/sessions.rs`        | 保存・検索・結合、無応答のゲームの開き直し                       |
 | 記録・再生      | `crates/vr-replay/tests/replay.rs`          | 往復、間引き、ペーシング、壊れた入力                             |

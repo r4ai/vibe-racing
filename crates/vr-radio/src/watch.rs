@@ -22,10 +22,13 @@ pub enum Group {
     Session,
     Adjustment,
     Strategy,
+    /// Cars beside, as the spotter sees them.
+    Spotter,
 }
 
 impl Group {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
+        Self::Spotter,
         Self::Flag,
         Self::Position,
         Self::Incident,
@@ -50,6 +53,7 @@ impl Group {
             Self::Session => "セッション",
             Self::Adjustment => "車内調整",
             Self::Strategy => "作戦",
+            Self::Spotter => "スポッター",
         }
     }
 
@@ -65,6 +69,7 @@ impl Group {
             Self::Session => "session",
             Self::Adjustment => "adjustment",
             Self::Strategy => "strategy",
+            Self::Spotter => "spotter",
         }
     }
 
@@ -109,6 +114,7 @@ pub struct Proactive {
     pub session: bool,
     pub adjustment: bool,
     pub strategy: bool,
+    pub spotter: bool,
 }
 
 impl Default for Proactive {
@@ -125,6 +131,7 @@ impl Default for Proactive {
             session: true,
             adjustment: false,
             strategy: true,
+            spotter: true,
         }
     }
 }
@@ -142,6 +149,7 @@ impl Proactive {
             Group::Session => &mut self.session,
             Group::Adjustment => &mut self.adjustment,
             Group::Strategy => &mut self.strategy,
+            Group::Spotter => &mut self.spotter,
         }
     }
 
@@ -151,6 +159,11 @@ impl Proactive {
 
     pub fn set(&mut self, g: Group, on: bool) {
         *self.slot(g) = on;
+    }
+
+    /// Whether the spotter speaks.
+    pub fn wants_spotter(self) -> bool {
+        self.enabled && self.spotter
     }
 
     /// Whether the driver wants to hear about `e`.
@@ -167,6 +180,9 @@ pub const WATCH: &str = "watch";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Advice {
     pub call: String,
+    /// Its numbers and cars.
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One line of `vr watch -f json`; other fields are ignored.
@@ -179,6 +195,9 @@ pub struct RaceEvent {
     pub flag: Option<String>,
     #[serde(default)]
     pub advice: Option<Advice>,
+    /// Whatever else the event tells, by its own names.
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 impl RaceEvent {
@@ -207,6 +226,7 @@ impl RaceEvent {
             text,
             flag: None,
             advice: None,
+            rest: Default::default(),
         }
     }
 
@@ -262,7 +282,7 @@ pub struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            coalesce: Duration::from_millis(1500),
+            coalesce: Duration::from_millis(700),
             max_age: Duration::from_secs(10),
             min_interval: Duration::from_secs(8),
         }
@@ -399,6 +419,7 @@ mod tests {
             text: kind.into(),
             flag: flag.map(str::to_string),
             advice: None,
+            rest: Default::default(),
         }
     }
 
@@ -407,15 +428,13 @@ mod tests {
         let e = RaceEvent::parse(
             r#"{"seq":3,"session_time_s":12.5,"timestamp_ms":1,"type":"flag_raised","flag":"yellow","text":"yellow flag"}"#,
         );
+        let e = e.unwrap();
         assert_eq!(
-            e,
-            Some(RaceEvent {
-                kind: "flag_raised".into(),
-                text: "yellow flag".into(),
-                flag: Some("yellow".into()),
-                advice: None,
-            })
+            (e.kind.as_str(), e.text.as_str()),
+            ("flag_raised", "yellow flag")
         );
+        assert_eq!((e.flag.as_deref(), &e.advice), (Some("yellow"), &None));
+        assert_eq!(e.rest["seq"], 3);
         let e = RaceEvent::parse(
             r#"{"seq":4,"type":"position_changed","from":5,"to":4,"text":"gained"}"#,
         );
@@ -426,6 +445,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!((e.advice(), e.group()), ("answer", Some(Group::Strategy)));
+        assert_eq!(e.advice.as_ref().unwrap().rest["within_laps"], 2);
         assert!(e.urgent());
         let e = RaceEvent::parse(r#"{"type":"strategy","advice":{"call":"plan"},"text":"x"}"#);
         assert!(!e.unwrap().urgent());
@@ -499,7 +519,8 @@ mod tests {
         assert_eq!(
             on,
             [
-                "flag", "position", "incident", "fuel", "weather", "strategy", "pit", "session"
+                "spotter", "flag", "position", "incident", "fuel", "weather", "strategy", "pit",
+                "session"
             ]
         );
         assert!(p.enabled);
@@ -518,6 +539,21 @@ mod tests {
         // Older settings files miss fields.
         let p: Proactive = serde_json::from_str(r#"{"lap":true}"#).unwrap();
         assert!(p.lap && p.enabled && p.flag && !p.adjustment);
+        assert!(p.wants_spotter());
+        assert!(
+            !Proactive {
+                enabled: false,
+                ..p
+            }
+            .wants_spotter()
+        );
+        assert!(
+            !Proactive {
+                spotter: false,
+                ..p
+            }
+            .wants_spotter()
+        );
     }
 
     fn texts(events: Option<Vec<Dated>>) -> Option<String> {
@@ -535,12 +571,12 @@ mod tests {
         let at = clock();
         assert_eq!(q.due(at(0), true), None);
         q.push(at(0), event("position_changed", None));
-        q.push(at(1400), event("pit_entry", None));
-        assert_eq!(q.due(at(1499), true), None);
+        q.push(at(600), event("pit_entry", None));
+        assert_eq!(q.due(at(699), true), None);
         // Somebody is talking.
-        assert_eq!(q.due(at(1500), false), None);
+        assert_eq!(q.due(at(700), false), None);
         assert_eq!(
-            texts(q.due(at(1500), true)).as_deref(),
+            texts(q.due(at(700), true)).as_deref(),
             Some("position_changed / pit_entry")
         );
         assert_eq!(q.due(at(1500), true), None);

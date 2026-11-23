@@ -56,6 +56,7 @@ impl Sim {
                     name: "Test Ring".into(),
                     config: None,
                     length_m: None,
+                    sectors: Vec::new(),
                 }),
                 uid: Some(1),
                 time_total_s: None,
@@ -641,6 +642,7 @@ fn channels_info_and_setup_come_from_the_extras() {
                 path: "Chassis/Front/ArbPosition".into(),
                 value: "P2".into(),
             }],
+            unavailable: Vec::new(),
         }),
     });
     let get = |f: &str| {

@@ -253,6 +253,11 @@ fn practice_has_no_strategy() {
     assert_eq!(st.strategy().unwrap().missing, ["not a race"]);
 }
 
+fn brief_lap(st: &RaceState) -> f64 {
+    let lap = st.brief().unwrap().ahead.unwrap().their_last_lap_s.unwrap();
+    (lap * 1000.0).round() / 1000.0
+}
+
 #[test]
 fn live_values_are_flat_numbers() {
     let mut cfg = race();
@@ -269,8 +274,12 @@ fn live_values_are_flat_numbers() {
     assert_eq!((v("stops"), v("tyre_age"), v("on_pit")), (0.0, 4.0, 0.0));
     assert_eq!((v("cars"), v("alongside")), (cfg.cars as f64, 0.0));
     let brief = st.brief().unwrap();
-    let gap = brief.ahead.unwrap().gap_s.unwrap();
+    // As it is now, not as it was at the line.
+    let gap = brief.ahead.unwrap().live_s.unwrap();
     assert!((v("gap_ahead") - gap).abs() < 0.001);
+    assert_eq!((v("left"), v("right")), (0.0, 0.0));
+    assert_eq!(v("live_position"), v("position"));
+    assert_eq!(v("ahead_lap"), brief_lap(&st));
     assert!(v("near_behind") > 0.0);
     assert!(v("speed") > 50.0);
     // The lap after the planned stop there is none.

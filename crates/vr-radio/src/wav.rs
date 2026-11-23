@@ -64,6 +64,44 @@ pub fn rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
+/// Quieter samples are silence.
+const SILENCE: i16 = 400;
+
+/// A clip of 16-bit samples without the silence before it: what is said at
+/// once must begin at once. Other clips stay as they are.
+pub fn begin_at_once(wav: Vec<u8>) -> Vec<u8> {
+    let bits = wav.get(34..36).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let data = wav.windows(4).position(|w| w == b"data");
+    let (Some(16), Some(data)) = (bits, data.filter(|_| wav.starts_with(b"RIFF"))) else {
+        return wav;
+    };
+    let channels = u16::from_le_bytes([wav[22], wav[23]]).max(1);
+    let from = data + 8;
+    let frame = usize::from(channels) * 2;
+    let Some(samples) = wav.get(from..) else {
+        return wav;
+    };
+    let silent = samples
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .take_while(|b| i16::from_le_bytes(**b).saturating_abs() < SILENCE)
+        .count()
+        * 2;
+    // All of it: nothing to begin with.
+    if silent / 2 == samples.len() / 2 {
+        return wav;
+    }
+    let cut = silent / frame * frame;
+    let mut out = wav[..from].to_vec();
+    out.extend_from_slice(&samples[cut..]);
+    let len = (samples.len() - cut) as u32;
+    out[data + 4..data + 8].copy_from_slice(&len.to_le_bytes());
+    let riff = out.len() as u32 - 8;
+    out[4..8].copy_from_slice(&riff.to_le_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +146,26 @@ mod tests {
     fn rms_of_constant_and_empty() {
         assert_eq!(rms(&[]), 0.0);
         assert_eq!(rms(&[0.5, -0.5]), 0.5);
+    }
+
+    #[test]
+    fn a_clip_begins_at_once() {
+        let clip = |samples: &[f32]| encode_pcm16(samples, 16_000);
+        let quiet = 399.0 / 32768.0;
+        let loud = 0.5;
+        let mut long = vec![0.0; 1000];
+        long.extend([quiet, loud, 0.0, loud]);
+        assert_eq!(begin_at_once(clip(&long)), clip(&[loud, 0.0, loud]));
+        // Nothing to cut, nothing but silence, no clip.
+        for samples in [&[loud, 0.0][..], &[0.0, quiet], &[]] {
+            assert_eq!(begin_at_once(clip(samples)), clip(samples));
+        }
+        assert_eq!(begin_at_once(b"3:text".to_vec()), b"3:text");
+        // Both channels begin together.
+        let mut two = clip(&[0.0, 0.0, 0.0, loud, loud, loud]);
+        two[22] = 2;
+        let mut want = clip(&[0.0, loud, loud, loud]);
+        want[22] = 2;
+        assert_eq!(begin_at_once(two), want);
     }
 }

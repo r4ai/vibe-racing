@@ -407,6 +407,169 @@ pub fn compare(a: &LapTrace, b: &LapTrace) -> Vec<Corner> {
         .collect()
 }
 
+/// How fast the car was on the straights and in the corners, against the
+/// reference. No game tells what the wings have lost: this does.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Speeds {
+    pub top_kmh: f64,
+    /// Against the reference, km/h.
+    pub top: f64,
+    /// Slowest speeds of the corners by their speed, mean difference in km/h;
+    /// `None`: there is no such corner.
+    pub slow: Option<f64>,
+    pub medium: Option<f64>,
+    pub fast: Option<f64>,
+}
+
+/// One lap against a reference, with what a lap usually loses to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CornersReport {
+    pub lap: i32,
+    pub time_s: f64,
+    pub reference_lap: i32,
+    pub reference_s: f64,
+    pub length_m: f64,
+    /// In the order of the lap.
+    pub corners: Vec<Corner>,
+    /// Median loss of the laps before and of this one, corner by corner.
+    pub usual_s: Vec<f64>,
+    pub usual_laps: usize,
+    pub speeds: Speeds,
+}
+
+/// Corners slower than the first are slow, than the second medium.
+const SLOW_KMH: f64 = 120.0;
+const MEDIUM_KMH: f64 = 180.0;
+/// Losses and gains worth a line.
+const WORTH_S: f64 = 0.03;
+const LISTED: usize = 5;
+
+impl CornersReport {
+    /// `laps` are the laps that count, the one looked at last.
+    pub fn of(laps: &[LapTrace], reference: &LapTrace) -> Option<Self> {
+        let a = laps.last()?;
+        let corners = compare(a, reference);
+        if corners.is_empty() {
+            return None;
+        }
+        let all: Vec<Vec<Corner>> = laps
+            .iter()
+            .filter(|l| l.lap != reference.lap)
+            .map(|l| compare(l, reference))
+            .filter(|c| c.len() == corners.len())
+            .collect();
+        let usual_s = (0..corners.len())
+            .filter(|_| !all.is_empty())
+            .filter_map(|i| {
+                // Not the mean: one spin is not a habit.
+                let losses: Vec<f64> = all.iter().map(|c| c[i].loss_s).collect();
+                crate::strategy::median(&losses)
+            })
+            .collect();
+        let top = |t: &LapTrace| f64::from(t.speed.iter().copied().max().unwrap_or(0)) / 10.0;
+        let mean = |range: std::ops::Range<f64>| {
+            let d: Vec<f64> = corners
+                .iter()
+                .filter(|c| range.contains(&c.reference_min_kmh))
+                .map(|c| c.min_kmh)
+                .collect();
+            (!d.is_empty()).then(|| d.iter().sum::<f64>() / d.len() as f64)
+        };
+        let speeds = Speeds {
+            top_kmh: top(a),
+            top: top(a) - top(reference),
+            slow: mean(0.0..SLOW_KMH),
+            medium: mean(SLOW_KMH..MEDIUM_KMH),
+            fast: mean(MEDIUM_KMH..f64::INFINITY),
+        };
+        Some(Self {
+            lap: a.lap,
+            time_s: a.time_s,
+            reference_lap: reference.lap,
+            reference_s: reference.time_s,
+            length_m: reference.length_m,
+            usual_laps: all.len(),
+            corners,
+            usual_s,
+            speeds,
+        })
+    }
+
+    pub fn to_text(&self) -> String {
+        use std::fmt::Write as _;
+        let lap = crate::render::fmt_lap;
+        let mut out = format!(
+            "lap {} {} against lap {} {} ({:+.3}s), corner by corner (numbers count from the line, not the official ones):\n",
+            self.lap,
+            lap(self.time_s),
+            self.reference_lap,
+            lap(self.reference_s),
+            self.time_s - self.reference_s
+        );
+        let mut worst: Vec<&Corner> = self
+            .corners
+            .iter()
+            .filter(|c| c.loss_s.abs() >= WORTH_S)
+            .collect();
+        worst.sort_by(|a, b| b.loss_s.abs().total_cmp(&a.loss_s.abs()));
+        for c in worst.into_iter().take(LISTED) {
+            let _ = write!(
+                out,
+                "  corner {} of {} at {:.0}m ({:.0} km/h): {:+.2}s",
+                c.number,
+                self.corners.len(),
+                c.apex * self.length_m,
+                c.reference_min_kmh,
+                c.loss_s
+            );
+            let side = |m: f64| if m < 0.0 { "earlier" } else { "later" };
+            if let Some(m) = c.brake_m.filter(|m| m.abs() >= 1.0) {
+                let _ = write!(out, " | brakes {:.0}m {}", m.abs(), side(m));
+            }
+            let _ = write!(out, " | slowest {:+.1} km/h", c.min_kmh);
+            if let Some(m) = c.throttle_m.filter(|m| m.abs() >= 1.0) {
+                let _ = write!(out, " | throttle {:.0}m {}", m.abs(), side(m));
+            }
+            let _ = writeln!(out, " | exit {:+.1} km/h", c.exit_kmh);
+        }
+        let mut usual: Vec<(usize, f64)> = self
+            .usual_s
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (i + 1, *l))
+            .filter(|(_, l)| *l >= WORTH_S)
+            .collect();
+        usual.sort_by(|a, b| b.1.total_cmp(&a.1));
+        usual.truncate(LISTED);
+        if !usual.is_empty() {
+            let parts: Vec<String> = usual
+                .iter()
+                .map(|(n, l)| format!("corner {n} {l:+.2}s"))
+                .collect();
+            let _ = writeln!(
+                out,
+                "usually lost there (median of {} laps): {}",
+                self.usual_laps,
+                parts.join(", ")
+            );
+        }
+        let s = &self.speeds;
+        let part = |name: &str, v: Option<f64>| {
+            v.map_or(String::new(), |v| format!(" | {name} corners {v:+.1} km/h"))
+        };
+        let _ = writeln!(
+            out,
+            "top speed {:.1} km/h ({:+.1}){}{}{}",
+            s.top_kmh,
+            s.top,
+            part("slow", s.slow),
+            part("medium", s.medium),
+            part("fast", s.fast)
+        );
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +645,55 @@ mod tests {
         assert!((c[0].reference_min_kmh - 100.0).abs() < 0.2);
         assert_eq!(c[1].brake_m, None);
         assert!(compare(&LapTrace::default(), &b).is_empty());
+    }
+
+    #[test]
+    fn the_report_tells_what_a_lap_usually_loses() {
+        let numbered = |n: i32, l: LapTrace| LapTrace { lap: n, ..l };
+        let best = numbered(3, lap(0.0, 240));
+        let laps = [
+            numbered(2, lap(20.0, 240)),
+            best.clone(),
+            numbered(4, lap(10.0, 220)),
+        ];
+        let r = CornersReport::of(&laps, &best).unwrap();
+        assert_eq!((r.lap, r.reference_lap, r.usual_laps), (4, 3, 2));
+        let first = [&laps[0], &laps[2]].map(|l| compare(l, &best)[0].loss_s);
+        assert!((r.usual_s[0] - (first[0] + first[1]) / 2.0).abs() < 1e-9);
+        assert!(r.usual_s[0] > r.corners[0].loss_s);
+        // The first corner is slow (100 km/h), the second medium (140 km/h).
+        assert!(
+            (r.speeds.slow.unwrap() + 10.0).abs() < 0.2,
+            "{:?}",
+            r.speeds
+        );
+        assert!(r.speeds.medium.unwrap().abs() < 0.2);
+        assert_eq!((r.speeds.fast, r.speeds.top), (None, 0.0));
+        let text = r.to_text();
+        assert!(text.starts_with("lap 4 "), "{text}");
+        assert!(text.contains(" against lap 3 "), "{text}");
+        assert!(
+            text.contains("corner 1 of 2 at 1495m (100 km/h): +"),
+            "{text}"
+        );
+        assert!(
+            text.contains(" | brakes 100m earlier | slowest -10.0 km/h | exit "),
+            "{text}"
+        );
+        assert!(
+            text.contains("usually lost there (median of 2 laps): corner 1 +"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "top speed 199.9 km/h (+0.0) | slow corners -10.0 km/h | medium corners "
+            ),
+            "{text}"
+        );
+        // The reference itself: nothing to compare the others with.
+        let own = CornersReport::of(std::slice::from_ref(&best), &best).unwrap();
+        assert_eq!((own.usual_laps, own.usual_s.len()), (0, 0));
+        assert_eq!(CornersReport::of(&[], &best), None);
+        assert_eq!(CornersReport::of(&laps, &LapTrace::default()), None);
     }
 }

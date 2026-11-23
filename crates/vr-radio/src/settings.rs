@@ -3,12 +3,13 @@
 //! Command-line options and environment variables win over the file; the
 //! file wins over the built-in defaults. API keys are never stored here.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{AgentOptions, Config};
 use crate::directive::MAX_VOLUME;
 use crate::rules::Rules;
 use crate::stt::SttBackend;
@@ -20,6 +21,9 @@ use crate::wheel::Binding;
 pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Model, effort and so on, by the command of the agent.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_options: BTreeMap<String, AgentOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<u32>,
     /// Percent.
@@ -82,6 +86,7 @@ impl Settings {
             }
         }
         set(&mut config.agent, &self.agent, explicit("agent"));
+        config.saved_options.clone_from(&self.agent_options);
         set(&mut config.speaker, &self.speaker, explicit("speaker"));
         // A file edited by hand must not deafen the driver.
         let volume = self.volume.map(|v| v.min(MAX_VOLUME));
@@ -107,6 +112,13 @@ mod tests {
     fn full() -> Settings {
         Settings {
             agent: Some("codex".into()),
+            agent_options: BTreeMap::from([(
+                "codex".into(),
+                AgentOptions {
+                    radio: vec![("model".into(), "m".into())],
+                    desk: vec![("reasoning_effort".into(), "high".into())],
+                },
+            )]),
             speaker: Some(8),
             volume: Some(60),
             speed: Some(1.5),

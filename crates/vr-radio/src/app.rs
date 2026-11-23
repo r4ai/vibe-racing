@@ -11,10 +11,10 @@ use iced::futures::{SinkExt, Stream};
 use iced::{Subscription, Task, window};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-use crate::agent::{AgentLink, ToolState, Turn};
+use crate::agent::{AgentLink, AgentOption, OptionKind, ToolState, Turn, merged};
 use crate::audio::{LateMic, LateSpeakers, Output, Recorder};
 use crate::child::{Retry, Supervised};
-use crate::config::{self, Config};
+use crate::config::{self, AgentOptions, Config};
 use crate::context::{Commands, ContextSource};
 use crate::directive::Setting;
 use crate::engine::{self, Command, Deps, Event, Outcome};
@@ -69,6 +69,7 @@ pub enum Message {
     HoldDraft(Scope, String),
     /// Laps between looks at the strategy.
     Planning(PlanChoice),
+    Quick(bool),
     NoteDraft(String),
     AddNote,
     /// Drops a standing order or a watch, by its number.
@@ -80,6 +81,8 @@ pub enum Message {
     /// Plays a sample of the selected voice.
     Preview,
     AgentChoice(AgentChoice),
+    /// Model, effort or speed of the agent.
+    AgentOption(OptionChoice),
     AgentDraft(String),
     /// Starts the chosen agent in place of the current one.
     Connect,
@@ -202,6 +205,40 @@ impl std::fmt::Display for AgentChoice {
             Self::Codex => "Codex",
             Self::Custom => "カスタム",
         })
+    }
+}
+
+/// A value of an option of the agent, as the settings list it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionChoice {
+    pub id: String,
+    /// For the desk only.
+    pub desk: bool,
+    pub value: String,
+    label: String,
+}
+
+impl OptionChoice {
+    fn all(o: &AgentOption, desk: bool) -> Vec<Self> {
+        o.choices
+            .iter()
+            .map(|(value, name)| Self {
+                id: o.id.clone(),
+                desk,
+                value: value.clone(),
+                label: match (o.kind, value.as_str()) {
+                    (OptionKind::Speed, "on") => "高速（消費が増える）".into(),
+                    (OptionKind::Speed, "off") => "標準".into(),
+                    _ => name.clone(),
+                },
+            })
+            .collect()
+    }
+}
+
+impl std::fmt::Display for OptionChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
     }
 }
 
@@ -329,6 +366,8 @@ pub struct App {
     settings_path: Option<PathBuf>,
     agent_choice: AgentChoice,
     agent_draft: String,
+    /// What can be chosen about the agent.
+    offered: Vec<AgentOption>,
     hotkey: Option<Result<String, String>>,
     capture: Capture,
     capture_hint: Option<&'static str>,
@@ -359,6 +398,7 @@ impl App {
         Self {
             agent_choice: AgentChoice::of(&config.agent),
             agent_draft: config.agent.clone(),
+            offered: Vec::new(),
             hotkey: HOTKEY.get().cloned(),
             capture: Capture::None,
             capture_hint: None,
@@ -413,7 +453,36 @@ impl App {
     /// A conversation in progress, for snapshots and screenshots.
     pub fn sample() -> Self {
         let mut app = Self::new();
-        app.agent = AgentStatus::Ready("Claude Agent".into());
+        app.agent = AgentStatus::Ready("Codex".into());
+        let option = |id: &str, kind, value: &str, choices: &[(&str, &str)]| AgentOption {
+            id: id.into(),
+            kind,
+            value: value.into(),
+            choices: choices
+                .iter()
+                .map(|(v, name)| (v.to_string(), name.to_string()))
+                .collect(),
+        };
+        app.offered = vec![
+            option(
+                "model",
+                OptionKind::Model,
+                "terra",
+                &[("sol", "6.2 Sol"), ("terra", "6.1 Terra")],
+            ),
+            option(
+                "reasoning_effort",
+                OptionKind::Effort,
+                "low",
+                &[("low", "Low"), ("medium", "Medium")],
+            ),
+            option(
+                "fast-mode",
+                OptionKind::Speed,
+                "off",
+                &[("off", "Off"), ("on", "On")],
+            ),
+        ];
         app.voices = ["ノーマル", "あまあま", "ツンツン", "セクシー"]
             .iter()
             .enumerate()
@@ -593,7 +662,8 @@ impl App {
             | Setting::Note(_)
             | Setting::Forgot(_)
             | Setting::Watch(_)
-            | Setting::Planning(_) => return,
+            | Setting::Planning(_)
+            | Setting::Quick(_) => return,
         }
         self.save();
     }
@@ -793,6 +863,10 @@ impl App {
                 self.save();
             }
             Message::Interval(s) => self.rules(|r| r.interval_s = s),
+            Message::Quick(on) => {
+                self.rules(|r| r.quick = on);
+                self.save();
+            }
             Message::Hold(scope, choice) => {
                 let draft = &mut self.hold_drafts[usize::from(scope == Scope::Calls)];
                 *draft = None;
@@ -854,15 +928,43 @@ impl App {
                     self.agent_draft = command.into();
                 }
             }
+            Message::AgentOption(c) => {
+                let agent = self.config.agent.clone();
+                let saved = self
+                    .settings
+                    .agent_options
+                    .entry(agent.clone())
+                    .or_default();
+                let list = if c.desk {
+                    &mut saved.desk
+                } else {
+                    &mut saved.radio
+                };
+                *list = merged(list, &[(c.id.clone(), c.value.clone())]);
+                self.config
+                    .saved_options
+                    .clone_from(&self.settings.agent_options);
+                if !c.desk
+                    && let Some(o) = self.offered.iter_mut().find(|o| o.id == c.id)
+                {
+                    // Until the agent says so itself.
+                    o.value = c.value;
+                }
+                self.save();
+                let options = self.config.options_of(&agent);
+                self.send(Command::SetAgentOptions(options));
+            }
             Message::AgentDraft(d) => self.agent_draft = d,
             Message::Connect => {
                 let command = self.agent_draft.trim().to_string();
                 if !command.is_empty() && self.engine.is_some() {
                     self.agent = AgentStatus::Starting;
+                    self.offered.clear();
                     self.config.agent = command.clone();
                     self.settings.agent = Some(command.clone());
                     self.save();
-                    self.send(Command::SetAgent(command));
+                    let options = self.config.options_of(&command);
+                    self.send(Command::SetAgent(command, options));
                 }
             }
             Message::Stt(choice) => {
@@ -976,6 +1078,7 @@ impl App {
             Event::Error(e) => self.error(e),
             // Measured by vr-eval; the window does not show them.
             Event::Usage { .. } | Event::Cost { .. } => {}
+            Event::AgentOptions(o) => self.offered = o,
             Event::TurnStarted { turn } => {
                 self.previewing = false;
                 self.turns.push(TurnView {
@@ -1160,9 +1263,11 @@ fn show_window() -> Task<Message> {
 
 fn context(cfg: &Config) -> Option<Arc<dyn ContextSource>> {
     let commands = cfg.context_commands();
-    (!commands.is_empty() || cfg.topics).then(|| {
+    let say = cfg.say.trim().to_string();
+    (!commands.is_empty() || cfg.topics || !say.is_empty()).then(|| {
         Arc::new(Commands {
             commands,
+            say,
             topics: cfg.topics,
             decide: cfg.decide(),
             cwd: cfg.agent_cwd(),
@@ -1171,9 +1276,9 @@ fn context(cfg: &Config) -> Option<Arc<dyn ContextSource>> {
 }
 
 /// Starts an agent from its command line.
-fn connect(cfg: &Config, command: &str) -> AgentLink {
+fn connect(cfg: &Config, command: &str, options: &AgentOptions) -> AgentLink {
     match AcpAgent::from_str(&config::agent_command(command)) {
-        Ok(acp) => AgentLink::spawn(acp, cfg.session()),
+        Ok(acp) => AgentLink::spawn(acp, cfg.session(options)),
         Err(e) => AgentLink::failed(format!("bad agent command: {e}")),
     }
 }
@@ -1187,15 +1292,17 @@ pub fn deps(
     synth: Arc<dyn Synth>,
 ) -> Deps {
     let connect_cfg = cfg.clone();
+    let options = cfg.options_of(&cfg.agent);
     Deps {
         recorder,
         transcriber: stt::build(&cfg.stt()),
         make_transcriber: Box::new(stt::build),
         synth,
         output,
-        agent: connect(cfg, &cfg.agent),
+        agent: connect(cfg, &cfg.agent, &options),
         agent_command: cfg.agent.clone(),
-        connect: Box::new(move |command| connect(&connect_cfg, command)),
+        agent_options: options,
+        connect: Box::new(move |command, options| connect(&connect_cfg, command, options)),
         context: context(cfg),
         prompt_template: cfg.prompt.clone(),
         speaker: cfg.speaker,
@@ -1720,7 +1827,10 @@ mod tests {
         assert_eq!(app.agent, AgentStatus::Starting);
         assert_eq!(
             rx.try_recv(),
-            Ok(Command::SetAgent(config::CODEX_AGENT.into()))
+            Ok(Command::SetAgent(
+                config::CODEX_AGENT.into(),
+                app.config.options_of(config::CODEX_AGENT)
+            ))
         );
         assert_eq!(saved(&app).agent.as_deref(), Some(config::CODEX_AGENT));
         // Custom keeps the command to edit it.
@@ -1733,6 +1843,48 @@ mod tests {
         assert_eq!(AgentChoice::of("other"), AgentChoice::Custom);
         let labels = AgentChoice::ALL.map(|c| c.to_string());
         assert_eq!(labels, ["Claude Code", "Codex", "カスタム"]);
+    }
+
+    #[test]
+    fn options_of_the_agent_are_chosen_and_remembered() {
+        let (mut app, mut cmds, _dir) = wired();
+        app.config.agent = config::CODEX_AGENT.into();
+        app.offered = App::sample().offered;
+        let pick = |app: &App, i: usize, desk: bool, value: &str| {
+            let all = OptionChoice::all(&app.offered[i], desk);
+            all.into_iter().find(|c| c.value == value).unwrap()
+        };
+        let fast = pick(&app, 2, false, "on");
+        assert_eq!(fast.to_string(), "高速（消費が増える）");
+        assert_eq!(pick(&app, 2, false, "off").to_string(), "標準");
+        assert_eq!(pick(&app, 0, false, "sol").to_string(), "6.2 Sol");
+        let _ = app.update(Message::AgentOption(fast));
+        assert_eq!(app.offered[2].value, "on");
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let saved_options = saved(&app).agent_options[config::CODEX_AGENT].clone();
+        assert_eq!(saved_options.radio, [pair("fast-mode", "on")]);
+        // The whole set goes to the engine: what was not chosen stays.
+        let Ok(Command::SetAgentOptions(o)) = cmds.try_recv() else {
+            panic!("options expected")
+        };
+        assert!(o.radio.contains(&pair("fast-mode", "on")));
+        assert!(o.radio.contains(&pair("model", "gpt-6.1-terra")));
+        // The desk has an effort of its own.
+        let deep = pick(&app, 1, true, "low");
+        let _ = app.update(Message::AgentOption(deep));
+        assert_eq!(app.offered[1].value, "low");
+        let Ok(Command::SetAgentOptions(o)) = cmds.try_recv() else {
+            panic!("options expected")
+        };
+        assert_eq!(o.desk, [pair("reasoning_effort", "low")]);
+        assert_eq!(o.radio[1], pair("reasoning_effort", "low"));
+        // Another agent has options of its own.
+        assert_eq!(
+            app.config.options_of(config::DEFAULT_AGENT),
+            AgentOptions::default()
+        );
+        app.apply(Event::AgentOptions(Vec::new()));
+        assert!(app.offered.is_empty());
     }
 
     #[test]

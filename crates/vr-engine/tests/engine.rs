@@ -200,4 +200,22 @@ fn reports_roundtrip_through_json() {
     let b = st.brief().unwrap();
     let back: Brief = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
     assert_eq!(back, b);
+    let s = st.sectors(&SectorsParams::default()).unwrap();
+    let back: SectorsReport = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+    assert_eq!(back, s);
+    let s = speak(&st, SpeechTopic::Ahead).unwrap();
+    let back: Speech = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+    assert_eq!(back, s);
+    // Reports of older versions miss the new fields.
+    let mut old = serde_json::to_value(&b).unwrap();
+    for key in ["live_s", "live_change_s", "live_ahead"] {
+        old["ahead"].as_object_mut().unwrap().remove(key);
+    }
+    old["player"]
+        .as_object_mut()
+        .unwrap()
+        .remove("live_position");
+    old.as_object_mut().unwrap().remove("leader");
+    let old: Brief = serde_json::from_value(old).unwrap();
+    assert_eq!(old.ahead.unwrap().live_s, None);
 }

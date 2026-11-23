@@ -49,6 +49,10 @@ pub trait Recorder: Send + Sync + 'static {
 pub trait Output: Send + Sync + 'static {
     /// Queues a WAV clip after whatever is playing.
     fn play(&self, wav: Vec<u8>);
+    /// Plays a WAV clip at once, over whatever is playing.
+    fn interject(&self, wav: Vec<u8>) {
+        self.play(wav);
+    }
     /// Stops playback and drops the queue.
     fn stop(&self);
     fn is_idle(&self) -> bool;
@@ -310,6 +314,11 @@ impl Output for LateSpeakers {
             s.play(wav);
         }
     }
+    fn interject(&self, wav: Vec<u8>) {
+        if let Some(s) = self.late.get() {
+            s.interject(wav);
+        }
+    }
     fn stop(&self) {
         if let Some(s) = self.late.get() {
             s.stop();
@@ -345,9 +354,30 @@ impl Recorder for NoMic {
 
 enum OutCmd {
     Play(Vec<u8>),
+    /// Over whatever is playing.
+    Interject(Vec<u8>),
     Stop,
     Volume(f32),
 }
+
+/// How loud the rest is while something is said over it.
+const DUCKED: f32 = 0.3;
+
+/// The spotter cannot wait for a long buffer to run out: some 10 ms where the
+/// device allows it, what it wants otherwise.
+fn open_output() -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
+    let short = rodio::DeviceSinkBuilder::from_default_device()
+        .map(|b| b.with_buffer_size(rodio::cpal::BufferSize::Fixed(OUTPUT_FRAMES)));
+    match short.and_then(|b| b.open_stream()) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            tracing::info!("output without a short buffer: {e}");
+            rodio::DeviceSinkBuilder::open_default_sink()
+        }
+    }
+}
+
+const OUTPUT_FRAMES: u32 = 512;
 
 /// The default output device.
 pub struct Speakers {
@@ -364,7 +394,7 @@ impl Speakers {
         std::thread::Builder::new()
             .name("vr-radio-speakers".into())
             .spawn(move || {
-                let sink = match rodio::DeviceSinkBuilder::open_default_sink() {
+                let sink = match open_output() {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = ready_tx
@@ -375,6 +405,9 @@ impl Speakers {
                 let mut sink = sink;
                 sink.log_on_drop(false);
                 let player = rodio::Player::connect_new(sink.mixer());
+                let over = rodio::Player::connect_new(sink.mixer());
+                let mut volume = 1.0;
+                let mut ducked = false;
                 let _ = ready_tx.send(Ok(()));
                 loop {
                     match rx.recv_timeout(Duration::from_millis(20)) {
@@ -384,15 +417,32 @@ impl Speakers {
                                 Err(e) => tracing::warn!("cannot decode speech clip: {e}"),
                             }
                         }
+                        Ok(OutCmd::Interject(bytes)) => {
+                            // Only the newest is true.
+                            over.clear();
+                            over.play();
+                            match rodio::Decoder::new_wav(Cursor::new(bytes)) {
+                                Ok(clip) => over.append(clip),
+                                Err(e) => tracing::warn!("cannot decode speech clip: {e}"),
+                            }
+                        }
                         Ok(OutCmd::Stop) => {
                             player.clear();
                             player.play(); // `clear` also pauses
                         }
-                        Ok(OutCmd::Volume(v)) => player.set_volume(v),
+                        Ok(OutCmd::Volume(v)) => {
+                            volume = v;
+                            over.set_volume(v);
+                            player.set_volume(if ducked { v * DUCKED } else { v });
+                        }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
-                    thread_idle.store(player.empty(), Ordering::Relaxed);
+                    if ducked == over.empty() {
+                        ducked = !ducked;
+                        player.set_volume(if ducked { volume * DUCKED } else { volume });
+                    }
+                    thread_idle.store(player.empty() && over.empty(), Ordering::Relaxed);
                 }
             })?;
         ready_rx
@@ -413,6 +463,10 @@ impl Output for Speakers {
     fn play(&self, wav: Vec<u8>) {
         self.idle.store(false, Ordering::Relaxed);
         self.send(OutCmd::Play(wav));
+    }
+
+    fn interject(&self, wav: Vec<u8>) {
+        self.send(OutCmd::Interject(wav));
     }
 
     fn stop(&self) {

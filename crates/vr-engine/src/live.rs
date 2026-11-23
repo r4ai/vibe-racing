@@ -52,7 +52,15 @@ pub const LIVE_KEYS: &[(&str, &str)] = &[
         "lapping_behind",
         "s to a car behind on track that is laps ahead",
     ),
+    ("near_ahead_m", "m along the track to the next car ahead"),
+    ("near_behind_m", "m along the track to the next car behind"),
     ("alongside", "a car beside, 0/1"),
+    ("left", "cars beside on the left, 0-2"),
+    ("right", "cars beside on the right, 0-2"),
+    ("live_position", "in class, as the cars run on track now"),
+    ("gap_leader", "s to the leader of the class"),
+    ("leader_lap", "s, last lap of the leader of the class"),
+    ("ahead_lap", "s, last lap of the car one place ahead"),
     ("fuel", "litres"),
     ("fuel_laps", "laps of fuel"),
     ("fuel_spare", "litres left at the flag, negative: short"),
@@ -98,6 +106,18 @@ pub(crate) fn live(state: &RaceState) -> LiveReport {
             .filter(|(_, v)| v.is_finite())
             .map(|(k, v)| (k.to_string(), (v * 1000.0).round() / 1000.0))
             .collect(),
+    }
+}
+
+/// Cars on the left and on the right.
+fn beside(alongside: Option<&str>) -> (f64, f64) {
+    match alongside {
+        Some("left") => (1.0, 0.0),
+        Some("right") => (0.0, 1.0),
+        Some("left and right") => (1.0, 1.0),
+        Some("two on the left") => (2.0, 0.0),
+        Some("two on the right") => (0.0, 2.0),
+        _ => (0.0, 0.0),
     }
 }
 
@@ -152,7 +172,13 @@ fn values(state: &RaceState, f: &Frame) -> BTreeMap<&'static str, f64> {
         put("p2p", c.p2p_count.map(f64::from));
         put("in_stall", c.pit.in_stall.and_then(on));
         put("on_track", on(p.on_track));
+        let (ahead, behind) = state.near_m(f);
+        put("near_ahead_m", ahead);
+        put("near_behind_m", behind);
         put("alongside", on(c.alongside.is_some()));
+        let (left, right) = beside(c.alongside.as_deref());
+        put("left", Some(left));
+        put("right", Some(right));
     }
     if let Some(i) = state.fuel_info(f) {
         put("fuel_laps", i.laps_of_fuel);
@@ -183,9 +209,27 @@ fn values(state: &RaceState, f: &Frame) -> BTreeMap<&'static str, f64> {
             (1, "gap_behind", "trend_behind"),
         ] {
             if let Some(g) = state.adjacent(f, offset) {
-                put(gap, g.gap_s);
+                put(
+                    gap,
+                    g.live_s
+                        .filter(|_| g.live_ahead == Some(offset < 0))
+                        .or(g.gap_s),
+                );
                 put(trend, g.trend_s_per_lap);
+                if offset < 0 {
+                    put("ahead_lap", g.their_last_lap_s);
+                }
             }
+        }
+        put("live_position", state.live_position(f).map(f64::from));
+        let first = state.leader(f).or_else(|| {
+            state
+                .adjacent(f, -1)
+                .filter(|g| g.car.class_position.or(g.car.position) == Some(1))
+        });
+        if let Some(g) = first {
+            put("gap_leader", g.gap_s.filter(|_| race));
+            put("leader_lap", g.their_last_lap_s);
         }
         let near = state.nearby(f, Some(NEAR_S));
         let least = |v: &mut dyn Iterator<Item = f64>| v.min_by(f64::total_cmp);

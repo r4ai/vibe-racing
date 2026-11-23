@@ -73,6 +73,10 @@ pub struct PlayerSummary {
     pub incidents: Option<i32>,
     pub on_pit_road: bool,
     pub on_track: bool,
+    /// The place in class as the cars run on track now; races only. The
+    /// official one changes at the line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_position: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +104,17 @@ pub struct GapInfo {
     /// Their last lap minus ours. Negative = they were faster.
     pub last_lap_delta_s: Option<f64>,
     pub on_pit_road: bool,
+    /// Race only: the gap on track at this moment, from when the two passed
+    /// the same place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_s: Option<f64>,
+    /// How `live_s` changed since the lap before, at the same place. Negative
+    /// = shrinking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_change_s: Option<f64>,
+    /// Whether the car runs ahead at this moment, whatever the places say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_ahead: Option<bool>,
 }
 
 /// A car physically near the player on track (regardless of position).
@@ -162,6 +177,15 @@ pub struct Brief {
     /// The player's car (absent in older reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub car: Option<CarTelemetry>,
+    /// The leader of the class, when it is not the car ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<GapInfo>,
+    /// The cars ahead and behind as they run now, when the official places
+    /// say otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_ahead: Option<GapInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_behind: Option<GapInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -245,6 +269,66 @@ pub struct LapsReport {
     pub laps: Vec<LapRecord>,
     pub best_lap_s: Option<f64>,
     pub avg_clean_lap_s: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SectorBasis {
+    /// The game tells where the sectors begin; the times are worked out from
+    /// the positions of the cars.
+    GameLines,
+    /// It does not: thirds of the lap, worked out likewise.
+    Thirds,
+    /// No history to work with.
+    None,
+}
+
+/// Sector times of one car; `None` where they are not known.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SectorRow {
+    pub car: CarRef,
+    /// `"you"`, `"ahead"`, `"behind"`, `"leader"` or `"asked"`.
+    pub role: String,
+    pub last_lap_s: Option<f64>,
+    /// The last lap driven from line to line.
+    pub lap: Option<i32>,
+    pub last: Vec<Option<f64>>,
+    pub best: Vec<Option<f64>>,
+    /// Of the lap being driven.
+    pub current: Vec<Option<f64>>,
+}
+
+/// A stretch of the lap against another car.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StretchLoss {
+    /// Lap fractions.
+    pub from: f64,
+    pub to: f64,
+    /// From the line, where the length of the track is known.
+    pub from_m: Option<f64>,
+    pub to_m: Option<f64>,
+    /// Sector it begins in, from 1.
+    pub sector: usize,
+    /// Positive: lost, negative: won.
+    pub lost_s: f64,
+}
+
+/// Sector times, and where the last lap was lost or won.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SectorsReport {
+    pub meta: Meta,
+    pub basis: SectorBasis,
+    /// Lap fractions at which the sectors begin.
+    pub starts: Vec<f64>,
+    pub rows: Vec<SectorRow>,
+    /// The car the stretches are compared with.
+    pub versus: Option<CarRef>,
+    /// Your last lap against theirs, sector by sector. Positive = slower.
+    pub delta: Vec<Option<f64>>,
+    /// Costliest first.
+    pub losses: Vec<StretchLoss>,
+    /// Most won first.
+    pub gains: Vec<StretchLoss>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

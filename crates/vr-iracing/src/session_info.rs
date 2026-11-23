@@ -116,6 +116,8 @@ pub struct SessionInfo {
     pub track_name: Option<String>,
     pub track_config: Option<String>,
     pub track_length_m: Option<f64>,
+    /// Lap fractions at which the sectors begin.
+    pub sectors: Vec<f64>,
     pub sessions: Vec<SessionDef>,
     pub player_car_idx: Option<usize>,
     pub fuel_kg_per_l: Option<f64>,
@@ -130,7 +132,8 @@ pub struct SessionInfo {
 }
 
 /// `"Chassis/Front/ArbPosition"` → `"P2"`, in the order of the garage.
-fn flatten(path: &str, v: &Value, out: &mut Vec<SetupItem>) {
+/// What has no value goes to `empty`.
+fn flatten(path: &str, v: &Value, out: &mut Vec<SetupItem>, empty: &mut Vec<String>) {
     match v {
         Value::Mapping(m) => {
             for (k, v) in m {
@@ -142,23 +145,22 @@ fn flatten(path: &str, v: &Value, out: &mut Vec<SetupItem>) {
                 } else {
                     format!("{path}/{k}")
                 };
-                flatten(&path, v, out);
+                flatten(&path, v, out, empty);
             }
         }
-        v => {
-            if let Some(value) = as_string(Some(v)) {
-                out.push(SetupItem {
-                    path: path.to_string(),
-                    value,
-                });
-            }
-        }
+        v => match as_string(Some(v)) {
+            Some(value) => out.push(SetupItem {
+                path: path.to_string(),
+                value,
+            }),
+            None => empty.push(path.to_string()),
+        },
     }
 }
 
 fn parse_setup(doc: &Value) -> Option<Setup> {
-    let mut items = Vec::new();
-    flatten("", get(doc, &["CarSetup"])?, &mut items);
+    let (mut items, mut unavailable) = (Vec::new(), Vec::new());
+    flatten("", get(doc, &["CarSetup"])?, &mut items, &mut unavailable);
     items.retain(|i| i.path != "UpdateCount");
     if items.is_empty() {
         return None;
@@ -169,6 +171,7 @@ fn parse_setup(doc: &Value) -> Option<Setup> {
         modified: flag("DriverSetupIsModified"),
         passed_tech: flag("DriverSetupPassedTech"),
         items,
+        unavailable,
     })
 }
 
@@ -265,6 +268,13 @@ impl SessionInfo {
             si.tyre_compounds = tyres
                 .iter()
                 .map(|t| as_string(t.get("TireCompoundType")).unwrap_or_default())
+                .collect();
+        }
+
+        if let Some(Value::Sequence(sectors)) = get(&doc, &["SplitTimeInfo", "Sectors"]) {
+            si.sectors = sectors
+                .iter()
+                .filter_map(|s| as_f64(s.get("SectorStartPct")))
                 .collect();
         }
 
@@ -413,6 +423,19 @@ mod tests {
     }
 
     #[test]
+    fn sectors_come_from_the_split_times() {
+        assert!(SessionInfo::parse(SAMPLE).unwrap().sectors.is_empty());
+        let yaml = format!(
+            "{SAMPLE}{}",
+            concat!(
+                "SplitTimeInfo:\n Sectors:\n - SectorNum: 0\n   SectorStartPct: 0.000000\n",
+                " - SectorNum: 1\n   SectorStartPct: 0.332910\n",
+            )
+        );
+        assert_eq!(SessionInfo::parse(&yaml).unwrap().sectors, [0.0, 0.33291]);
+    }
+
+    #[test]
     fn reads_the_setup_and_the_rest() {
         let yaml = format!(
             "{SAMPLE}{}",
@@ -453,6 +476,7 @@ mod tests {
                 ("Chassis/Front/Blades", "3"),
             ]
         );
+        assert_eq!(s.unavailable, ["Chassis/Rear/Empty"]);
         assert_eq!(si.tyre_compounds, ["Hard"]);
         assert!((si.pit_speed_limit_mps.unwrap() - 20.0).abs() < 1e-9);
         let raw = si.raw.unwrap();

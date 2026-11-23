@@ -160,8 +160,11 @@ flowchart BT
 | 解析   | [`crates/vr-engine/src/report.rs`](../crates/vr-engine/src/report.rs)     | レスポンス型（JSON 契約）                                             | 低       |
 | 解析   | [`crates/vr-engine/src/render.rs`](../crates/vr-engine/src/render.rs)     | エージェント向けテキスト整形                                          | 中       |
 | 解析   | [`crates/vr-engine/src/handling.rs`](../crates/vr-engine/src/handling.rs) | 挙動の傾向の推定                                                      | 中       |
-| 解析   | [`crates/vr-engine/src/trace.rs`](../crates/vr-engine/src/trace.rs)       | 周ごとの波形とコース形状、コーナー別の比較                            | 中       |
+| 解析   | [`crates/vr-engine/src/trace.rs`](../crates/vr-engine/src/trace.rs)       | 周ごとの波形、コーナーの比較（`vr sessions corners`）                 | 中       |
 | 解析   | [`crates/vr-engine/src/strategy.rs`](../crates/vr-engine/src/strategy.rs) | 落ち方、ピットロス、止まる周の案、アンダーカット                      | 中       |
+| 解析   | [`crates/vr-engine/src/timing.rs`](../crates/vr-engine/src/timing.rs)     | 全車の通過時刻、区間タイム、今この瞬間の差                            | 中       |
+| 解析   | [`crates/vr-engine/src/forecast.rs`](../crates/vr-engine/src/forecast.rs) | このままの着順、誰といつ会うか（`vr forecast`）                       | 中       |
+| 解析   | [`crates/vr-engine/src/speech.rs`](../crates/vr-engine/src/speech.rs)     | 決まった質問への日本語の結論（`vr say`）                              | 中       |
 | 解析   | [`crates/vr-engine/src/live.rs`](../crates/vr-engine/src/live.rs)         | ライブ値                                                              | 低       |
 | 解析   | [`crates/vr-engine/src/chassis.rs`](../crates/vr-engine/src/chassis.rs)   | 四輪の実測の集計                                                      | 中       |
 | 解析   | [`crates/vr-engine/src/garage.rs`](../crates/vr-engine/src/garage.rs)     | ガレージの打ち手、変更の前後・走行どうしの比較                        | 中       |
@@ -263,6 +266,24 @@ sequenceDiagram
 iRacing はドライバー名等を引用符なしで出力するため、`: ` や `#` を含む値で YAML が壊れる。
 自由記述キーの値を単引用符で囲み、汎用 `Value` から必要なフィールドだけを読む。
 解析に失敗した更新は無視し、直前の情報を使う。
+
+### 区間タイムと今の差
+
+ゲームは他車の区間タイムを出さないため、全車の位置（`lap_dist_pct`）からコースの 100 か所とセクターの境目を通過した時刻を求める。
+
+- セクターの境目: iRacing は `SplitTimeInfo`。無いゲームでは 3 等分（`basis: thirds`）
+- 今の差（`live_s`）: 後ろの車が最後に通過した場所で、前の車が通過した時刻との差。公式の差（`gap_s`）はライン通過時の値なので、最大 1 周古い
+- 走行順（`live_position`、`running_ahead` / `running_behind`）: 周回数と位置の順。公式の順位と違うときだけ前後の車を別に出す
+- 失った場所（`losses`）: 直前の 1 周を 5% ごとに比べた差
+- ワープ・1 秒を超えるデータの欠落・コース外への移動があった周は使わない。ピットを通った周はベストに数えない
+
+### このままの着順
+
+[`forecast`](../crates/vr-engine/src/forecast.rs) は、直近 4 周の中央値（ピット・黄旗・2 秒以上遅い周を除く、2 周以上）を各車のペースとし、残り周回を掛けて、ゴールでの差と出会う周を求める。これから止まる分は数えない。
+
+### コーナーごとの比較
+
+`vr sessions corners` は、残した周の波形から、直前の周を自己ベストとコーナーごとに比べる。ブレーキ開始・最低速度・アクセル・出口速度の差、直近の周の中央値で「いつも失っている場所」、最高速と低・中・高速コーナーの最低速度の差（空力の損傷の手がかり）を出す。
 
 ### 挙動の推定と変更案
 

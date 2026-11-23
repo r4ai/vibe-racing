@@ -48,6 +48,7 @@ fn frame(kind: SessionKind, t: f64, cars: Vec<CarState>, player: usize) -> Frame
                 name: "Test Ring".into(),
                 config: None,
                 length_m: None,
+                sectors: Vec::new(),
             }),
             uid: None,
             time_total_s: None,
@@ -655,6 +656,7 @@ fn brief_text_shows_session_details() {
         name: "Spa".into(),
         config: Some("GP".into()),
         length_m: None,
+        sectors: Vec::new(),
     });
     f.session.flags = vec![];
     f.player.as_mut().unwrap().incidents = Some(3);
@@ -1178,6 +1180,7 @@ fn track_name_with_empty_config() {
         name: "Oval".into(),
         config: Some(String::new()),
         length_m: None,
+        sectors: Vec::new(),
     });
     let mut st = state();
     st.ingest(f);

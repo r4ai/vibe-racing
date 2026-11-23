@@ -123,6 +123,10 @@ impl RaceApi for HttpClient {
         self.get("/v1/strategy", &())
     }
 
+    fn forecast(&self) -> ApiResult<ForecastReport> {
+        self.get("/v1/forecast", &())
+    }
+
     fn live(&self) -> ApiResult<LiveReport> {
         self.get("/v1/live", &())
     }
@@ -132,6 +136,9 @@ impl RaceApi for HttpClient {
     }
     fn laps(&self, p: &LapsParams) -> ApiResult<LapsReport> {
         self.get("/v1/laps", p)
+    }
+    fn sectors(&self, p: &SectorsParams) -> ApiResult<SectorsReport> {
+        self.get("/v1/sectors", p)
     }
     fn events(&self, p: &EventsParams) -> ApiResult<EventsReport> {
         self.get("/v1/events", p)

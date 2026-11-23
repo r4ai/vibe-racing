@@ -484,6 +484,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
                 name,
                 config: si.track_config.clone(),
                 length_m: si.track_length_m,
+                sectors: si.sectors.clone(),
             }),
             uid: v.i32("SessionUniqueID").map(i64::from),
             time_total_s: sane_time(v.f64("SessionTimeTotal")),

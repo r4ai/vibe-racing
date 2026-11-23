@@ -248,6 +248,8 @@ fn http_endpoints_serve_race_api() {
 
     let (_, v) = s.get("/v1/laps?last=2");
     assert_eq!(v["laps"].as_array().unwrap().len(), 2);
+    let (_, v) = s.get("/v1/sectors?car=16");
+    assert_eq!(v["rows"][1]["role"], "asked");
     let (_, v) = s.get("/v1/fuel");
     assert!(v["fuel"]["fuel_l"].as_f64().is_some());
     let (_, v) = s.get("/v1/events?since=3&limit=2");
