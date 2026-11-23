@@ -952,7 +952,7 @@ mod tests {
     fn report(c: CarTelemetry) -> CarReport {
         CarReport {
             meta: Meta {
-                game: "assetto".into(),
+                game: "ac".into(),
                 source: SourceKind::Live,
                 connected: true,
                 age_ms: Some(0),

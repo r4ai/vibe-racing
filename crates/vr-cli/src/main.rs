@@ -328,7 +328,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let keep = !no_sessions
                 && matches!(
                     cli.src.game(),
-                    sources::Game::Iracing | sources::Game::Assetto | sources::Game::AssettoUdp
+                    sources::Game::Iracing | sources::Game::Ac | sources::Game::AcUdp
                 );
             let record = record.map(|p| (p, record_hz));
             serve(&cli.src, port, record, keep, !no_import)

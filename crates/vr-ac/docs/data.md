@@ -1,17 +1,17 @@
 # Assetto Corsa が出すデータと対応
 
-Assetto Corsa（初代、Kunos）が外へ出す全てのデータと、`vr-assetto` がそれぞれをどう扱うかの一覧。
+Assetto Corsa（初代、Kunos）が外へ出す全てのデータと、`vr-ac` がそれぞれをどう扱うかの一覧。
 ACC（Assetto Corsa Competizione）・AC EVO は構造が違う別のゲームで、対象外。
 
 ## 出力の経路
 
 | 経路                   | 場所・方式                                                       | 内容                                                    | 対応                                   |
 | ---------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------- |
-| 共有メモリ `physics`   | `Local\acpmf_physics`                                            | 自車の物理（毎物理ステップ）                            | 全項目（`--game assetto`）             |
+| 共有メモリ `physics`   | `Local\acpmf_physics`                                            | 自車の物理（毎物理ステップ）                            | 全項目（`--game ac`）             |
 | 共有メモリ `graphics`  | `Local\acpmf_graphics`                                           | 自車の周回・順位・旗・セッション                        | 全項目                                 |
 | 共有メモリ `static`    | `Local\acpmf_static`                                             | 車・コース・補助設定（起動時固定）                      | 全項目                                 |
 | CrewChief 拡張         | `Local\acpmf_crewchief`<br/>（Python アプリ CrewChiefEx が書く） | 全車の位置・周回・タイム・ピット                        | 全項目。あれば他車に使う               |
-| UDP リモートテレメトリ | UDP 9996（ハンドシェイク後に配信）                               | 自車の物理（`RTCarInfo`）<br/>全車の周回完了（`RTLap`） | 全項目（`--game assetto-udp`）         |
+| UDP リモートテレメトリ | UDP 9996（ハンドシェイク後に配信）                               | 自車の物理（`RTCarInfo`）<br/>全車の周回完了（`RTLap`） | 全項目（`--game ac-udp`）         |
 | セッション結果         | `Documents\Assetto Corsa\out\race_out.json`                      | 終わったセッションの全車の周回                          | 付随データの `info.results` に渡す     |
 | 走行記録               | `Documents\Assetto Corsa\ctelemetry\`                            | 暗号化された独自形式                                    | 非対応（仕様非公開）                   |
 | 自己ベスト             | `Documents\Assetto Corsa\personalbest.ini`                       | 車とコースごとのベストタイム                            | 非対応（セッション外の記録）           |

@@ -15,7 +15,7 @@ struct Report {
     version: String,
     platform: String,
     iracing: Check,
-    assetto: Check,
+    ac: Check,
     server: Check,
     skills: Vec<String>,
     hints: Vec<String>,
@@ -69,7 +69,7 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
         },
     };
 
-    r.assetto = match vr_assetto::open_live(None) {
+    r.ac = match vr_ac::open_live(None) {
         Err(e) => Check {
             ok: false,
             detail: e.to_string(),
@@ -145,7 +145,7 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
     if !r.server.ok {
         r.hints.push("run `vr serve` in a separate terminal while racing for lap history, fuel averages and gap trends".into());
     }
-    if !r.iracing.ok && !r.assetto.ok {
+    if !r.iracing.ok && !r.ac.ok {
         r.hints.push(
             "no live iRacing or Assetto Corsa session; `vr serve --game synthetic --speed 10` gives a demo race"
                 .into(),
@@ -162,7 +162,7 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
             let mark = |c: &Check| if c.ok { "ok " } else { "-- " };
             println!("vr {} ({})", r.version, r.platform);
             println!("{}iracing: {}", mark(&r.iracing), r.iracing.detail);
-            println!("{}assetto: {}", mark(&r.assetto), r.assetto.detail);
+            println!("{}ac:      {}", mark(&r.ac), r.ac.detail);
             println!("{}server:  {}", mark(&r.server), r.server.detail);
             if r.skills.is_empty() {
                 println!("-- skill:   not installed");

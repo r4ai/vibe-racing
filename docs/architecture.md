@@ -58,7 +58,7 @@ flowchart TB
     end
     subgraph Adapter["入力アダプタ層"]
         IR["vr-iracing<br/>共有メモリ・セッション YAML"]
-        AC["vr-assetto<br/>共有メモリ・UDP・結果ファイル"]
+        AC["vr-ac<br/>共有メモリ・UDP・結果ファイル"]
         Replay["vr-replay<br/>NDJSON 再生・合成レース"]
     end
     Core["vr-core<br/>Frame・TelemetrySource"]
@@ -114,7 +114,7 @@ flowchart LR
 | 境界           | 方式                                                                                                                                                      | 所有者                                                                    |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | ゲーム → `vr`  | iRacing 共有メモリ `Local\IRSDKMemMapFileName`（読取専用）<br/>と新データ通知イベント                                                                     | iRacing                                                                   |
-| ゲーム → `vr`  | Assetto Corsa 共有メモリ `Local\acpmf_*`（読取専用、4 ms ごとに確認）<br/>または UDP 9996、`race_out.json`（[一覧](../crates/vr-assetto/docs/data.md)）   | Assetto Corsa・CrewChief のアプリ                                         |
+| ゲーム → `vr`  | Assetto Corsa 共有メモリ `Local\acpmf_*`（読取専用、4 ms ごとに確認）<br/>または UDP 9996、`race_out.json`（[一覧](../crates/vr-ac/docs/data.md)）   | Assetto Corsa・CrewChief のアプリ                                         |
 | CLI → サーバー | HTTP/JSON、`127.0.0.1` 限定、既定ポート 47800                                                                                                             | `vr-server`                                                               |
 | 過去の画面     | `GET /`（ブラウザ）と `/v1/sessions`、周の波形 `…/laps`。読み取り専用                                                                                     | `vr-server`                                                               |
 | イベント配信   | SSE `/v1/events/stream`（event 名 `race`）                                                                                                                | `vr-server`                                                               |
@@ -144,7 +144,7 @@ Parquet は一度書いたら変えないファイルを足していく。書き
 flowchart BT
     core[vr-core]
     iracing[vr-iracing] --> core
-    assetto[vr-assetto] --> core
+    assetto[vr-ac] --> core
     replay[vr-replay] --> core
     engine[vr-engine] --> core
     server[vr-server] --> engine
@@ -169,7 +169,7 @@ flowchart BT
 | ------ | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------- |
 | 共通型 | [`crates/vr-core`](../crates/vr-core)                                     | `Frame`・`TelemetrySource`・`Capabilities`                             | 低       |
 | 入力   | [`crates/vr-iracing`](../crates/vr-iracing)                               | ヘッダ・変数表の解析、YAML サニタイズ、`Frame` 変換、Win32 マッピング  | 中       |
-| 入力   | [`crates/vr-assetto`](../crates/vr-assetto)                               | 全ページ・UDP の配置、`Frame` 変換、セッションの時計、Win32 マッピング | 中       |
+| 入力   | [`crates/vr-ac`](../crates/vr-ac)                               | 全ページ・UDP の配置、`Frame` 変換、セッションの時計、Win32 マッピング | 中       |
 | 入力   | [`crates/vr-replay`](../crates/vr-replay)                                 | NDJSON 記録・再生、ペーシング、合成レース                              | 低       |
 | 解析   | [`crates/vr-engine/src/state.rs`](../crates/vr-engine/src/state.rs)       | 周回確定、燃費・ギャップ・近傍車、イベント検出                         | 高       |
 | 解析   | [`crates/vr-engine/src/api.rs`](../crates/vr-engine/src/api.rs)           | `RaceApi` と引数型、`SharedState` への委譲                             | 中       |

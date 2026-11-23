@@ -9,7 +9,7 @@ use vr_core::{
 use crate::layout::{CREWCHIEF, GRAPHICS, PHYSICS, STATIC, VEHICLE, View};
 use crate::session::{Clock, Sample, Tracker};
 
-pub const GAME: &str = "assetto";
+pub const GAME: &str = "ac";
 /// Assetto Corsa's `carId` of the player's car.
 pub const PLAYER_IDX: usize = 0;
 const G: f64 = 9.806_65;
@@ -666,7 +666,7 @@ mod tests {
         let f = build_frame(&snap(&p, &g, &s), &mut t, 7, 1_000);
         assert_eq!(
             (f.game.as_str(), f.tick, f.timestamp_ms),
-            ("assetto", 7, 1_000)
+            ("ac", 7, 1_000)
         );
         let ss = &f.session;
         assert_eq!(

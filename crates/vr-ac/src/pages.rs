@@ -216,7 +216,7 @@ mod imp {
     impl Mapped {
         pub fn open() -> Result<Self, SourceError> {
             Err(SourceError::Unsupported(
-                "Assetto Corsa shared memory is only available on Windows (use --game assetto-udp from another machine)".into(),
+                "Assetto Corsa shared memory is only available on Windows (use --game ac-udp from another machine)".into(),
             ))
         }
     }

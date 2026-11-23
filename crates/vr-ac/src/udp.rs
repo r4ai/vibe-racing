@@ -499,7 +499,7 @@ mod tests {
         let addr = game.local_addr().unwrap();
         let mut src = UdpSource::open(addr).unwrap();
         assert_eq!(src.server(), addr);
-        assert_eq!(src.game(), "assetto");
+        assert_eq!(src.game(), "ac");
         assert!(src.extras().is_none());
         assert!(matches!(src.poll(Duration::ZERO).unwrap(), Poll::Idle));
 

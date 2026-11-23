@@ -14,7 +14,7 @@ vr-core = { path = "crates/vr-core" }
 vr-engine = { path = "crates/vr-engine" }
 vr-replay = { path = "crates/vr-replay" }
 vr-iracing = { path = "crates/vr-iracing" }
-vr-assetto = { path = "crates/vr-assetto" }
+vr-ac = { path = "crates/vr-ac" }
 vr-server = { path = "crates/vr-server" }
 
 anyhow = "1.0.98"

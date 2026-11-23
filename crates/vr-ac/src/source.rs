@@ -62,7 +62,7 @@ impl Results {
 }
 
 /// Live Assetto Corsa telemetry over any [`Pages`].
-pub struct AssettoSource<P: Pages> {
+pub struct AcSource<P: Pages> {
     pages: P,
     tracker: Tracker,
     last_packets: Option<(i32, i32)>,
@@ -72,7 +72,7 @@ pub struct AssettoSource<P: Pages> {
     results: Option<Results>,
 }
 
-impl<P: Pages> AssettoSource<P> {
+impl<P: Pages> AcSource<P> {
     pub fn new(mut pages: P) -> Self {
         let crewchief = pages.read(Page::CrewChief, 0, 4).is_some();
         Self {
@@ -115,7 +115,7 @@ impl<P: Pages> AssettoSource<P> {
     }
 }
 
-impl<P: Pages> TelemetrySource for AssettoSource<P> {
+impl<P: Pages> TelemetrySource for AcSource<P> {
     fn game(&self) -> &str {
         GAME
     }
@@ -214,8 +214,8 @@ mod tests {
     fn reads_new_steps_only_while_driving() {
         let (mut p, mut g, s) = snapshot();
         let m = MemoryPages::default();
-        let mut src = AssettoSource::new(m.clone());
-        assert_eq!(src.game(), "assetto");
+        let mut src = AcSource::new(m.clone());
+        assert_eq!(src.game(), "ac");
         assert!(!src.capabilities().multi_car);
         assert!(src.extras().is_none(), "nothing read yet");
         assert!(matches!(
@@ -292,7 +292,7 @@ mod tests {
         let path = results_path(docs);
         assert!(path.ends_with("Assetto Corsa/out/race_out.json"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut src = AssettoSource::new(m.clone()).with_results(path.clone());
+        let mut src = AcSource::new(m.clone()).with_results(path.clone());
         assert!(src.capabilities().multi_car && src.capabilities().gaps);
         let Poll::Frame(f) = src.poll(Duration::ZERO).unwrap() else {
             panic!("no frame")
@@ -364,7 +364,7 @@ mod tests {
         let (p, g, s) = snapshot();
         let m = MemoryPages::default();
         put(&m, &p, &g, &s);
-        let mut src = AssettoSource::new(Tearing { inner: m, reads: 0 });
+        let mut src = AcSource::new(Tearing { inner: m, reads: 0 });
         let Poll::Frame(f) = src.poll(Duration::ZERO).unwrap() else {
             panic!("no frame")
         };

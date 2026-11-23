@@ -1,5 +1,5 @@
 [package]
-name = "vr-assetto"
+name = "vr-ac"
 description = "Assetto Corsa shared-memory and UDP telemetry adapter for vibe-racing"
 version.workspace = true
 edition.workspace = true

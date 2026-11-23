@@ -1,8 +1,8 @@
 //! Assetto Corsa's pages through the analysis: laps, fuel, sectors and the
 //! wheels come out as they do for any game.
 
-use vr_assetto::layout::{CREWCHIEF, GRAPHICS, PHYSICS, STATIC, VEHICLE, Writer};
-use vr_assetto::{Snapshot, Tracker, build_frame};
+use vr_ac::layout::{CREWCHIEF, GRAPHICS, PHYSICS, STATIC, VEHICLE, Writer};
+use vr_ac::{Snapshot, Tracker, build_frame};
 use vr_core::Capabilities;
 use vr_engine::{LapsParams, RaceApi, RaceState, SectorBasis, SourceKind};
 
@@ -11,7 +11,7 @@ const HZ: f64 = 10.0;
 
 /// The player and one rival, three laps and a bit at Monza.
 fn race() -> RaceState {
-    let mut st = RaceState::new("assetto", SourceKind::Live, Capabilities::ALL);
+    let mut st = RaceState::new("ac", SourceKind::Live, Capabilities::ALL);
     let mut tracker = Tracker::default();
     let mut s = Writer::new(&STATIC);
     s.text("carModel", "ks_ferrari_488_gt3")
@@ -112,7 +112,7 @@ fn laps_fuel_sectors_and_rivals() {
     let s = st.standings(&Default::default()).unwrap();
     assert_eq!(s.rows.len(), 2, "{s:?}");
     let brief = st.brief().unwrap().to_text();
-    assert!(brief.starts_with("[assetto live"), "{brief}");
+    assert!(brief.starts_with("[ac live"), "{brief}");
     assert!(brief.contains("monza"), "{brief}");
     assert!(brief.contains("Grace"), "{brief}");
 

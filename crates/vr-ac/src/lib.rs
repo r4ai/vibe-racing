@@ -22,13 +22,13 @@ use std::path::Path;
 pub use convert::{GAME, Snapshot, build_frame};
 pub use pages::{Mapped, MemoryPages, Page, Pages};
 pub use session::Tracker;
-pub use source::{AssettoSource, results_path};
+pub use source::{AcSource, results_path};
 pub use udp::UdpSource;
 
 /// Open the live game (Windows only). With the user's documents folder, the
 /// results the game writes after each session come along.
-pub fn open_live(documents: Option<&Path>) -> Result<AssettoSource<Mapped>, vr_core::SourceError> {
-    let src = AssettoSource::new(Mapped::open()?);
+pub fn open_live(documents: Option<&Path>) -> Result<AcSource<Mapped>, vr_core::SourceError> {
+    let src = AcSource::new(Mapped::open()?);
     Ok(match documents {
         Some(d) => src.with_results(results_path(d)),
         None => src,

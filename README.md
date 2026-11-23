@@ -161,13 +161,13 @@ vr serve
 コースに出て `vr serve` を起動する（`--game` 無しなら iRacing、無ければ Assetto Corsa を探す）。
 
 ```powershell
-vr serve --game assetto
+vr serve --game ac
 ```
 
 - 他の車の位置・周回は、CrewChief の Python アプリ（CrewChiefEx）をゲーム内で有効にしたときだけ分かる。無ければ自車のみ
-- 別の PC や OS からは UDP で読む（自車と全車の周回完了のみ）: `vr serve --game assetto-udp --host <ゲームの PC>`
+- 別の PC や OS からは UDP で読む（自車と全車の周回完了のみ）: `vr serve --game ac-udp --host <ゲームの PC>`
 - セッション後の `Documents\Assetto Corsa\out\race_out.json` は `vr info results` で読める
-- 何がどう読めるかは [crates/vr-assetto/docs/data.md](crates/vr-assetto/docs/data.md)
+- 何がどう読めるかは [crates/vr-ac/docs/data.md](crates/vr-ac/docs/data.md)
 
 ### 声で聞く
 

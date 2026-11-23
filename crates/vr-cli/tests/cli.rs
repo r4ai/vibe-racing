@@ -450,10 +450,10 @@ fn doctor_without_server() {
             .iter()
             .any(|h| h.as_str().unwrap().contains("vr serve"))
     );
-    assert!(d["assetto"]["ok"].is_boolean(), "{d}");
+    assert!(d["ac"]["ok"].is_boolean(), "{d}");
     let o = run(&disc, &["doctor"]);
     assert!(stdout(&o).contains("-- server:"), "{}", stdout(&o));
-    assert!(stdout(&o).contains("assetto: "), "{}", stdout(&o));
+    assert!(stdout(&o).contains("ac:      "), "{}", stdout(&o));
     let o = vr(&disc)
         .env("VR_SERVER", "http://127.0.0.1:9")
         .args(["doctor"])
@@ -674,8 +674,8 @@ fn sessions_can_be_managed() {
 
 /// A stand-in for the game's UDP telemetry: answers the handshake and sends
 /// the car until the test ends.
-fn fake_assetto_udp() -> std::net::SocketAddr {
-    use vr_assetto::layout::{HANDSHAKE_RESPONSE, RT_CAR_INFO, RT_LAP, Writer};
+fn fake_ac_udp() -> std::net::SocketAddr {
+    use vr_ac::layout::{HANDSHAKE_RESPONSE, RT_CAR_INFO, RT_LAP, Writer};
     let game = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let addr = game.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -726,13 +726,13 @@ fn fake_assetto_udp() -> std::net::SocketAddr {
 #[test]
 fn assetto_corsa_over_udp() {
     let (_d, disc) = tmp();
-    let host = fake_assetto_udp().to_string();
+    let host = fake_ac_udp().to_string();
     let o = run(
         &disc,
         &[
             "standings",
             "--game",
-            "assetto-udp",
+            "ac-udp",
             "--host",
             &host,
             "-f",
@@ -741,12 +741,12 @@ fn assetto_corsa_over_udp() {
     );
     assert!(o.status.success(), "{}", stderr(&o));
     let s = json(&o);
-    assert_eq!(s["meta"]["game"], "assetto", "{s}");
+    assert_eq!(s["meta"]["game"], "ac", "{s}");
     assert_eq!(s["meta"]["source"], "oneshot");
-    let text = run(&disc, &["brief", "--game", "assetto-udp", "--host", &host]);
+    let text = run(&disc, &["brief", "--game", "ac-udp", "--host", &host]);
     assert!(text.status.success(), "{}", stderr(&text));
     assert!(
-        stdout(&text).starts_with("[assetto oneshot"),
+        stdout(&text).starts_with("[ac oneshot"),
         "{}",
         stdout(&text)
     );
@@ -756,7 +756,7 @@ fn assetto_corsa_over_udp() {
 #[test]
 fn assetto_corsa_without_the_game() {
     let (_d, disc) = tmp();
-    let o = run(&disc, &["brief", "--game", "assetto"]);
+    let o = run(&disc, &["brief", "--game", "ac"]);
     if o.status.success() {
         eprintln!("live Assetto Corsa session detected; skipping no-data assertion");
         return;
