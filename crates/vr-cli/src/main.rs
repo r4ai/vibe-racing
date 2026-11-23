@@ -122,7 +122,7 @@ enum Cmd {
     },
     /// Sector times of you and the cars around, and where the lap is lost.
     Sectors {
-        /// Car number to compare with (default: the car ahead).
+        /// Car number to compare with, or `ahead` / `behind` (default: the car ahead).
         #[arg(long)]
         car: Option<String>,
     },
@@ -173,6 +173,14 @@ enum Cmd {
     Sessions {
         #[command(subcommand)]
         cmd: sessions::SessionsCmd,
+    },
+    /// Ask the kept sessions anything in SQL (DuckDB): every frame driven,
+    /// every car, every corner of every lap. `--schema` tells the tables.
+    Query {
+        /// One SELECT (or WITH, FROM, DESCRIBE, SUMMARIZE).
+        sql: Option<String>,
+        #[arg(long)]
+        schema: bool,
     },
     /// Record normalized telemetry to NDJSON without serving.
     Record {
@@ -264,6 +272,29 @@ impl Render for SnapshotReport {
     }
 }
 
+fn query(sql: Option<String>, schema: bool, fmt: Format) -> anyhow::Result<ExitCode> {
+    let sql = match sql {
+        Some(s) if !schema => s,
+        _ => {
+            println!("{}", vr_server::lake::SCHEMA);
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+    match vr_server::lake::query(&vr_server::sessions_dir(), &sql) {
+        Ok(r) => {
+            match fmt {
+                Format::Json => println!("{}", serde_json::to_string(&r)?),
+                _ => print!("{}", r.to_text()),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn emit<T: Render>(fmt: Format, v: ApiResult<T>) -> anyhow::Result<ExitCode> {
     let v = v?;
     match fmt {
@@ -304,6 +335,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Doctor => doctor::run(server, fmt),
         Cmd::Skill { cmd } => skill::run(cmd),
         Cmd::Sessions { cmd } => sessions::run(cmd, fmt),
+        Cmd::Query { sql, schema } => query(sql, schema, fmt),
         cmd => {
             let backend = client::resolve(&cli.src, server)?;
             let api = backend.api();

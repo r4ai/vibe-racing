@@ -176,7 +176,9 @@ fn corner_advice(r: &CornersReport) -> Option<String> {
         .filter(|&i| loss(i) >= CORNER_S)
         .max_by(|&a, &b| loss(a).total_cmp(&loss(b)))?;
     let c = &r.corners[i];
-    let name = if i + 1 == r.corners.len() && i > 0 {
+    let name = if let Some(n) = &c.name {
+        n.clone()
+    } else if i + 1 == r.corners.len() && i > 0 {
         "最終コーナー".to_string()
     } else {
         format!("{}コーナー", c.number)
@@ -670,13 +672,26 @@ impl Voice<'_> {
         let Some(me) = me.filter(|m| m.last.iter().any(Option::is_some)) else {
             return Ok(NO_SECTORS.into());
         };
-        let times: Vec<String> = me
+        // The verdict, not the times: nobody keeps six numbers in mind.
+        let lost: Option<f64> = me
             .last
             .iter()
-            .map(|t| t.map_or("不明".into(), |t| format!("{t:.1}")))
-            .collect();
-        let own = format!("セクター1から、{}。", times.join("、"));
-        Ok(join([Some(own), self.worst_sector(&r)]))
+            .zip(&me.best)
+            .map(|(a, b)| Some((*a)? - (*b)?))
+            .sum();
+        let own = lost.map(|l| {
+            if l >= STEADY_S {
+                format!("前の周は自己ベストから{}落ち。", sec(l))
+            } else {
+                "前の周は自己ベスト並み。".to_string()
+            }
+        });
+        let named = r.losses.first().filter(|l| l.lost_s >= STEADY_S);
+        let place = match named.and_then(|l| Some((l.name.as_ref()?, l.lost_s))) {
+            Some((name, s)) => Some(format!("{name}で前に{}負けてる。", sec(s))),
+            None => self.worst_sector(&r),
+        };
+        Ok(or(join([own, place]), "区間の差は無い、いいペースだ。"))
     }
 
     /// The sector to work on.
@@ -922,6 +937,9 @@ impl Voice<'_> {
 
 /// `セクター2の中盤`
 fn spot(starts: &[f64], s: &StretchLoss) -> String {
+    if let Some(name) = &s.name {
+        return name.clone();
+    }
     let from = starts.get(s.sector - 1).copied().unwrap_or(0.0);
     let to = starts.get(s.sector).copied().unwrap_or(1.0);
     let at = ((s.from + s.to) / 2.0 - from) / (to - from);
@@ -995,6 +1013,15 @@ mod tests {
             throttle_m: Some(0.0),
             exit_kmh: 150.0,
             reference_min_kmh: 90.0,
+            name: None,
+            brake_before_m: None,
+            reference_brake_before_m: None,
+            gear: None,
+            reference_gear: None,
+            entry_kmh: 0.0,
+            reference_entry_kmh: 0.0,
+            min_throttle: 0,
+            reference_min_throttle: 0,
         }
     }
 
@@ -1032,6 +1059,12 @@ mod tests {
         assert_eq!(
             corner_advice(&r).unwrap(),
             "2コーナーで0.3秒失ってる。ブレーキをあと5m遅らせられる。"
+        );
+        let mut named = r.clone();
+        named.corners[1].name = Some("スプーン".into());
+        assert_eq!(
+            corner_advice(&named).unwrap(),
+            "スプーンで0.3秒失ってる。ブレーキをあと5m遅らせられる。"
         );
         // A habit counts more than one lap; the last corner has its name.
         let r = report(r.corners, vec![0.0, 0.04, 0.12], 3);

@@ -36,6 +36,9 @@ use crate::wav;
 /// What the driver hears while the engineer looks something up.
 pub const STANDBY: &str = "確認する、少し待って。";
 
+/// In place of an output the session was sent before.
+const SAME: &str = "（前に送ったものから変わっていない）";
+
 /// What the driver hears when the agent has nothing to give any more.
 pub const EXHAUSTED: &str = "AIの利用枠を使い切った。決まった質問には答えられる。";
 /// What the driver hears when the agent does not answer.
@@ -223,6 +226,41 @@ pub struct Deps {
     pub live: Option<Feed>,
     /// Silence after which the driver is told to wait; `None`: never told.
     pub standby: Option<Duration>,
+}
+
+/// The data, without the outputs the session was sent before and has still:
+/// it is read again with every later question. `sent` is what each command
+/// printed when it was last sent.
+fn unsent(sent: &mut BTreeMap<String, String>, data: &str) -> String {
+    let blocks: Vec<String> = data
+        .split("\n\n$ ")
+        .enumerate()
+        .map(|(i, b)| {
+            if i == 0 {
+                b.to_string()
+            } else {
+                format!("$ {b}")
+            }
+        })
+        .map(|b| {
+            let Some((command, out)) = b.split_once('\n').filter(|_| b.starts_with("$ ")) else {
+                return b;
+            };
+            // The first line of most outputs tells how old they are.
+            let body: String = out
+                .lines()
+                .skip_while(|l| l.starts_with('['))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if sent.get(command) == Some(&body) {
+                format!("{command}\n{SAME}")
+            } else {
+                sent.insert(command.to_string(), body);
+                b
+            }
+        })
+        .collect();
+    blocks.join("\n\n")
 }
 
 pub fn render_prompt(template: &str, text: &str, context: Option<&str>) -> String {
@@ -622,6 +660,8 @@ struct Engine {
     now: Values,
     heard: Option<Instant>,
     log: VecDeque<Exchange>,
+    /// What each command printed when it was last sent to this session.
+    sent: BTreeMap<String, String>,
     /// What was said last, and whether it was a question.
     last_said: String,
     /// When the agent spoke of its own accord.
@@ -1255,7 +1295,8 @@ impl Engine {
     fn ask(&mut self, turn: Turn, started: Instant, text: &str, data: Option<&str>, spoken: bool) {
         self.newest = self.newest.max(turn);
         let template = self.prompt_template.replace("{radio}", &self.status());
-        let prompt = self.missed() + &render_prompt(&template, text, data);
+        let data = data.map(|d| unsent(&mut self.sent, d));
+        let prompt = self.missed() + &render_prompt(&template, text, data.as_deref());
         let mut cmd = AgentCmd::Prompt {
             turn,
             text: prompt,
@@ -1357,6 +1398,7 @@ impl Engine {
         for e in &mut self.log {
             e.known = false;
         }
+        self.sent.clear();
     }
 
     fn agent_event(&mut self, ev: AgentEvent) {
@@ -2322,6 +2364,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         now: Values::new(),
         heard: None,
         log: VecDeque::new(),
+        sent: BTreeMap::new(),
         last_said: String::new(),
         last_agent_call: None,
         resting: None,
@@ -2730,6 +2773,52 @@ mod tests {
                 "BBと順位取得したての実データ:\nP4\n\nBB 54"
             ]
         );
+    }
+
+    #[test]
+    fn what_the_session_has_is_not_sent_again() {
+        let mut sent = BTreeMap::new();
+        let first = "$ vr brief
+[live age=3ms]
+P4
+
+$ vr sessions corners
+スプーン +0.1";
+        assert_eq!(unsent(&mut sent, first), first);
+        // The age changes, nothing else: the same.
+        let again = "$ vr brief
+[live age=9ms]
+P4
+
+$ vr sessions corners
+スプーン +0.2";
+        assert_eq!(
+            unsent(&mut sent, again),
+            format!(
+                "$ vr brief
+{SAME}
+
+$ vr sessions corners
+スプーン +0.2"
+            )
+        );
+        // What is not a command goes as it is.
+        for _ in 0..2 {
+            assert_eq!(
+                unsent(
+                    &mut sent,
+                    "P4
+
+BB 54"
+                ),
+                "P4
+
+BB 54"
+            );
+        }
+        // A new session has nothing yet.
+        sent.clear();
+        assert_eq!(unsent(&mut sent, again), again);
     }
 
     #[tokio::test]

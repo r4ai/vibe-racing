@@ -219,8 +219,10 @@ fn sectors(delta: [f64; 3]) -> SectorsReport {
             to_m: None,
             sector: 2,
             lost_s: 0.18,
+            name: None,
         }],
         gains: Vec::new(),
+        corners: Vec::new(),
     }
 }
 
@@ -514,12 +516,23 @@ fn sector_times_and_where_time_is_lost() {
     m.sectors = Some(sectors([0.2, -0.3, 0.04]));
     assert_eq!(
         say(&m, SpeechTopic::Sectors),
-        "セクター1から、30.0、40.0、45.0。負けてるのはセクター1、0.2秒。"
+        "前の周は自己ベストから0.3秒落ち。負けてるのはセクター1、0.2秒。"
     );
     assert_eq!(
         say(&m, SpeechTopic::Losing),
         "セクター2の終盤で0.2秒負けてる、そこを詰めよう。"
     );
+    // A known track names the place.
+    m.sectors.as_mut().unwrap().losses[0].name = Some("スプーン".into());
+    assert_eq!(
+        say(&m, SpeechTopic::Sectors),
+        "前の周は自己ベストから0.3秒落ち。スプーンで前に0.2秒負けてる。"
+    );
+    assert_eq!(
+        say(&m, SpeechTopic::Losing),
+        "スプーンで0.2秒負けてる、そこを詰めよう。"
+    );
+    m.sectors.as_mut().unwrap().losses[0].name = None;
     // After a stop of either car the sectors tell nothing.
     let lap = |pit| LapRecord {
         lap: 5,
@@ -556,15 +569,29 @@ fn sector_times_and_where_time_is_lost() {
     );
     assert_eq!(
         say(&m, SpeechTopic::Sectors),
-        "セクター1から、30.0、40.0、45.0。"
+        "前の周は自己ベストから0.3秒落ち。"
     );
+    let r = m.sectors.as_mut().unwrap();
+    let last = r.rows[0].last.clone();
+    r.rows[0].best = last;
+    assert_eq!(say(&m, SpeechTopic::Sectors), "前の周は自己ベスト並み。");
+    m.sectors.as_mut().unwrap().versus = None;
+    assert_eq!(say(&m, SpeechTopic::Sectors), "前の周は自己ベスト並み。");
+    let r = m.sectors.as_mut().unwrap();
+    r.versus = Some(car("16", 3));
+    r.rows[0].best = r.rows[0].last.iter().map(|t| t.map(|t| t - 0.1)).collect();
     let r = m.sectors.as_mut().unwrap();
     r.versus = None;
     r.rows[0].best[1] = Some(39.5);
     assert!(say(&m, SpeechTopic::Sectors).ends_with("セクター2が自己ベストから0.5秒落ち。"));
     let r = m.sectors.as_mut().unwrap();
     r.rows[0].last = vec![Some(30.0), None, Some(45.0)];
-    assert!(say(&m, SpeechTopic::Sectors).starts_with("セクター1から、30.0、不明、45.0。"));
+    // Without every sector, no verdict on the lap.
+    let partly = say(&m, SpeechTopic::Sectors);
+    assert!(
+        partly.ends_with("が自己ベストから0.1秒落ち。") && !partly.starts_with("前の周"),
+        "{partly}"
+    );
     m.sectors.as_mut().unwrap().rows[0].last = vec![None; 3];
     assert_eq!(
         say(&m, SpeechTopic::Sectors),
@@ -878,4 +905,25 @@ fn old_data_is_not_told_as_new() {
         s.to_text(),
         "テレメトリが来ていない。コースに出たら答える。\n"
     );
+}
+
+#[test]
+fn the_ideal_lap_takes_the_sectors_done_now_and_empty_comparisons_go() {
+    let mut r = sectors([0.2, -0.3, 0.04]);
+    assert!(
+        r.to_text().contains(" | ideal lap 1:54.700"),
+        "{}",
+        r.to_text()
+    );
+    // A sector without a best, done on this lap; one done faster than the best.
+    r.rows[0].best[0] = None;
+    r.rows[0].current = vec![Some(29.0), Some(39.0), None];
+    let text = r.to_text();
+    assert!(text.contains(" | ideal lap 1:52.900"), "{text}");
+    assert!(text.contains("you vs #16"), "{text}");
+    r.delta = vec![None; 3];
+    r.rows[0].current = vec![None; 3];
+    let text = r.to_text();
+    assert!(!text.contains("you vs"), "{text}");
+    assert!(!text.contains("ideal lap"), "{text}");
 }

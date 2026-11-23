@@ -439,6 +439,25 @@ impl SectorsReport {
             SectorBasis::Thirds => "thirds of the lap: the game tells no sector lines",
         };
         let _ = writeln!(out, "sectors (derived from car positions; {basis}):");
+        if self.corners.iter().any(|c| !c.is_empty()) {
+            let parts: Vec<String> = self
+                .corners
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    format!(
+                        "S{} {}",
+                        i + 1,
+                        if c.is_empty() {
+                            "-".into()
+                        } else {
+                            c.join("・")
+                        }
+                    )
+                })
+                .collect();
+            let _ = writeln!(out, "corners: {}", parts.join(" | "));
+        }
         let list = |v: &[Option<f64>]| {
             let parts: Vec<String> = v.iter().map(|t| opt(*t, fmt_lap)).collect();
             parts.join(" / ")
@@ -456,12 +475,73 @@ impl SectorsReport {
             if let Some(l) = r.lap {
                 let _ = write!(out, " | lap {l}");
             }
+            // The lap of all the best sectors: what is in the car and the driver.
+            // Sectors done on the lap being driven count as soon as they are.
+            let ideal: Option<f64> = r
+                .best
+                .iter()
+                .zip(r.current.iter().chain(std::iter::repeat(&None)))
+                .map(|(b, c)| match (b, c) {
+                    (Some(b), Some(c)) => Some(b.min(*c)),
+                    (b, c) => b.or(*c),
+                })
+                .sum();
+            if let Some(ideal) = ideal.filter(|_| r.role == "you" && !r.best.is_empty()) {
+                let _ = write!(out, " | ideal lap {}", fmt_lap(ideal));
+            }
             if r.role == "you" && r.current.iter().any(Option::is_some) {
                 let _ = write!(out, " | this lap {}", list(&r.current));
             }
             out.push('\n');
         }
-        if let Some(v) = &self.versus {
+        // Where each car around is faster and slower, best sector against
+        // best sector: what a driver attacks and defends.
+        if let Some(me) = self.rows.iter().find(|r| r.role == "you") {
+            let place = |i: usize| match self.corners.get(i).filter(|c| !c.is_empty()) {
+                Some(c) => format!("S{} {}", i + 1, c.join("・")),
+                None => format!("S{}", i + 1),
+            };
+            for r in self.rows.iter().filter(|r| r.role != "you") {
+                let d: Vec<(usize, f64)> = r
+                    .best
+                    .iter()
+                    .zip(&me.best)
+                    .enumerate()
+                    .filter_map(|(i, (t, m))| Some((i, (*t)? - (*m)?)))
+                    .collect();
+                let faster = d
+                    .iter()
+                    .filter(|x| x.1 < 0.0)
+                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                let slower = d
+                    .iter()
+                    .filter(|x| x.1 > 0.0)
+                    .max_by(|a, b| a.1.total_cmp(&b.1));
+                if faster.is_none() && slower.is_none() {
+                    continue;
+                }
+                let mut parts = Vec::new();
+                if let Some((i, s)) = faster {
+                    parts.push(format!("gains on you most at {} ({:.2}s)", place(*i), -s));
+                }
+                if let Some((i, s)) = slower {
+                    parts.push(format!("loses to you most at {} ({:.2}s)", place(*i), s));
+                }
+                let _ = writeln!(
+                    out,
+                    "{} {} (best sectors): {}",
+                    r.role,
+                    car_label(&r.car),
+                    parts.join(" | ")
+                );
+            }
+        }
+        // A comparison without a single number only confuses.
+        if let Some(v) = self
+            .versus
+            .as_ref()
+            .filter(|_| self.delta.iter().any(Option::is_some))
+        {
             let parts: Vec<String> = self
                 .delta
                 .iter()
@@ -486,7 +566,8 @@ impl SectorsReport {
                         (Some(a), Some(b)) => format!("{a:.0}-{b:.0}m"),
                         _ => format!("{:.0}-{:.0}%", s.from * 100.0, s.to * 100.0),
                     };
-                    format!("S{} {place} {:+.2}s", s.sector, s.lost_s)
+                    let name = s.name.as_ref().map_or(String::new(), |n| format!("{n} "));
+                    format!("S{} {name}{place} {:+.2}s", s.sector, s.lost_s)
                 })
                 .collect();
             let _ = writeln!(out, "{label} most: {}", parts.join("; "));

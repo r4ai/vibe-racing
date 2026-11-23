@@ -6,6 +6,7 @@
 mod collector;
 mod discovery;
 mod http;
+pub mod lake;
 mod sessions;
 
 pub use collector::*;

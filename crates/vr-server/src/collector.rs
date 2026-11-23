@@ -82,6 +82,18 @@ pub fn spawn_collector(
                 if let Ok(mut st) = state.write() {
                     st.set_source(src.game(), src.capabilities());
                 }
+                // Everything driven, for questions asked later (`lake`).
+                let mut lake =
+                    cfg.sessions
+                        .as_ref()
+                        .and_then(|_| match crate::lake::Writer::new() {
+                            Ok(w) => Some(w),
+                            Err(e) => {
+                                tracing::warn!("telemetry is not kept: {e:#}");
+                                None
+                            }
+                        });
+                let mut session_id: Option<String> = None;
                 let mut last_frame = Instant::now();
                 let mut last_extras: Option<Instant> = None;
                 let mut last_save = Instant::now();
@@ -100,6 +112,9 @@ pub fn spawn_collector(
                                 .is_none_or(|t| t.elapsed() >= EXTRAS_EVERY)
                                 .then(|| src.extras())
                                 .flatten();
+                            if let Some(l) = lake.as_mut() {
+                                l.push(&f);
+                            }
                             let (new_events, finished, laps, at) = match state.write() {
                                 Ok(mut st) => {
                                     let before = st.event_log().last_seq();
@@ -129,14 +144,34 @@ pub fn spawn_collector(
                             }
                             if let Some(store) = &cfg.sessions {
                                 for r in finished {
-                                    keep(store, r);
+                                    let id = keep(store, r);
+                                    // What was collected belongs to the session that ended.
+                                    if let (Some(l), Some(id)) = (lake.as_mut(), id.as_deref()) {
+                                        flush(l, store, id);
+                                    }
+                                    session_id = None;
                                 }
                                 if last_save.elapsed() >= cfg.save_every || !laps.is_empty() {
                                     last_save = Instant::now();
                                     let id = keep_current(store, &state);
+                                    if id.is_some() {
+                                        session_id = id.clone();
+                                    }
+                                    let track = place.as_ref().map(|a| a.0.clone());
                                     for lap in laps {
                                         keep_lap(store, id.as_deref(), &lap);
+                                        if let (Some(l), Some(id)) = (lake.as_mut(), id.as_deref())
+                                            && let Err(e) =
+                                                l.lap(store.dir(), id, &lap, track.as_deref())
+                                        {
+                                            tracing::warn!("corners not kept: {e:#}");
+                                        }
                                     }
+                                }
+                                if let (Some(l), Some(id)) = (lake.as_mut(), session_id.as_deref())
+                                    && l.due()
+                                {
+                                    flush(l, store, id);
                                 }
                             }
                         }
@@ -157,7 +192,10 @@ pub fn spawn_collector(
                 }
                 set_connected(&state, false);
                 if let Some(store) = &cfg.sessions {
-                    keep_current(store, &state);
+                    let id = keep_current(store, &state).or(session_id.take());
+                    if let (Some(l), Some(id)) = (lake.as_mut(), id.as_deref()) {
+                        flush(l, store, id);
+                    }
                 }
                 if let Some(r) = recorder.as_mut() {
                     let _ = r.flush();
@@ -195,6 +233,12 @@ fn recall_pit_loss(store: SessionStore, place: (String, String), state: SharedSt
             st.set_prior_pit_loss(loss);
         }
     });
+}
+
+fn flush(lake: &mut crate::lake::Writer, store: &SessionStore, id: &str) {
+    if let Err(e) = lake.flush(store.dir(), id) {
+        tracing::warn!("telemetry not kept: {e:#}");
+    }
 }
 
 fn keep_lap(store: &SessionStore, id: Option<&str>, lap: &LapTrace) {

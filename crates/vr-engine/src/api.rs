@@ -324,11 +324,22 @@ impl RaceApi for RaceState {
             delta: Vec::new(),
             losses: Vec::new(),
             gains: Vec::new(),
+            corners: Vec::new(),
         };
         let Some((f, me)) = self.frame().and_then(|f| Some((f, f.player_car()?))) else {
             return Ok(out);
         };
-        let asked = match &p.car {
+        let bends = f.session.track.as_ref().and_then(|t| {
+            let name = format!("{} {}", t.name, t.config.as_deref().unwrap_or_default());
+            crate::tracks::bends(&name, t.length_m?)
+        });
+        let asked = match p.car.as_deref() {
+            // The car raced against, whoever it is now.
+            Some(side @ ("ahead" | "behind")) => {
+                let g = self.adjacent(f, if side == "ahead" { -1 } else { 1 });
+                let car = g.and_then(|g| f.car(g.car.idx));
+                Some(car.ok_or_else(|| ApiError::NotFound(format!("no car {side}")))?)
+            }
             Some(num) => {
                 let num = num.trim_start_matches('#');
                 let car = f.cars.iter().find(|c| c.number == num);
@@ -337,6 +348,22 @@ impl RaceApi for RaceState {
             None => None,
         };
         out.starts = timing.sector_starts();
+        if let Some(bends) = bends {
+            let starts = &out.starts;
+            out.corners = (0..starts.len())
+                .map(|i| {
+                    let end = starts.get(i + 1).copied().unwrap_or(1.0);
+                    let within = |b: &&crate::tracks::Bend| {
+                        (starts[i]..end).contains(&((b.from + b.to) / 2.0))
+                    };
+                    bends
+                        .iter()
+                        .filter(within)
+                        .map(|b| b.name.to_string())
+                        .collect()
+                })
+                .collect();
+        }
         let mut add = |role: &str, idx: usize| {
             if out.rows.iter().any(|r| r.car.idx == idx) {
                 return;
@@ -398,6 +425,9 @@ impl RaceApi for RaceState {
                     to_m: length.map(|l| l * s.to),
                     sector: out.starts.iter().filter(|x| **x <= s.from).count().max(1),
                     lost_s: s.lost_s,
+                    name: bends
+                        .and_then(|b| crate::tracks::name_at(b, (s.from + s.to) / 2.0))
+                        .map(String::from),
                 })
                 .collect();
             let worth = |s: &&StretchLoss| s.lost_s.abs() >= WORTH_S;

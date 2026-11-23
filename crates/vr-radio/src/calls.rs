@@ -55,6 +55,16 @@ fn close(v: &Values, key: &str) -> bool {
     v.get(key).is_some_and(|s| *s < CLOSE_S)
 }
 
+/// Percent of the lap: the line was crossed a moment ago.
+const JUST_OVER: f64 = 3.0;
+
+fn finished(v: &Values) -> Told {
+    Told::Say(match v.get("position") {
+        Some(p) => format!("チェッカー。{p:.0}位だ、お疲れさま。"),
+        None => "チェッカー。お疲れさま。".into(),
+    })
+}
+
 /// What to make of one event, with the race as it is now.
 pub fn tell(e: &RaceEvent, v: &Values) -> Told {
     if e.kind == WATCH {
@@ -72,10 +82,9 @@ pub fn tell(e: &RaceEvent, v: &Values) -> Told {
             "white" if close(v, "gap_behind") => say("ファイナルラップ。後ろを抑えよう。"),
             "white" if close(v, "gap_ahead") => say("ファイナルラップ。前を狙おう。"),
             "white" => say("ファイナルラップ。"),
-            "checkered" => Told::Say(match v.get("position") {
-                Some(p) => format!("チェッカー。{p:.0}位だ、お疲れさま。"),
-                None => "チェッカー。お疲れさま。".into(),
-            }),
+            // Out for the leader; told once the driver is over the line too.
+            "checkered" if v.get("lap_pct").is_none_or(|p| *p < JUST_OVER) => finished(v),
+            "checkered" => Told::Nothing,
             "black" => say("黒旗、ペナルティだ。"),
             "repair" => say("修理旗。この周ピットに入ろう。"),
             "disqualify" => say("失格だ。"),
@@ -98,6 +107,7 @@ pub fn tell(e: &RaceEvent, v: &Values) -> Told {
                 format!("{to}番手に落ちた。")
             })
         }
+        "lap_completed" if is(v, "chequered") => finished(v),
         "lap_completed" | "personal_best" => Told::Topic("lap"),
         "pit_entry" => {
             let me = e.rest.get("is_player").and_then(Value::as_bool);
@@ -293,6 +303,19 @@ mod tests {
             said(&flag("checkered"), &Values::new()),
             "チェッカー。お疲れさま。"
         );
+        // Out before the driver is over the line: told when the lap ends.
+        let mut short = v.clone();
+        short.insert("lap_pct".into(), 3.0);
+        assert_eq!(tell(&event(&flag("checkered")), &short), Told::Nothing);
+        short.insert("lap_pct".into(), 2.9);
+        assert_eq!(
+            said(&flag("checkered"), &short),
+            "チェッカー。4位だ、お疲れさま。"
+        );
+        let lap = r#"{"type":"lap_completed","text":"t","lap":9}"#;
+        assert_eq!(tell(&event(lap), &v), Told::Topic("lap"));
+        short.insert("chequered".into(), 1.0);
+        assert_eq!(said(lap, &short), "チェッカー。4位だ、お疲れさま。");
         let cleared = r#"{"type":"flag_cleared","text":"t","flag":"yellow"}"#;
         assert_eq!(said(cleared, &v), "イエロー解除。");
     }

@@ -194,6 +194,26 @@ fn losses_and_gains_are_found_along_the_lap() {
     );
     assert!(text.contains("lost most: S2 "), "{text}");
     assert!(text.contains("won most: S1 "), "{text}");
+    // Where the car ahead is faster and slower, best against best.
+    assert!(
+        text.contains(
+            "ahead #11 Driver 1 (best sectors): gains on you most at S2 (1.00s) | loses to you most at S1 (0.50s)"
+        ),
+        "{text}"
+    );
+    // The best sectors make a lap of their own, for the driver only.
+    assert!(text.contains(" | lap 2 | ideal lap 1:40.000"), "{text}");
+    assert_eq!(text.matches("ideal lap").count(), 1, "{text}");
+    // The car raced against may be asked for by where it is.
+    let side = |s: &str| {
+        st.sectors(&SectorsParams {
+            car: Some(s.into()),
+        })
+    };
+    let ahead = side("ahead").unwrap();
+    assert_eq!(ahead.versus.as_ref().unwrap().idx, 1);
+    assert_eq!(ahead.losses, r.losses);
+    assert!(matches!(side("behind"), Err(ApiError::NotFound(m)) if m == "no car behind"));
 }
 
 #[test]
@@ -520,4 +540,34 @@ fn the_race_ends_as_the_pace_says() {
     let r = st.forecast().unwrap();
     assert_eq!((r.position, r.cars.len()), (None, 0));
     assert!(r.to_text().contains("forecast: unavailable"));
+}
+
+#[test]
+fn a_known_track_names_the_corners_of_each_sector_and_stretch() {
+    let mut st = state();
+    for i in 10..=2500 {
+        let mut f = frame(i as f64 / 10.0, &pair(), &STARTS);
+        let t = f.session.track.as_mut().unwrap();
+        t.name = "Suzuka International Racing Course".into();
+        t.config = Some("Grand Prix".into());
+        t.length_m = Some(5756.0);
+        st.ingest(f);
+    }
+    let r = st.sectors(&SectorsParams::default()).unwrap();
+    assert_eq!(r.corners.len(), 3);
+    assert_eq!(r.corners[0][..3], ["1コーナー", "2コーナー", "S字"]);
+    assert!(r.corners.iter().flatten().any(|c| c == "スプーン"));
+    // Every stretch lost or won lies somewhere: a corner or a straight.
+    assert!(r.losses.iter().any(|l| l.name.is_some()), "{:?}", r.losses);
+    let text = r.to_text();
+    assert!(
+        text.contains("corners: S1 1コーナー・2コーナー・S字"),
+        "{text}"
+    );
+    // An unknown track names nothing.
+    let plain = drive(&pair(), &STARTS, 250.0)
+        .sectors(&SectorsParams::default())
+        .unwrap();
+    assert!(plain.corners.is_empty() && plain.losses.iter().all(|l| l.name.is_none()));
+    assert!(!plain.to_text().contains("corners:"));
 }

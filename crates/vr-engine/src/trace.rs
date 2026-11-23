@@ -305,6 +305,9 @@ impl TraceRecorder {
 pub struct Corner {
     /// Counted from the line; not the official number.
     pub number: usize,
+    /// What drivers call it, on a known track (`tracks`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Shares of the lap.
     pub from: f64,
     pub apex: f64,
@@ -321,6 +324,28 @@ pub struct Corner {
     pub exit_kmh: f64,
     /// Slowest speed of the reference.
     pub reference_min_kmh: f64,
+    /// Metres before the slowest point where braking begins: what a driver
+    /// can aim at. This lap and the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brake_before_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_brake_before_m: Option<f64>,
+    /// Gear at the slowest point, this lap and the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gear: Option<i8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_gear: Option<i8>,
+    /// Speed where braking begins (where the corner begins without it), km/h:
+    /// how fast the car comes in. This lap and the reference.
+    #[serde(default)]
+    pub entry_kmh: f64,
+    #[serde(default)]
+    pub reference_entry_kmh: f64,
+    /// Least throttle in the corner, percent: 100 is flat out.
+    #[serde(default)]
+    pub min_throttle: u8,
+    #[serde(default)]
+    pub reference_min_throttle: u8,
 }
 
 /// A corner slows the car down by this much, in km/h.
@@ -373,6 +398,29 @@ fn corners(t: &LapTrace) -> Vec<(usize, usize, usize)> {
 
 /// `a` against the reference `b`, corner by corner.
 pub fn compare(a: &LapTrace, b: &LapTrace) -> Vec<Corner> {
+    compare_on(a, b, None)
+}
+
+/// The places of a known track, each up to where the next one begins: what
+/// a corner loses on the straight after it is lost in it.
+fn places(bends: &[crate::tracks::Bend], b: &LapTrace) -> Vec<(usize, usize, usize)> {
+    let at = |share: f64| ((share * POINTS as f64) as usize).min(POINTS);
+    (0..bends.len())
+        .map(|i| {
+            let (from, end) = (at(bends[i].from), at(bends[i].to));
+            let to = bends.get(i + 1).map_or(POINTS, |n| at(n.from));
+            let apex = (from..end.max(from + 1)).min_by_key(|&k| b.speed[k.min(POINTS - 1)]);
+            (from, apex.unwrap_or(from), to)
+        })
+        .collect()
+}
+
+/// `a` against `b`, by the named places of the track when there are some.
+pub fn compare_on(
+    a: &LapTrace,
+    b: &LapTrace,
+    bends: Option<&[crate::tracks::Bend]>,
+) -> Vec<Corner> {
     if a.speed.len() != POINTS || b.speed.len() != POINTS {
         return Vec::new();
     }
@@ -382,17 +430,30 @@ pub fn compare(a: &LapTrace, b: &LapTrace) -> Vec<Corner> {
     };
     let speed = |t: &LapTrace, i: usize| f64::from(t.speed[i.min(POINTS - 1)]) / 10.0;
     let metre = b.length_m / POINTS as f64;
-    corners(b)
+    let found = match bends {
+        Some(bends) => places(bends, b),
+        None => corners(b),
+    };
+    let gear = |t: &LapTrace, k: usize| t.gear.get(k).copied().filter(|g| *g > 0);
+    found
         .into_iter()
         .enumerate()
         .map(|(i, (from, apex, to))| {
-            let slowest = |t: &LapTrace| (from..to).min_by_key(|&k| t.speed[k]).unwrap_or(apex);
+            // Within the corner itself, not the straight after it.
+            let end = bends.map_or(to, |b| {
+                ((b[i].to * POINTS as f64) as usize).clamp(from + 1, to)
+            });
+            let slowest = |t: &LapTrace| (from..end).min_by_key(|&k| t.speed[k]).unwrap_or(apex);
             let brakes = |t: &LapTrace| (from..slowest(t)).find(|&k| t.brake[k] >= BRAKING);
             let opens = |t: &LapTrace| (slowest(t)..to).find(|&k| t.throttle[k] >= THROTTLE);
             let differ = |x: Option<usize>, y: Option<usize>| Some((x? as f64 - y? as f64) * metre);
             let gap = |k: usize| time(a, k) - time(b, k);
+            let before = |t: &LapTrace| Some((slowest(t) - brakes(t)?) as f64 * metre);
+            let entry = |t: &LapTrace| speed(t, brakes(t).unwrap_or(from));
+            let lift = |t: &LapTrace| (from..end).map(|k| t.throttle[k]).min().unwrap_or(100);
             Corner {
                 number: i + 1,
+                name: bends.map(|b| b[i].name.to_string()),
                 from: from as f64 / POINTS as f64,
                 apex: apex as f64 / POINTS as f64,
                 to: to as f64 / POINTS as f64,
@@ -402,6 +463,14 @@ pub fn compare(a: &LapTrace, b: &LapTrace) -> Vec<Corner> {
                 throttle_m: differ(opens(a), opens(b)),
                 exit_kmh: speed(a, to) - speed(b, to),
                 reference_min_kmh: speed(b, slowest(b)),
+                brake_before_m: before(a),
+                reference_brake_before_m: before(b),
+                gear: gear(a, slowest(a)),
+                reference_gear: gear(b, slowest(b)),
+                entry_kmh: entry(a),
+                reference_entry_kmh: entry(b),
+                min_throttle: lift(a),
+                reference_min_throttle: lift(b),
             }
         })
         .collect()
@@ -447,15 +516,24 @@ const LISTED: usize = 5;
 impl CornersReport {
     /// `laps` are the laps that count, the one looked at last.
     pub fn of(laps: &[LapTrace], reference: &LapTrace) -> Option<Self> {
+        Self::on(laps, reference, None)
+    }
+
+    /// The same by the named places of a known track.
+    pub fn on(
+        laps: &[LapTrace],
+        reference: &LapTrace,
+        bends: Option<&[crate::tracks::Bend]>,
+    ) -> Option<Self> {
         let a = laps.last()?;
-        let corners = compare(a, reference);
+        let corners = compare_on(a, reference, bends);
         if corners.is_empty() {
             return None;
         }
         let all: Vec<Vec<Corner>> = laps
             .iter()
             .filter(|l| l.lap != reference.lap)
-            .map(|l| compare(l, reference))
+            .map(|l| compare_on(l, reference, bends))
             .filter(|c| c.len() == corners.len())
             .collect();
         let usual_s = (0..corners.len())
@@ -498,24 +576,42 @@ impl CornersReport {
     pub fn to_text(&self) -> String {
         use std::fmt::Write as _;
         let lap = crate::render::fmt_lap;
+        let named = self.corners.iter().any(|c| c.name.is_some());
         let mut out = format!(
-            "lap {} {} against lap {} {} ({:+.3}s), corner by corner (numbers count from the line, not the official ones):\n",
+            "lap {} {} against lap {} {} ({:+.3}s), corner by corner{}:\n",
             self.lap,
             lap(self.time_s),
             self.reference_lap,
             lap(self.reference_s),
-            self.time_s - self.reference_s
+            self.time_s - self.reference_s,
+            if named {
+                " (each up to the next one's braking)"
+            } else {
+                " (numbers count from the line, not the official ones)"
+            }
         );
-        let mut worst: Vec<&Corner> = self
-            .corners
-            .iter()
-            .filter(|c| c.loss_s.abs() >= WORTH_S)
-            .collect();
-        worst.sort_by(|a, b| b.loss_s.abs().total_cmp(&a.loss_s.abs()));
-        for c in worst.into_iter().take(LISTED) {
+        let label = |c: &Corner| match &c.name {
+            Some(n) => n.clone(),
+            None => format!("corner {}", c.number),
+        };
+        // Named corners are asked about one by one: all of them, in order.
+        let listed: Vec<&Corner> = if named {
+            self.corners.iter().collect()
+        } else {
+            let mut worst: Vec<&Corner> = self
+                .corners
+                .iter()
+                .filter(|c| c.loss_s.abs() >= WORTH_S)
+                .collect();
+            worst.sort_by(|a, b| b.loss_s.abs().total_cmp(&a.loss_s.abs()));
+            worst.truncate(LISTED);
+            worst
+        };
+        for c in listed {
             let _ = write!(
                 out,
-                "  corner {} of {} at {:.0}m ({:.0} km/h): {:+.2}s",
+                "  {}corner {} of {} at {:.0}m ({:.0} km/h): {:+.2}s",
+                c.name.as_ref().map_or(String::new(), |n| format!("{n}: ")),
                 c.number,
                 self.corners.len(),
                 c.apex * self.length_m,
@@ -526,26 +622,49 @@ impl CornersReport {
             if let Some(m) = c.brake_m.filter(|m| m.abs() >= 1.0) {
                 let _ = write!(out, " | brakes {:.0}m {}", m.abs(), side(m));
             }
+            if let (Some(a), Some(b)) = (c.brake_before_m, c.reference_brake_before_m) {
+                let _ = write!(
+                    out,
+                    " (braking {a:.0}m before the slowest point, reference {b:.0}m)"
+                );
+            }
+            let _ = write!(
+                out,
+                " | entry {:.0} km/h (reference {:.0})",
+                c.entry_kmh, c.reference_entry_kmh
+            );
+            if c.brake_before_m.is_none() && c.reference_brake_before_m.is_none() {
+                let _ = write!(out, " | no braking");
+            }
             let _ = write!(out, " | slowest {:+.1} km/h", c.min_kmh);
+            if c.min_throttle == 100 && c.reference_min_throttle == 100 {
+                let _ = write!(out, " | flat out");
+            } else {
+                let _ = write!(
+                    out,
+                    " | least throttle {}% (reference {}%)",
+                    c.min_throttle, c.reference_min_throttle
+                );
+            }
+            if let (Some(a), Some(b)) = (c.gear, c.reference_gear) {
+                let _ = write!(out, " | gear {a} (reference {b})");
+            }
             if let Some(m) = c.throttle_m.filter(|m| m.abs() >= 1.0) {
                 let _ = write!(out, " | throttle {:.0}m {}", m.abs(), side(m));
             }
             let _ = writeln!(out, " | exit {:+.1} km/h", c.exit_kmh);
         }
-        let mut usual: Vec<(usize, f64)> = self
+        let mut usual: Vec<(String, f64)> = self
             .usual_s
             .iter()
-            .enumerate()
-            .map(|(i, l)| (i + 1, *l))
+            .zip(&self.corners)
+            .map(|(l, c)| (label(c), *l))
             .filter(|(_, l)| *l >= WORTH_S)
             .collect();
         usual.sort_by(|a, b| b.1.total_cmp(&a.1));
         usual.truncate(LISTED);
         if !usual.is_empty() {
-            let parts: Vec<String> = usual
-                .iter()
-                .map(|(n, l)| format!("corner {n} {l:+.2}s"))
-                .collect();
+            let parts: Vec<String> = usual.iter().map(|(n, l)| format!("{n} {l:+.2}s")).collect();
             let _ = writeln!(
                 out,
                 "usually lost there (median of {} laps): {}",
@@ -600,6 +719,66 @@ mod tests {
         }
         out.time_s = t;
         out
+    }
+
+    #[test]
+    fn a_known_track_is_compared_by_its_places() {
+        use crate::tracks::Bend;
+        let bends = [
+            Bend {
+                name: "ヘアピン",
+                from: 0.2,
+                to: 0.4,
+            },
+            Bend {
+                name: "スプーン",
+                from: 0.6,
+                to: 0.8,
+            },
+        ];
+        let (mut a, b) = (lap(10.0, 220), lap(0.0, 240));
+        a.gear = vec![3; POINTS];
+        let mut b = b;
+        b.gear = vec![4; POINTS];
+        b.gear[299] = 0;
+        let c = compare_on(&a, &b, Some(&bends));
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].name.as_deref(), Some("ヘアピン"));
+        assert_eq!((c[0].apex, c[0].to), (0.299, 0.6));
+        // 79 and 59 places of 5 m before the slowest point.
+        assert_eq!(c[0].brake_before_m, Some(395.0));
+        assert_eq!(c[0].reference_brake_before_m, Some(295.0));
+        assert_eq!(c[0].brake_m, Some(-100.0));
+        // A gear of 0 is no gear.
+        assert_eq!((c[0].gear, c[0].reference_gear), (Some(3), None));
+        assert_eq!(c[1].name.as_deref(), Some("スプーン"));
+        assert_eq!(c[1].to, 1.0);
+        assert_eq!((c[1].brake_before_m, c[1].reference_gear), (None, Some(4)));
+        assert!(c[0].loss_s > 0.3 && c[1].loss_s.abs() < 0.01, "{c:?}");
+        let r = CornersReport::on(&[a], &b, Some(&bends)).unwrap();
+        let text = r.to_text();
+        assert!(
+            text.contains("(each up to the next one's braking)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  ヘアピン: corner 1 of 2 at 1495m"),
+            "{text}"
+        );
+        // Every named corner, with the gear only where both laps tell it.
+        let line = |n: &str| text.lines().find(|l| l.contains(n)).unwrap().to_string();
+        assert!(!line("ヘアピン:").contains(" | gear "), "{text}");
+        assert!(
+            line("スプーン:").contains(" | gear 3 (reference 4)"),
+            "{text}"
+        );
+        // No brake and no lift on either lap: flat out.
+        assert!(line("スプーン:").contains(" | no braking"), "{text}");
+        assert!(line("スプーン:").contains(" | flat out"), "{text}");
+        assert_eq!(
+            (c[1].min_throttle, c[1].entry_kmh),
+            (100, c[1].reference_entry_kmh)
+        );
     }
 
     #[test]
@@ -677,7 +856,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains(" | brakes 100m earlier | slowest -10.0 km/h | exit "),
+            text.contains(" | brakes 100m earlier (braking 395m before the slowest point, reference 295m) | entry 191 km/h (reference 176) | slowest -10.0 km/h | least throttle 0% (reference 0%) | exit "),
             "{text}"
         );
         assert!(

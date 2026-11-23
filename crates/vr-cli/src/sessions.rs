@@ -50,6 +50,9 @@ pub enum SessionsCmd {
         #[arg(long)]
         against: Option<i32>,
     },
+    /// Fill the corner table of `vr query` from the laps kept before it was
+    /// written live.
+    Lake,
     /// Two sessions side by side, with what differs in the setup.
     Compare { a: String, b: String },
     /// Write a note on a session (empty removes it).
@@ -162,6 +165,25 @@ fn dispatch(store: &SessionStore, cmd: SessionsCmd, fmt: Format) -> anyhow::Resu
                 Format::Json => println!("{}", serde_json::to_string(&a)?),
                 Format::Text => print!("{}", a.to_text()),
             }
+        }
+        SessionsCmd::Lake => {
+            let mut lake = vr_server::lake::Writer::new()?;
+            let (mut sessions, mut laps) = (0, 0);
+            for r in store.list() {
+                let folder = vr_server::lake::folder(store.dir(), &r.id).join("corners");
+                let lines = store.traces(&r.id);
+                if lines.is_empty() || folder.exists() {
+                    continue;
+                }
+                sessions += 1;
+                for line in lines {
+                    if let Some(t) = store.trace(&r.id, line.lap) {
+                        lake.lap(store.dir(), &r.id, &t, r.track.as_deref())?;
+                        laps += 1;
+                    }
+                }
+            }
+            println!("corners of {laps} laps in {sessions} sessions");
         }
         SessionsCmd::Corners {
             session,
@@ -315,7 +337,12 @@ fn corners(
         .into_iter()
         .map(load)
         .collect::<anyhow::Result<Vec<_>>>()?;
-    CornersReport::of(&laps, &load(reference)?).ok_or_else(none)
+    let reference = load(reference)?;
+    let track = store.find(&id).ok().and_then(|r| r.track);
+    let bends = track
+        .as_deref()
+        .and_then(|t| vr_engine::tracks::bends(t, reference.length_m));
+    CornersReport::on(&laps, &reference, bends).ok_or_else(none)
 }
 
 fn lap(v: Option<f64>) -> String {

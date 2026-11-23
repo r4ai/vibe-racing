@@ -15,14 +15,23 @@ pub enum Topic {
     Past,
     /// When to stop, and what the stops of the others mean.
     Strategy,
+    /// How the laps are driven: corners, brake points, lines, time lost.
+    Driving,
 }
 
 impl Topic {
-    pub const ALL: [Self; 4] = [Self::Handling, Self::Car, Self::Past, Self::Strategy];
+    pub const ALL: [Self; 5] = [
+        Self::Handling,
+        Self::Car,
+        Self::Past,
+        Self::Strategy,
+        Self::Driving,
+    ];
 
     fn commands(self) -> &'static [&'static str] {
         match self {
-            Self::Handling => &["vr handling", "vr setup", "vr sessions analyse"],
+            // The setup itself only when it is asked about (`SETUP`): it is long.
+            Self::Handling => &["vr handling", "vr sessions analyse"],
             Self::Car => &["vr car"],
             // The session being driven is the newest one.
             Self::Past => &[
@@ -31,6 +40,8 @@ impl Topic {
                 "vr sessions show 2",
             ],
             Self::Strategy => &["vr strategy"],
+            // The laps of the session being driven, corner by corner.
+            Self::Driving => &["vr sessions corners", "vr sectors"],
         }
     }
 
@@ -42,6 +53,7 @@ impl Topic {
             Self::Car => CAR,
             Self::Past => PAST,
             Self::Strategy => STRATEGY,
+            Self::Driving => DRIVING,
         }
     }
 }
@@ -95,6 +107,24 @@ const HANDLING: &[&str] = &[
     "arb",
 ];
 
+/// The setup sheet is asked for.
+const SETUP: &[&str] = &[
+    "セットアップ",
+    "セッティング",
+    "ウイング",
+    "ウィング",
+    "車高",
+    "キャンバー",
+    "スタビ",
+    "ダンパー",
+    "スプリング",
+    "バネ",
+    "内圧",
+    "空気圧",
+    "トー",
+    "arb",
+];
+
 const CAR: &[&str] = &[
     "タイヤ",
     "摩耗",
@@ -120,6 +150,100 @@ const CAR: &[&str] = &[
     "警告",
     "ピットサービス",
     "デルタ",
+];
+
+/// The corners drivers name, as the transcriber writes them.
+pub const CORNERS: &[&str] = &[
+    "最終コーナー",
+    "ヘアピン",
+    "シケイン",
+    "スプーン",
+    "s字",
+    "エス字",
+    "逆バンク",
+    "ダンロップ",
+    "デグナー",
+    "200r",
+    "130r",
+    "ソース",
+    "ルージュ",
+    "オールージュ",
+    "ラディオン",
+    "コーム",
+    "ブリュッセル",
+    "プーオン",
+    "プーホン",
+    "ファニョー",
+    "スタブロ",
+    "ブランシモン",
+    "バスストップ",
+];
+
+const DRIVING: &[&str] = &[
+    "コーナー",
+    "ヘアピン",
+    "シケイン",
+    "スプーン",
+    "s字",
+    "エス字",
+    "逆バンク",
+    "ダンロップ",
+    "デグナー",
+    "200r",
+    "130r",
+    "ソース",
+    "ルージュ",
+    "コーム",
+    "プーオン",
+    "スタブロ",
+    "ブランシモン",
+    "バスストップ",
+    "ブレーキポイント",
+    "ブレーキングポイント",
+    "ブレーキ遅",
+    "ブレーキを遅",
+    "ブレーキ早",
+    "進入",
+    "立ち上がり",
+    "脱出",
+    "ライン",
+    "クリップ",
+    "失っ",
+    "ロス",
+    "詰め",
+    "削れ",
+    "タイム上げ",
+    "タイムを上げ",
+    "速く走",
+    "攻め",
+    "ミスっ",
+    "ミスした",
+    "ボトムスピード",
+    "最低速",
+    "何速",
+    "ギア",
+    "アクセル",
+    "全開",
+    "伸びしろ",
+    // Against the others and the best lap: the sectors and the corners tell.
+    "仕掛け",
+    "抜け",
+    "抜か",
+    "抜き",
+    "勝って",
+    "負けて",
+    "守れ",
+    "守る",
+    "固め",
+    "弱点",
+    "自己ベスト",
+    "ベストと",
+    "ベストから",
+    "遅かった",
+    "速いとこ",
+    "遅いとこ",
+    "どこで速",
+    "どこで遅",
 ];
 
 const PAST: &[&str] = &[
@@ -282,7 +406,19 @@ pub fn commands(found: &Found, text: &str) -> Vec<String> {
     if found.long && !found.topics.contains(&Topic::Past) {
         out.push("vr laps --last 60".into());
     }
-    for n in car_numbers(&fold(text)) {
+    let folded = fold(text);
+    if found.topics.contains(&Topic::Handling) && SETUP.iter().any(|w| contains(&folded, w)) {
+        out.push("vr setup".into());
+    }
+    // Where the car behind is faster: our laps against its.
+    if found.topics.contains(&Topic::Driving)
+        && ["後ろ", "後続", "うしろ"]
+            .iter()
+            .any(|w| folded.contains(w))
+    {
+        out.push("vr sectors --car behind".into());
+    }
+    for n in car_numbers(&folded) {
         out.push(format!("vr gap --car {n}"));
         out.push(format!("vr laps --car {n} --last 5"));
     }
@@ -365,9 +501,21 @@ mod tests {
             "ＢＢいくつにすればいい",
             "BBは",
             "TCSを変えたほうがいい",
-            "立ち上がりでリア滑る",
         ] {
             assert_eq!(topics(q), [Topic::Handling], "{q}");
+        }
+        assert_eq!(
+            topics("立ち上がりでリア滑る"),
+            [Topic::Handling, Topic::Driving]
+        );
+        for q in [
+            "スプーンミスったかも",
+            "130R全開で行ける？",
+            "S字でどれだけ失ってる",
+            "ヘアピン何速",
+            "どこでタイム上げられる",
+        ] {
+            assert_eq!(topics(q), [Topic::Driving], "{q}");
         }
         for q in [
             "タイヤどう",
@@ -389,6 +537,21 @@ mod tests {
             assert_eq!(topics(q), [Topic::Strategy], "{q}");
         }
         assert_eq!(topics("タイヤ何周もつ"), [Topic::Car, Topic::Strategy]);
+        assert_eq!(
+            topics("最終コーナーのブレーキングポイントを教えて"),
+            [Topic::Handling, Topic::Driving]
+        );
+        let f = read("スプーンで何秒失った").unwrap();
+        assert_eq!(commands(&f, ""), ["vr sessions corners", "vr sectors"]);
+        let q = "後ろの車はどこで速い、どこ攻められてる";
+        assert_eq!(
+            commands(&read(q).unwrap(), q),
+            [
+                "vr sessions corners",
+                "vr sectors",
+                "vr sectors --car behind"
+            ]
+        );
         for q in ["前のレースのベストラップは", "昨日の自分より速い"] {
             assert_eq!(topics(q), [Topic::Past], "{q}");
         }
@@ -419,9 +582,12 @@ mod tests {
 
     #[test]
     fn other_words_do_not_tell() {
-        for q in ["ケツが出る", "追い抜けそう", "後ろが落ち着かない"] {
+        for q in ["ケツが出る", "後ろが落ち着かない"] {
             assert_eq!(read(q), None, "{q}");
         }
+        // Passing is a question of where each car is faster.
+        assert_eq!(topics("追い抜けそう"), [Topic::Driving]);
+        assert_eq!(topics("前の車にどこで勝ってる"), [Topic::Driving]);
         // 20 characters are plain, 21 may be about more.
         let q = "今何位かあのーえーっと教えてくれないかな";
         assert_eq!(q.chars().count(), PLAIN_CHARS);
@@ -454,7 +620,13 @@ mod tests {
         assert_eq!(commands(&about(&[], true), ""), ["vr laps --last 60"]);
         assert_eq!(
             commands(&about(&[Topic::Handling, Topic::Car], false), ""),
-            ["vr handling", "vr setup", "vr sessions analyse", "vr car"]
+            ["vr handling", "vr sessions analyse", "vr car"]
+        );
+        // The setup sheet only when it is asked about.
+        let q = "リアウイング何度にする";
+        assert_eq!(
+            commands(&read(q).unwrap(), q),
+            ["vr handling", "vr sessions analyse", "vr setup"]
         );
         assert_eq!(
             commands(&about(&[Topic::Strategy], false), ""),

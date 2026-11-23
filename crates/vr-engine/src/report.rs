@@ -311,6 +311,9 @@ pub struct StretchLoss {
     pub sector: usize,
     /// Positive: lost, negative: won.
     pub lost_s: f64,
+    /// The corner it is in, on a known track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Sector times, and where the last lap was lost or won.
@@ -329,6 +332,10 @@ pub struct SectorsReport {
     pub losses: Vec<StretchLoss>,
     /// Most won first.
     pub gains: Vec<StretchLoss>,
+    /// The corners in each sector, on a known track: "sector 4" means
+    /// nothing to a driver, "Spoon" does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corners: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

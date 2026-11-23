@@ -22,6 +22,7 @@ mod state;
 mod strategy;
 mod timing;
 mod trace;
+pub mod tracks;
 mod util;
 
 pub use advice::{Advice, MIN_LAPS as ADVICE_MIN_LAPS, Place};
@@ -43,5 +44,6 @@ pub use strategy::{
 };
 pub use trace::{
     Corner, CornersReport, LapTrace, POINTS as TRACE_POINTS, Speeds, compare as compare_laps,
+    compare_on as compare_laps_on,
 };
 pub use util::now_ms;

@@ -110,16 +110,24 @@ flowchart LR
 
 ### 境界と永続化
 
-| 境界           | 方式                                                                                  | 所有者                                           |
-| -------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| ゲーム → `vr`  | iRacing 共有メモリ `Local\IRSDKMemMapFileName`（読取専用）<br/>と新データ通知イベント | iRacing                                          |
-| CLI → サーバー | HTTP/JSON、`127.0.0.1` 限定、既定ポート 47800                                         | `vr-server`                                      |
-| 過去の画面     | `GET /`（ブラウザ）と `/v1/sessions`、周の波形 `…/laps`。読み取り専用                 | `vr-server`                                      |
-| イベント配信   | SSE `/v1/events/stream`（event 名 `race`）                                            | `vr-server`                                      |
-| サーバー発見   | `%LOCALAPPDATA%\vibe-racing\server.json`<br/>（`VR_DISCOVERY` で上書き）              | 書いた `vr serve`。終了時に自 PID のものだけ削除 |
-| 記録           | 正規化 `Frame` の NDJSON（既定 10 Hz に間引き）                                       | 利用者                                           |
-| セッション     | `%LOCALAPPDATA%\vibe-racing\sessions\<id>.json`<br/>（`VR_SESSIONS` で上書き）        | `vr serve` が 30 秒ごと・終了時・切断時に保存    |
-| 周の波形       | 同じ場所の `<id>.laps\`（1 周 1 ファイル、約 43 KB）                                  | 周の終わりに保存。距離で 1000 点に揃える         |
+| 境界           | 方式                                                                                                            | 所有者                                                                    |
+| -------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| ゲーム → `vr`  | iRacing 共有メモリ `Local\IRSDKMemMapFileName`（読取専用）<br/>と新データ通知イベント                           | iRacing                                                                   |
+| CLI → サーバー | HTTP/JSON、`127.0.0.1` 限定、既定ポート 47800                                                                   | `vr-server`                                                               |
+| 過去の画面     | `GET /`（ブラウザ）と `/v1/sessions`、周の波形 `…/laps`。読み取り専用                                           | `vr-server`                                                               |
+| イベント配信   | SSE `/v1/events/stream`（event 名 `race`）                                                                      | `vr-server`                                                               |
+| サーバー発見   | `%LOCALAPPDATA%\vibe-racing\server.json`<br/>（`VR_DISCOVERY` で上書き）                                        | 書いた `vr serve`。終了時に自 PID のものだけ削除                          |
+| 記録           | 正規化 `Frame` の NDJSON（既定 10 Hz に間引き）                                                                 | 利用者                                                                    |
+| セッション     | `%LOCALAPPDATA%\vibe-racing\sessions\<id>.json`<br/>（`VR_SESSIONS` で上書き）                                  | `vr serve` が 30 秒ごと・終了時・切断時に保存                             |
+| 周の波形       | 同じ場所の `<id>.laps\`（1 周 1 ファイル、約 43 KB）                                                            | 周の終わりに保存。距離で 1000 点に揃える                                  |
+| 走行の全記録   | 同じ場所の `<id>.lake\`（Parquet。`telemetry` 自車の毎フレーム、`cars` 全車 10 Hz、`corners` 周ごとのコーナー） | `vr serve` が 5 秒ごと・周の終わり・切断時に書き足す。読むのは `vr query` |
+
+`vr query` は、保存したファイルを埋め込みの DuckDB で読む（[`lake`](../crates/vr-server/src/lake.rs)）。別のサーバーは置かない。
+Parquet は一度書いたら変えないファイルを足していく。書き途中は別名で書いて名前を変えるので、読み手が半端なファイルを見ることはない。
+`laps`・`events`・`sessions` の表は、セッションの JSON をそのまま読む。
+問い合わせは読み取り専用で、1 文の SELECT（WITH・FROM・DESCRIBE・SUMMARIZE・SHOW）だけ、20 秒・200 行まで。
+走行中の無線の即答は今までどおり `RaceState` から計算し、SQL は調べ物とレース後の集計に使う。
+`vr sessions lake` は、`vr query` 以前に残した周の波形から `corners` を作る。
 
 `RaceState` はメモリ上のみ。`vr serve` の停止で、走行中の平均や推移は消える。保存済みのセッションは残り、再起動後の同じセッションと結合する。
 
@@ -171,6 +179,7 @@ flowchart BT
 | 解析   | [`crates/vr-engine/src/advice.rs`](../crates/vr-engine/src/advice.rs)     | 傾向からの変更案（経験則）                                            | 中       |
 | 解析   | [`crates/vr-engine/src/archive.rs`](../crates/vr-engine/src/archive.rs)   | `SessionRecord` の作成と結合                                          | 低       |
 | 配信   | [`crates/vr-server`](../crates/vr-server)                                 | コレクター、HTTP・SSE、discovery、セッションの保存                    | 低       |
+| 配信   | [`crates/vr-server/src/lake.rs`](../crates/vr-server/src/lake.rs)         | 走行の全記録（Parquet）と SQL の問い合わせ（`vr query`、DuckDB）      | 中       |
 | CLI    | [`crates/vr-cli`](../crates/vr-cli)                                       | コマンド定義、ソース登録、バックエンド選択、`doctor`、スキル同梱      | 中       |
 | スキル | [`skills/race-engineer`](../skills/race-engineer)                         | エージェントの手順と返答規範（`vr` バイナリに埋め込み）               | 中       |
 | 評価   | [`crates/vr-eval`](../crates/vr-eval)                                     | 音声無線の端から端までの評価                                          | 中       |
@@ -283,7 +292,8 @@ iRacing はドライバー名等を引用符なしで出力するため、`: ` �
 
 ### コーナーごとの比較
 
-`vr sessions corners` は、残した周の波形から、直前の周を自己ベストとコーナーごとに比べる。ブレーキ開始・最低速度・アクセル・出口速度の差、直近の周の中央値で「いつも失っている場所」、最高速と低・中・高速コーナーの最低速度の差（空力の損傷の手がかり）を出す。
+`vr sessions corners` は、残した周の波形から、直前の周を自己ベストとコーナーごとに比べる。
+鈴鹿とスパでは、[`tracks`](../crates/vr-engine/src/tracks.rs) のコーナー名と範囲（ラップの割合。実走の最低速度点とブレーキ点から決めた）で区切り、各コーナーを次のコーナーのブレーキまでとする。ほかのコースは速度の落ち込みでコーナーを見つける。`vr sectors` の失った・稼いだ場所にも同じ名前を付ける。ブレーキ開始・最低速度・アクセル・出口速度の差、直近の周の中央値で「いつも失っている場所」、最高速と低・中・高速コーナーの最低速度の差（空力の損傷の手がかり）を出す。
 
 ### 挙動の推定と変更案
 

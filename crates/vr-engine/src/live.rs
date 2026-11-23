@@ -82,6 +82,7 @@ pub const LIVE_KEYS: &[(&str, &str)] = &[
     ("blue", "0/1"),
     ("white", "last lap, 0/1"),
     ("racing", "a race under way, 0/1"),
+    ("chequered", "the chequered flag is out, 0/1"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,6 +148,10 @@ fn values(state: &RaceState, f: &Frame) -> BTreeMap<&'static str, f64> {
     put(
         "racing",
         on(race && f.session.phase == SessionPhase::Racing),
+    );
+    put(
+        "chequered",
+        on(f.session.phase == SessionPhase::Checkered || flag(&[Flag::Checkered])),
     );
     if let Some(w) = &f.weather {
         put("track_temp", w.track_temp_c);

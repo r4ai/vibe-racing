@@ -14,6 +14,7 @@ vr-replay.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 dirs.workspace = true
+duckdb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

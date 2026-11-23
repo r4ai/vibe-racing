@@ -359,6 +359,13 @@ pub fn read(text: &str) -> Option<Quick> {
 
 fn topic(s: &str) -> Option<&'static str> {
     let any = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    // A corner is a question of driving: the agent has its data.
+    if crate::topic::CORNERS
+        .iter()
+        .any(|w| s.to_lowercase().contains(w))
+    {
+        return None;
+    }
     // A decision to make: the lap time is no answer to it.
     if any(&["ペース", "ラップ"]) && any(&["ていい", "でいい", "べき", "方がいい"])
     {
@@ -393,9 +400,23 @@ fn topic(s: &str) -> Option<&'static str> {
     let behind = any(&["後ろ", "うしろ", "後方", "背後", "後続"]);
     let hurt = any(&["ダメージ", "壊れ", "損傷"])
         || chars_at_most(s, 14) && any(&["ダウンフォース", "空力", "直った", "修理終わ"]);
+    // Why, or what: a question the times do not answer.
+    let why = any(&[
+        "じゃない",
+        "なんで",
+        "なぜ",
+        "原因",
+        "スリップ",
+        "どこ",
+        "って何",
+    ]);
+    // The lap of the car behind is not ours.
+    if behind && lap && !any(&["ペース", "上げ", "速"]) {
+        return None;
+    }
     Some(if losing {
         "losing"
-    } else if sectors {
+    } else if sectors && !why {
         "sectors"
     } else if hurt {
         "damage"
@@ -445,7 +466,7 @@ fn topic(s: &str) -> Option<&'static str> {
         && !behind
     {
         "position"
-    } else if behind && (gap || chars_at_most(s, 10)) && !lap {
+    } else if behind && (gap || chars_at_most(s, 10) || any(&["ペース", "上げ", "速"])) {
         "behind"
     } else if any(&["残り", "あと何", "何周ある", "何周残", "いつまで"])
         && any(&["周", "分", "時間", "残り"])
@@ -729,6 +750,13 @@ mod tests {
             ("ブレーキもっと奥でいける？", "losing"),
             ("ちょっと疲れてきた、ペース落としていい？", ""),
             ("ペース抑えた方がいい？", ""),
+            ("スプーンで何秒失ってる？", ""),
+            ("セクター1はスリップじゃないのか。", ""),
+            ("セクター4ってどこ、スプーンのとこ。", ""),
+            ("後ろのラップタイムは。", ""),
+            ("後ろのペース上げてきてないか。", "behind"),
+            ("この周のセクターはどんな感じ、今。", "sectors"),
+            ("最終コーナーのブレーキングポイントは", ""),
             ("ダメにしない。", "damage"),
             ("ダメじゃないですか。", "damage"),
         ] {
