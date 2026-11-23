@@ -64,6 +64,17 @@ impl SourceArgs {
         }
     }
 
+    /// The game's recordings that `vr serve` reads in after driving: only
+    /// when it keeps the sessions and is told to import.
+    pub fn inbox(
+        &self,
+        keep: bool,
+        import: bool,
+        documents: Option<&std::path::Path>,
+    ) -> Option<PathBuf> {
+        self.recordings(documents).filter(|_| keep && import)
+    }
+
     /// Whether `vr serve` keeps the sessions: those of real games, not the
     /// demo or a replay, unless told not to.
     pub fn keeps_sessions(&self, no_sessions: bool) -> bool {
@@ -187,6 +198,10 @@ mod tests {
             Some(Path::new("docs").join("iRacing").join("telemetry"))
         );
         assert_eq!(s.recordings(None), None, "no documents");
+        let docs = Some(Path::new("docs"));
+        assert!(s.inbox(true, true, docs).is_some());
+        assert_eq!(s.inbox(false, true, docs), None, "sessions not kept");
+        assert_eq!(s.inbox(true, false, docs), None, "--no-import");
         assert!(s.keeps_sessions(false));
         for demo in [&["--game", "synthetic"][..], &["--file", "x.ndjson"]] {
             let s = parse(demo);
