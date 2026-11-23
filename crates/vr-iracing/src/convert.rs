@@ -848,6 +848,7 @@ DriverInfo:
             one("P2P_Count", 2),
             one("DRS_Status", 2),
             one("FastRepairAvailable", 2),
+            one("PitSvFuel", 4),
             one("LapDeltaToOptimalLap", 4),
             one("LapDeltaToSessionBestLap", 4),
             one("LapDeltaToSessionBestLap_OK", 1),
@@ -869,6 +870,7 @@ DriverInfo:
         img.set_i32("P2P_Count", 0, 138);
         img.set_i32("DRS_Status", 0, 3);
         img.set_i32("FastRepairAvailable", 0, 255);
+        img.set_f32("PitSvFuel", 0, 12.5);
         img.set_f32("LapDeltaToOptimalLap", 0, 1.0);
         img.set_f32("LapDeltaToSessionBestLap", 0, -0.5);
         img.set_bool("LapDeltaToSessionBestLap_OK", 0, true);
@@ -894,6 +896,7 @@ DriverInfo:
         assert_eq!(c.p2p_count, Some(138));
         assert_eq!(c.drs_active, Some(true));
         assert_eq!(c.pit.fast_repairs_available, None);
+        assert_eq!(c.pit.requested_fuel_l, Some(12.5));
         assert_eq!(c.delta_to_session_best_s, Some(-0.5));
         assert_eq!(c.delta_to_optimal_s, None, "not marked valid");
         let w = f.weather.unwrap();

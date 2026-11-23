@@ -57,11 +57,21 @@ impl SourceArgs {
 
     /// Where the game leaves telemetry files behind.
     pub fn recordings(&self) -> Option<PathBuf> {
+        self.recordings_in(&dirs::document_dir()?)
+    }
+
+    fn recordings_in(&self, documents: &std::path::Path) -> Option<PathBuf> {
         match self.game() {
-            Game::Iracing | Game::Auto => Some(vr_iracing::telemetry_dir(&dirs::document_dir()?)),
+            Game::Iracing | Game::Auto => Some(vr_iracing::telemetry_dir(documents)),
             // Automobilista 2 leaves no telemetry files.
             Game::Ams2 | Game::Replay | Game::Synthetic => None,
         }
+    }
+
+    /// Whether `vr serve` keeps the sessions: those of live games, unless
+    /// told not to. Demo races are not the driver's.
+    pub fn keeps_sessions(&self, no_sessions: bool) -> bool {
+        !no_sessions && self.live_game()
     }
 
     pub fn source_kind(&self, live: bool) -> SourceKind {
@@ -235,7 +245,10 @@ mod tests {
             self.first.take().unwrap_or(Ok(Poll::Idle))
         }
         fn extras(&mut self) -> Option<Extras> {
-            Some(Extras::default())
+            Some(Extras {
+                info: Some(self.name.into()),
+                ..Extras::default()
+            })
         }
         fn reconnectable(&self) -> bool {
             self.name != "finite"
@@ -286,7 +299,7 @@ mod tests {
             "the probe's sample"
         );
         assert!(matches!(s.poll(Duration::ZERO).unwrap(), Poll::Idle));
-        assert_eq!(s.extras(), Some(Extras::default()));
+        assert_eq!(s.extras().unwrap().info, Some("b".into()));
         assert!(s.reconnectable());
 
         let (mut a, mut b) = (
@@ -360,6 +373,20 @@ mod tests {
             None,
             "AMS2 leaves no files"
         );
+        let docs = std::path::Path::new("docs");
+        assert_eq!(
+            args(None).recordings_in(docs),
+            Some(vr_iracing::telemetry_dir(docs))
+        );
+        assert_eq!(
+            args(Some(Game::Iracing)).recordings_in(docs),
+            Some(vr_iracing::telemetry_dir(docs))
+        );
+        assert_eq!(args(Some(Game::Synthetic)).recordings_in(docs), None);
+        assert!(args(None).keeps_sessions(false));
+        assert!(args(Some(Game::Ams2)).keeps_sessions(false));
+        assert!(!args(Some(Game::Ams2)).keeps_sessions(true));
+        assert!(!args(Some(Game::Synthetic)).keeps_sessions(false));
         assert!(args(Some(Game::Ams2)).live_game());
         assert!(args(None).live_game());
         assert!(!args(Some(Game::Synthetic)).live_game());

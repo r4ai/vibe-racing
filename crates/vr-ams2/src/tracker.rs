@@ -203,7 +203,8 @@ impl Tracker {
         if laps > line.laps {
             line.crossed = Some((laps, time_s));
             self.first.entry(laps).or_insert(time_s);
-            while self.first.len() > LAPS_KEPT {
+            // One lap count is added at a time.
+            if self.first.len() > LAPS_KEPT {
                 self.first.pop_first();
             }
         }
@@ -447,6 +448,7 @@ mod tests {
         assert!((r - 36.0).abs() < 1e-6, "{r}");
         assert_eq!(t.fuel_flow(2.0, None), Some(r));
         assert_eq!(t.fuel_flow(2.0, Some(49.98)), Some(r), "time stands");
+        assert_eq!(t.fuel.len(), 3, "no sample while time stands");
         // Window of 3 s: the sample at 0 s drops, the one at 1 s is the base.
         let r = t.fuel_flow(4.0, Some(49.94)).unwrap();
         assert!((r - 60.0).abs() < 1e-6, "{r}");

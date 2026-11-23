@@ -875,8 +875,8 @@ fn live_tyres_damage_and_what_ams2_adds() {
     c.damage = Some(Damage {
         aero: Some(0.25),
         engine: Some(0.0),
-        suspension: [None, None, None, Some(0.6)],
-        brakes: [Some(0.1), None, None, None],
+        suspension: [Some(0.0), None, None, Some(0.6)],
+        brakes: [Some(0.1), Some(0.0), None, None],
     });
     c.pit.planned = Some("drive through".into());
     c.pit.mandatory_lap = Some(12);
