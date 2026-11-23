@@ -619,6 +619,19 @@ mod tests {
         assert_eq!(short.i32("sectorCount"), None);
         assert_eq!(short.text("carModel").as_deref(), Some("ks_mazda_mx5_cup"));
 
+        // Too long: cut, leaving room for the closing NUL.
+        let long = "x".repeat(40);
+        w.text("carModel", &long);
+        assert_eq!(
+            View::new(&STATIC, &w.bytes).text("carModel"),
+            Some("x".repeat(32))
+        );
+        let mut w = Writer::new(&VEHICLE);
+        w.text("driverName", &"y".repeat(70));
+        assert_eq!(
+            View::new(&VEHICLE, &w.bytes).text("driverName"),
+            Some("y".repeat(63))
+        );
         let mut w = Writer::new(&VEHICLE);
         w.text("driverName", "Jörg Ünal").i32("isConnected", 1);
         let v = View::new(&VEHICLE, &w.bytes);
