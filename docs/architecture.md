@@ -114,7 +114,7 @@ flowchart LR
 | 境界           | 方式                                                                                                                                                      | 所有者                                                                    |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | ゲーム → `vr`  | iRacing 共有メモリ `Local\IRSDKMemMapFileName`（読取専用）<br/>と新データ通知イベント                                                                     | iRacing                                                                   |
-| ゲーム → `vr`  | Assetto Corsa 共有メモリ `Local\acpmf_*`（読取専用、4 ms ごとに確認）<br/>または UDP 9996、`race_out.json`（[一覧](../crates/vr-ac/docs/data.md)）   | Assetto Corsa・CrewChief のアプリ                                         |
+| ゲーム → `vr`  | Assetto Corsa 共有メモリ `Local\acpmf_*`（読取専用、4 ms ごとに確認）<br/>または UDP 9996、`race_out.json`（[一覧](../crates/vr-ac/docs/data.md)）        | Assetto Corsa・CrewChief のアプリ                                         |
 | CLI → サーバー | HTTP/JSON、`127.0.0.1` 限定、既定ポート 47800                                                                                                             | `vr-server`                                                               |
 | 過去の画面     | `GET /`（ブラウザ）と `/v1/sessions`、周の波形 `…/laps`。読み取り専用                                                                                     | `vr-server`                                                               |
 | イベント配信   | SSE `/v1/events/stream`（event 名 `race`）                                                                                                                | `vr-server`                                                               |
@@ -169,7 +169,7 @@ flowchart BT
 | ------ | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------- |
 | 共通型 | [`crates/vr-core`](../crates/vr-core)                                     | `Frame`・`TelemetrySource`・`Capabilities`                             | 低       |
 | 入力   | [`crates/vr-iracing`](../crates/vr-iracing)                               | ヘッダ・変数表の解析、YAML サニタイズ、`Frame` 変換、Win32 マッピング  | 中       |
-| 入力   | [`crates/vr-ac`](../crates/vr-ac)                               | 全ページ・UDP の配置、`Frame` 変換、セッションの時計、Win32 マッピング | 中       |
+| 入力   | [`crates/vr-ac`](../crates/vr-ac)                                         | 全ページ・UDP の配置、`Frame` 変換、セッションの時計、Win32 マッピング | 中       |
 | 入力   | [`crates/vr-replay`](../crates/vr-replay)                                 | NDJSON 記録・再生、ペーシング、合成レース                              | 低       |
 | 解析   | [`crates/vr-engine/src/state.rs`](../crates/vr-engine/src/state.rs)       | 周回確定、燃費・ギャップ・近傍車、イベント検出                         | 高       |
 | 解析   | [`crates/vr-engine/src/api.rs`](../crates/vr-engine/src/api.rs)           | `RaceApi` と引数型、`SharedState` への委譲                             | 中       |
@@ -196,6 +196,7 @@ flowchart BT
 ## 設計上の不変条件
 
 - **ゲーム非依存の境界**: ゲーム固有の値（iRacing のビットフィールド、kg/h、`-1` や `604800` の番兵値、Assetto Corsa の psi・左手系の軸・ms）はアダプタ内で正規化。`Extras` の `channels`・`info` だけはゲームの名前のまま通し、解析には使わない
+- **共通形式の意味**: `Frame` の値は単位・範囲・語彙をゲームに依らず定義（損傷は 0〜1、路面は `Wetness`、車内設定は同じ調整に同じ id）。ゲームの尺度のままの値は `Control.value` と `Extras` だけ
 - **問い合わせ面の一本化**: フロントエンドは `RaceApi` 経由でのみ状態を読む（`HttpClient` と `RaceState` が実装）
 - **JSON 互換**: `report.rs` の型は HTTP と `-f json` の契約。フィールドの削除・意味変更は禁止
 - **推定の明示**: 推定値には根拠（`FuelBasis`・`GapMode`・`history`・`age_ms`）を付け、欠損は 0 で埋めず `None`

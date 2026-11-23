@@ -181,11 +181,9 @@ fn tyre(p: &View<'_>, i: usize) -> Tyre {
         hot_kpa: positive(p.f64_at("wheelsPressure", i)).map(|psi| psi * KPA_PER_PSI),
         temp_c: across(p, i),
         // The game's wear is what is left of 100.
-        tread: [
-            None,
-            positive(p.f64_at("tyreWear", i)).map(|w| (w / 100.0).clamp(0.0, 1.0)),
-            None,
-        ],
+        // The game wears grip away, not tread: 100 is a new tyre.
+        tread: [None; 3],
+        grip: positive(p.f64_at("tyreWear", i)).map(|w| (w / 100.0).clamp(0.0, 1.0)),
         distance_m: None,
         core_c: set(p.f64_at("tyreCoreTemperature", i)),
     }
@@ -211,15 +209,30 @@ fn wheel(p: &View<'_>, s: &View<'_>, i: usize, shock: Option<f64>) -> Wheel {
     }
 }
 
-fn damage(p: &View<'_>) -> Option<Damage> {
-    // Only the first four are used by the game.
-    let [front, rear, left, right] = [0, 1, 2, 3].map(|i| p.f64_at("carDamage", i));
-    front.is_some().then_some(Damage {
+/// Body damage at which a part is gone, as CrewChief reads the game.
+const BODY_DESTROYED: f64 = 400.0;
+/// Engine life of a new engine.
+const ENGINE_LIFE: f64 = 1000.0;
+
+fn share(v: Option<f64>) -> Option<f64> {
+    v.map(|v| v.clamp(0.0, 1.0))
+}
+
+/// The body from the physics page (only its first four parts are used); the
+/// suspension and engine from CrewChief's page, when it runs.
+fn damage(p: &View<'_>, me: Option<&View<'_>>) -> Option<Damage> {
+    let [front, rear, left, right] =
+        [0, 1, 2, 3].map(|i| share(p.f64_at("carDamage", i).map(|d| d / BODY_DESTROYED)));
+    front.is_some().then(|| Damage {
         front,
         rear,
         left,
         right,
-        centre: None,
+        suspension: me.map_or([None; 4], |v| v.arr("suspensionDamage").map(share)),
+        engine: share(
+            me.and_then(|v| v.f64("engineLifeLeft"))
+                .map(|l| 1.0 - l / ENGINE_LIFE),
+        ),
     })
 }
 
@@ -274,7 +287,11 @@ fn car_telemetry(snap: &Snapshot, tracker: &mut Tracker, time_s: f64) -> CarTele
     if p.flag("pitLimiterOn") == Some(true) {
         warnings.push(Warning::PitLimiter);
     }
-    let damage = damage(&p);
+    let vehicles = snap.vehicles();
+    let me = vehicles
+        .iter()
+        .find(|v| v.i32("carId") == Some(PLAYER_IDX as i32));
+    let damage = damage(&p, me);
     if damage.as_ref().is_some_and(|d| !d.hurt().is_empty()) {
         warnings.push(Warning::Damage);
     }
@@ -664,10 +681,7 @@ mod tests {
         let (p, g, s) = snapshot();
         let mut t = Tracker::default();
         let f = build_frame(&snap(&p, &g, &s), &mut t, 7, 1_000);
-        assert_eq!(
-            (f.game.as_str(), f.tick, f.timestamp_ms),
-            ("ac", 7, 1_000)
-        );
+        assert_eq!((f.game.as_str(), f.tick, f.timestamp_ms), ("ac", 7, 1_000));
         let ss = &f.session;
         assert_eq!(
             (ss.kind, ss.phase),
@@ -728,10 +742,10 @@ mod tests {
             [Some(86.0), Some(88.0), Some(90.0)],
             "outer first"
         );
-        assert!(close(lf.tread[1], 0.985));
-        assert_eq!((lf.tread[0], lf.tread[2]), (None, None));
+        assert!(close(lf.grip, 0.985));
+        assert_eq!(lf.tread, [None; 3], "wear is of grip, not tread");
         assert_eq!(lf.core_c, Some(85.0));
-        assert!(close(car.tyres.rr.min_tread(), 0.975));
+        assert!(close(car.tyres.rr.grip, 0.975));
         let controls: Vec<(&str, f64)> = car
             .controls
             .iter()
@@ -756,7 +770,8 @@ mod tests {
         assert_eq!(car.penalty_s, Some(0.0));
         let d = car.damage.unwrap();
         assert!(d.hurt().is_empty());
-        assert_eq!((d.front, d.centre), (Some(0.0), None));
+        assert_eq!((d.front, d.engine), (Some(0.0), None));
+        assert_eq!(d.suspension, [None; 4], "only CrewChief tells");
         let w = car.wheels.unwrap();
         assert!(close(w.lf.speed_mps, 51.0));
         assert!(
@@ -921,10 +936,7 @@ mod tests {
         assert_eq!(pl.delta_to_best_s, None, "no best lap to compare to");
         assert_eq!(pl.fuel_capacity_l, None);
         let lf = &pl.car.tyres.lf;
-        assert_eq!(
-            (lf.hot_kpa, lf.temp_c, lf.min_tread()),
-            (None, [None; 3], None)
-        );
+        assert_eq!((lf.hot_kpa, lf.temp_c, lf.grip), (None, [None; 3], None));
         assert!(pl.car.controls.iter().all(|c| c.id != "brake_bias"));
         let w = pl.car.wheels.unwrap();
         assert_eq!((w.lf.speed_mps, w.lf.pressure_kpa), (None, None));
@@ -939,7 +951,7 @@ mod tests {
     #[test]
     fn the_car_in_trouble_and_in_the_pits() {
         let (mut p, mut g, mut s) = snapshot();
-        p.f32s("carDamage", &[12.5, 0.0, 3.0, 0.0, 99.0])
+        p.f32s("carDamage", &[100.0, 0.0, 12.0, 800.0, 999.0])
             .i32("pitLimiterOn", 1)
             .i32("numberOfTyresOut", 3)
             .f32("clutch", 0.25);
@@ -950,8 +962,49 @@ mod tests {
         let d = car.damage.as_ref().unwrap();
         assert_eq!(
             d.hurt(),
-            [("front", 12.5), ("left", 3.0)],
-            "the fifth is unused"
+            [("right", 1.0), ("front", 0.25)],
+            "out of 400; a scratch and the fifth part are not told"
+        );
+        assert!(close(d.left, 0.03));
+
+        // CrewChief tells the suspension and the engine.
+        let mut head = crate::layout::Writer::new(&CREWCHIEF);
+        head.i32("numVehicles", 1);
+        let mut me = crate::layout::Writer::new(&VEHICLE);
+        me.i32("isConnected", 1)
+            .f32s("suspensionDamage", &[0.0, 0.2, 1.5, -0.1])
+            .f32("engineLifeLeft", 700.0);
+        let mut cc = head.bytes.clone();
+        cc.extend(&me.bytes);
+        let mut with_cc = snap(&p, &g, &s);
+        with_cc.crewchief = Some(cc);
+        let car = build_frame(&with_cc, &mut Tracker::default(), 0, 0)
+            .player
+            .unwrap()
+            .car;
+        let d = car.damage.unwrap();
+        assert!(close(d.suspension[1], 0.2));
+        assert_eq!(
+            (d.suspension[0], d.suspension[2], d.suspension[3]),
+            (Some(0.0), Some(1.0), Some(0.0))
+        );
+        assert!(close(d.engine, 0.3));
+        // Only scratched: no warning.
+        p.f32s("carDamage", &[19.0, 0.0, 0.0, 0.0, 0.0]);
+        let car = build_frame(&snap(&p, &g, &s), &mut Tracker::default(), 0, 0)
+            .player
+            .unwrap()
+            .car;
+        assert_eq!(car.warnings, [Warning::PitLimiter]);
+        p.f32s("carDamage", &[20.0, 0.0, 0.0, 0.0, 0.0]);
+        let car = build_frame(&snap(&p, &g, &s), &mut Tracker::default(), 0, 0)
+            .player
+            .unwrap()
+            .car;
+        assert_eq!(
+            car.warnings,
+            [Warning::PitLimiter, Warning::Damage],
+            "5% of 400"
         );
         assert_eq!(car.penalty_s, Some(5.0));
         assert_eq!(car.clutch, Some(0.75));

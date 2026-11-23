@@ -3,7 +3,7 @@ use std::time::Duration;
 use vr_core::{
     Capabilities, CarState, CarTelemetry, Channel, Control, Extras, Flag, Frame, PitState,
     PlayerTelemetry, Poll, SessionKind, SessionPhase, SessionState, Setup, SetupItem, SourceError,
-    TelemetrySource, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather,
+    TelemetrySource, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather, Wetness,
 };
 
 use crate::Pacer;
@@ -170,13 +170,13 @@ fn wetness(cfg: &SynthConfig, t: f64) -> f64 {
     }
 }
 
-/// The game's words for a wetness.
-fn wetness_word(w: f64) -> &'static str {
+/// How wet the track looks.
+fn wetness_word(w: f64) -> Wetness {
     match w {
-        w if w < 0.05 => "dry",
-        w if w < 0.35 => "lightly wet",
-        w if w < 0.7 => "moderately wet",
-        _ => "very wet",
+        w if w < 0.05 => Wetness::Dry,
+        w if w < 0.35 => Wetness::LightlyWet,
+        w if w < 0.7 => Wetness::ModeratelyWet,
+        _ => Wetness::VeryWet,
     }
 }
 
@@ -420,7 +420,7 @@ impl SynthSource {
                 Some(Weather {
                     air_temp_c: Some(22.0 - 3.0 * w),
                     track_temp_c: Some(31.0 - 8.0 * w),
-                    wetness: Some(wetness_word(w).into()),
+                    wetness: Some(wetness_word(w)),
                     precipitation: Some(w),
                     ..Default::default()
                 })
@@ -442,6 +442,7 @@ impl SynthSource {
             tread: [Some(tread); 3],
             distance_m: Some(age * 4500.0),
             core_c: None,
+            grip: None,
         };
         CarTelemetry {
             clutch: Some(1.0),
@@ -694,14 +695,14 @@ mod tests {
                 .unwrap();
             (f.wetness.unwrap(), f.precipitation.unwrap())
         };
-        assert_eq!(w(100.0), ("dry".to_string(), 0.0));
-        assert_eq!(w(245.0).0, "lightly wet");
-        assert_eq!(w(290.0).0, "moderately wet");
-        assert_eq!(w(395.0), ("very wet".to_string(), 1.0));
-        assert_eq!(wetness_word(0.049), "dry");
-        assert_eq!(wetness_word(0.05), "lightly wet");
-        assert_eq!(wetness_word(0.35), "moderately wet");
-        assert_eq!(wetness_word(0.7), "very wet");
+        assert_eq!(w(100.0), (Wetness::Dry, 0.0));
+        assert_eq!(w(245.0).0, Wetness::LightlyWet);
+        assert_eq!(w(290.0).0, Wetness::ModeratelyWet);
+        assert_eq!(w(395.0), (Wetness::VeryWet, 1.0));
+        assert_eq!(wetness_word(0.049), Wetness::Dry);
+        assert_eq!(wetness_word(0.05), Wetness::LightlyWet);
+        assert_eq!(wetness_word(0.35), Wetness::ModeratelyWet);
+        assert_eq!(wetness_word(0.7), Wetness::VeryWet);
     }
 
     #[test]

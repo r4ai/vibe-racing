@@ -2,8 +2,8 @@
 
 use vr_core::{
     CarExtra, CarState, CarTelemetry, Control, Flag, Frame, PitState, PlayerTelemetry, SessionKind,
-    SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather, Wheel,
-    Wheels,
+    SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather, Wetness,
+    Wheel, Wheels,
 };
 
 use crate::layout::VarView;
@@ -72,20 +72,10 @@ fn surface(v: Option<i32>) -> TrackSurface {
     }
 }
 
-fn wetness(v: Option<i32>) -> Option<String> {
-    Some(
-        match v? {
-            1 => "dry",
-            2 => "mostly dry",
-            3 => "very lightly wet",
-            4 => "lightly wet",
-            5 => "moderately wet",
-            6 => "very wet",
-            7 => "extremely wet",
-            _ => return None,
-        }
-        .to_string(),
-    )
+/// irsdk_TrackWetness: 1 dry .. 7 extremely wet.
+fn wetness(v: Option<i32>) -> Option<Wetness> {
+    let i = usize::try_from(v?.checked_sub(1)?).ok()?;
+    Wetness::ALL.get(i).copied()
 }
 
 /// Values iRacing uses for "unlimited" / "not set".
@@ -247,6 +237,7 @@ fn tyre(v: &VarView<'_>, corner: &str) -> Tyre {
         tread: across("wear"),
         distance_m: v.f64(&format!("{corner}odometer")),
         core_c: None,
+        grip: None,
     }
 }
 
@@ -434,7 +425,10 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
                     d.car_name == player_car_name,
                 ),
                 best_lap_num: v.i32_at("CarIdxBestLapNum", i).filter(|l| *l > 0),
-                p2p_count: v.i32_at("CarIdxP2P_Count", i),
+                // Outside races iRacing counts the uses, not what is left.
+                p2p_count: v
+                    .i32_at("CarIdxP2P_Count", i)
+                    .filter(|_| kind == SessionKind::Race),
                 p2p_active: v.bool_at("CarIdxP2P_Status", i),
                 fast_repairs_used: v.i32_at("CarIdxFastRepairsUsed", i),
                 flags: personal_flags(v.i32_at("CarIdxSessionFlags", i).unwrap_or(0) as u32),
@@ -445,6 +439,10 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
     }
 
     let kg_per_l = si.fuel_kg_per_l.filter(|d| *d > 0.0);
+    let mut car = car_telemetry(v, si);
+    if kind != SessionKind::Race {
+        car.p2p_count = None;
+    }
     let player = PlayerTelemetry {
         on_track: v.bool("IsOnTrack").unwrap_or(false),
         speed_mps: v.f64("Speed"),
@@ -468,7 +466,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
             .flatten(),
         water_temp_c: v.f64("WaterTemp"),
         oil_temp_c: v.f64("OilTemp"),
-        car: car_telemetry(v, si),
+        car,
     };
 
     Frame {
@@ -553,7 +551,7 @@ mod tests {
             "extremely wet",
         ];
         for (i, w) in wet.iter().enumerate() {
-            assert_eq!(wetness(Some(i as i32 + 1)).as_deref(), Some(*w));
+            assert_eq!(wetness(Some(i as i32 + 1)).map(Wetness::as_str), Some(*w));
         }
         assert_eq!(wetness(Some(0)), None);
         assert_eq!(wetness(Some(8)), None);
@@ -834,7 +832,9 @@ DriverInfo:
         let one = |name, ty| Var { name, ty, count: 1 };
         let vars = [
             one("PlayerCarIdx", 2),
+            one("SessionNum", 2),
             one("SessionUniqueID", 2),
+            one("PitsOpen", 1),
             one("LFtempCL", 4),
             one("LFtempCR", 4),
             one("RFtempCL", 4),
@@ -857,6 +857,7 @@ DriverInfo:
         let mut img = Image::new(&vars, YAML);
         img.set_i32("PlayerCarIdx", 0, 1);
         img.set_i32("SessionUniqueID", 0, 3);
+        img.set_bool("PitsOpen", 0, true);
         img.set_f32("LFtempCL", 0, 88.5);
         img.set_f32("LFtempCR", 0, 97.5);
         img.set_f32("RFtempCL", 0, 99.5);
@@ -892,8 +893,12 @@ DriverInfo:
             .collect();
         assert_eq!(controls, [("brake_bias", 57.25), ("traction_control", 2.0)]);
         assert_eq!(c.p2p_count, Some(138));
+        // Outside races the count is of uses: not told as what is left.
+        img.set_i32("SessionNum", 0, 1);
+        assert_eq!(build(&img).player.unwrap().car.p2p_count, None);
         assert_eq!(c.drs_active, Some(true));
         assert_eq!(c.pit.fast_repairs_available, None);
+        assert_eq!(c.pit.open, Some(true));
         assert_eq!(c.delta_to_session_best_s, Some(-0.5));
         assert_eq!(c.delta_to_optimal_s, None, "not marked valid");
         let w = f.weather.unwrap();

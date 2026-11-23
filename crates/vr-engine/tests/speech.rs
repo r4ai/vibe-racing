@@ -730,7 +730,7 @@ fn flags_and_weather() {
     );
     assert_eq!(say(&m, SpeechTopic::Weather), "天気は取れていない。");
     m.brief.weather = Some(Weather {
-        wetness: Some("lightly wet".into()),
+        wetness: Some(vr_core::Wetness::LightlyWet),
         precipitation: Some(0.31),
         ..Default::default()
     });
@@ -755,15 +755,19 @@ fn flags_and_weather() {
     let w = m.brief.weather.as_mut().unwrap();
     w.precipitation = Some(0.0);
     assert!(say(&m, SpeechTopic::Weather).ends_with("濡れてる。雨は無い。"));
-    m.brief.weather.as_mut().unwrap().wetness = Some("dry".into());
+    m.brief.weather.as_mut().unwrap().wetness = Some(vr_core::Wetness::Dry);
     assert_eq!(say(&m, SpeechTopic::Weather), "ドライ、雨は無い。");
     m.brief.weather.as_mut().unwrap().track_temp_c = Some(31.4);
     assert_eq!(
         say(&m, SpeechTopic::Weather),
         "ドライ、雨は無い。路面31度。"
     );
-    m.brief.weather.as_mut().unwrap().wetness = Some("damp".into());
-    assert!(say(&m, SpeechTopic::Weather).ends_with("雨は無い。路面31度。"));
+    m.brief.weather.as_mut().unwrap().wetness = Some(vr_core::Wetness::ExtremelyWet);
+    assert!(
+        say(&m, SpeechTopic::Weather).starts_with("路面は水浸し。"),
+        "{}",
+        say(&m, SpeechTopic::Weather)
+    );
     m.brief.weather = Some(Weather::default());
     assert_eq!(say(&m, SpeechTopic::Weather), "天気は取れていない。");
 }

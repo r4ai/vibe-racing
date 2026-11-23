@@ -25,6 +25,9 @@ pub const PORT: u16 = 9996;
 const G: f64 = 9.806_65;
 /// Ask again when the game does not answer within this.
 const RETRY: Duration = Duration::from_secs(2);
+/// Read at most this many packets of a socket in one go, so a flood cannot
+/// hold the collector.
+const MAX_PACKETS: usize = 256;
 /// Without a packet for this long, the game is gone.
 const SILENT: Duration = Duration::from_secs(5);
 
@@ -361,7 +364,6 @@ impl TelemetrySource for UdpSource {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             multi_car: !self.laps.is_empty(),
-            fuel: false,
             ..Capabilities::default()
         }
     }
@@ -403,7 +405,10 @@ impl TelemetrySource for UdpSource {
         loop {
             self.update.ask();
             self.spot.ask();
-            while let Some(n) = self.spot.recv(&mut buf) {
+            for _ in 0..MAX_PACKETS {
+                let Some(n) = self.spot.recv(&mut buf) else {
+                    break;
+                };
                 self.heard = Instant::now();
                 if n == HANDSHAKE_RESPONSE.size {
                     self.handshake.get_or_insert_with(|| buf[..n].to_vec());
@@ -411,7 +416,10 @@ impl TelemetrySource for UdpSource {
                     self.take_lap(&buf[..n]);
                 }
             }
-            while let Some(n) = self.update.recv(&mut buf) {
+            for _ in 0..MAX_PACKETS {
+                let Some(n) = self.update.recv(&mut buf) else {
+                    break;
+                };
                 self.heard = Instant::now();
                 if n == HANDSHAKE_RESPONSE.size {
                     self.handshake = Some(buf[..n].to_vec());
@@ -468,7 +476,8 @@ mod tests {
             .i32("bestLap", 0)
             .i32("lapCount", lap_count)
             .f32("gas", 1.0)
-            .f32("clutch", 0.0)
+            .f32("clutch", 0.25)
+            .f32("brake", 0.25)
             .f32("engineRPM", 6500.0)
             .i32("gear", 3)
             .f32s("wheelAngularSpeed", &[100.0; 4])
@@ -513,10 +522,12 @@ mod tests {
             game.send_to(&response(), from).unwrap();
             clients.push(from);
         }
+        let t0 = Instant::now();
         assert!(matches!(
             src.poll(Duration::from_millis(50)).unwrap(),
             Poll::Idle
         ));
+        assert!(t0.elapsed() >= Duration::from_millis(50), "waits it out");
         let mut subs = BTreeMap::new();
         for _ in 0..2 {
             let (_, from) = game.recv_from(&mut buf).unwrap();
@@ -533,11 +544,12 @@ mod tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(20));
         game.send_to(&car_info(4), subs[&SUBSCRIBE_UPDATE]).unwrap();
-        let f = loop {
-            if let Poll::Frame(f) = src.poll(Duration::from_millis(200)).unwrap() {
-                break f;
-            }
-        };
+        let f = (0..20)
+            .find_map(|_| match src.poll(Duration::from_millis(200)).unwrap() {
+                Poll::Frame(f) => Some(f),
+                _ => None,
+            })
+            .expect("a frame");
         assert_eq!(f.tick, 1);
         let track = f.session.track.as_ref().unwrap();
         assert_eq!(
@@ -553,8 +565,8 @@ mod tests {
         assert!((me.lap_dist_pct.unwrap() - 0.42).abs() < 1e-6);
         let other = f.car(3).unwrap();
         assert_eq!(
-            (other.driver.as_str(), other.laps_completed),
-            ("Grace Hopper", Some(5))
+            (other.driver.as_str(), other.lap, other.laps_completed),
+            ("Grace Hopper", Some(6), Some(5))
         );
         assert_eq!(other.last_lap_s, Some(71.5));
         assert_eq!(f.cars.len(), 2, "the player's own lap is not another car");
@@ -564,8 +576,10 @@ mod tests {
             (Some(40.0), Some(2), Some(6500.0))
         );
         assert_eq!(p.current_lap_s, Some(12.345));
+        assert!(p.on_track);
+        assert_eq!((p.throttle, p.brake), (Some(1.0), Some(0.25)));
         let car = &p.car;
-        assert_eq!((car.abs_active, car.clutch), (Some(true), Some(1.0)));
+        assert_eq!((car.abs_active, car.clutch), (Some(true), Some(0.75)));
         assert_eq!(car.warnings, [Warning::RevLimiter]);
         assert!((car.lat_accel_mps2.unwrap() + G).abs() < 1e-9);
         assert!((car.long_accel_mps2.unwrap() + 0.5 * G).abs() < 1e-6);

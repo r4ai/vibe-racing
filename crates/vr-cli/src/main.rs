@@ -325,11 +325,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             // Demo races are not the driver's.
-            let keep = !no_sessions
-                && matches!(
-                    cli.src.game(),
-                    sources::Game::Iracing | sources::Game::Ac | sources::Game::AcUdp
-                );
+            let keep = cli.src.keeps_sessions(no_sessions);
             let record = record.map(|p| (p, record_hz));
             serve(&cli.src, port, record, keep, !no_import)
         }

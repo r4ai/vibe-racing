@@ -142,19 +142,7 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
         }
     }
 
-    if !r.server.ok {
-        r.hints.push("run `vr serve` in a separate terminal while racing for lap history, fuel averages and gap trends".into());
-    }
-    if !r.iracing.ok && !r.ac.ok {
-        r.hints.push(
-            "no live iRacing or Assetto Corsa session; `vr serve --game synthetic --speed 10` gives a demo race"
-                .into(),
-        );
-    }
-    if r.skills.is_empty() {
-        r.hints
-            .push("install the agent skill: `vr skill install`".into());
-    }
+    r.hints = hints(&r);
 
     match fmt {
         Format::Json => println!("{}", serde_json::to_string(&r)?),
@@ -176,4 +164,64 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// What to do about what is not working.
+fn hints(r: &Report) -> Vec<String> {
+    let mut out = Vec::new();
+    if !r.server.ok {
+        out.push("run `vr serve` in a separate terminal while racing for lap history, fuel averages and gap trends".into());
+    }
+    if !r.iracing.ok && !r.ac.ok {
+        out.push(
+            "no live iRacing or Assetto Corsa session; `vr serve --game synthetic --speed 10` gives a demo race"
+                .into(),
+        );
+    }
+    if r.skills.is_empty() {
+        out.push("install the agent skill: `vr skill install`".into());
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_for_what_is_missing() {
+        let ok = || Check {
+            ok: true,
+            detail: String::new(),
+        };
+        let all = Report {
+            iracing: ok(),
+            ac: ok(),
+            server: ok(),
+            skills: vec!["claude: x".into()],
+            ..Default::default()
+        };
+        assert!(hints(&all).is_empty());
+        let game = |iracing: bool, ac: bool| {
+            let r = Report {
+                iracing: Check {
+                    ok: iracing,
+                    ..ok()
+                },
+                ac: Check { ok: ac, ..ok() },
+                server: ok(),
+                skills: vec!["x".into()],
+                ..Default::default()
+            };
+            hints(&r)
+                .iter()
+                .any(|h| h.contains("no live iRacing or Assetto Corsa"))
+        };
+        assert!(!game(true, false), "iRacing is enough");
+        assert!(!game(false, true), "Assetto Corsa is enough");
+        assert!(game(false, false));
+        let none = hints(&Report::default());
+        assert_eq!(none.len(), 3, "{none:?}");
+        assert!(none[0].contains("vr serve") && none[2].contains("vr skill install"));
+    }
 }

@@ -7,11 +7,11 @@ ACC（Assetto Corsa Competizione）・AC EVO は構造が違う別のゲーム�
 
 | 経路                   | 場所・方式                                                       | 内容                                                    | 対応                                   |
 | ---------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------- |
-| 共有メモリ `physics`   | `Local\acpmf_physics`                                            | 自車の物理（毎物理ステップ）                            | 全項目（`--game ac`）             |
+| 共有メモリ `physics`   | `Local\acpmf_physics`                                            | 自車の物理（毎物理ステップ）                            | 全項目（`--game ac`）                  |
 | 共有メモリ `graphics`  | `Local\acpmf_graphics`                                           | 自車の周回・順位・旗・セッション                        | 全項目                                 |
 | 共有メモリ `static`    | `Local\acpmf_static`                                             | 車・コース・補助設定（起動時固定）                      | 全項目                                 |
 | CrewChief 拡張         | `Local\acpmf_crewchief`<br/>（Python アプリ CrewChiefEx が書く） | 全車の位置・周回・タイム・ピット                        | 全項目。あれば他車に使う               |
-| UDP リモートテレメトリ | UDP 9996（ハンドシェイク後に配信）                               | 自車の物理（`RTCarInfo`）<br/>全車の周回完了（`RTLap`） | 全項目（`--game ac-udp`）         |
+| UDP リモートテレメトリ | UDP 9996（ハンドシェイク後に配信）                               | 自車の物理（`RTCarInfo`）<br/>全車の周回完了（`RTLap`） | 全項目（`--game ac-udp`）              |
 | セッション結果         | `Documents\Assetto Corsa\out\race_out.json`                      | 終わったセッションの全車の周回                          | 付随データの `info.results` に渡す     |
 | 走行記録               | `Documents\Assetto Corsa\ctelemetry\`                            | 暗号化された独自形式                                    | 非対応（仕様非公開）                   |
 | 自己ベスト             | `Documents\Assetto Corsa\personalbest.ini`                       | 車とコースごとのベストタイム                            | 非対応（セッション外の記録）           |
@@ -33,53 +33,53 @@ ACC（Assetto Corsa Competizione）・AC EVO は構造が違う別のゲーム�
 
 ## 共有メモリ `physics`
 
-| 項目                                         | 単位・意味                                     | Frame                                               |
-| -------------------------------------------- | ---------------------------------------------- | --------------------------------------------------- |
-| `packetId`                                   | 更新ごとに増える                               | 新しいデータの判定                                  |
-| `gas` / `brake`                              | 0〜1                                           | `throttle` / `brake`                                |
-| `fuel`                                       | L                                              | `fuel_l`                                            |
-| `gear`                                       | 0 後退・1 中立・2 が 1 速                      | `gear`（-1 後退・0 中立）                           |
-| `rpms`                                       | rpm                                            | `rpm`                                               |
-| `steerAngle`                                 | -1〜1 の入力（舵角の上限は不明）               | チャンネルのみ                                      |
-| `speedKmh`                                   | km/h                                           | `speed_mps`                                         |
-| `velocity[3]`                                | m/s、世界座標                                  | チャンネルのみ                                      |
-| `accG[3]`                                    | G、車の座標（横・上・前）                      | `lat_accel_mps2`（左を正）・`long_accel_mps2`       |
-| `wheelSlip[4]`                               | 滑りの量                                       | チャンネルのみ                                      |
-| `wheelLoad[4]`                               | N                                              | `Wheel.load_n`                                      |
-| `wheelsPressure[4]`                          | psi                                            | `Tyre.hot_kpa`・`Wheel.pressure_kpa`                |
-| `wheelAngularSpeed[4]`                       | rad/s                                          | `Wheel.speed_mps`（`tyreRadius` を掛ける）          |
-| `tyreWear[4]`                                | 新品 100 の残り                                | `Tyre.tread`（÷100）                                |
-| `tyreDirtyLevel[4]`                          | 汚れ                                           | チャンネルのみ                                      |
-| `tyreCoreTemperature[4]`                     | ℃                                              | `Tyre.core_c`                                       |
-| `camberRAD[4]`                               | rad                                            | `Wheel.camber_rad`                                  |
-| `suspensionTravel[4]`                        | m                                              | `Wheel.travel_m`、差分から `Wheel.shock_mps`        |
-| `drs`                                        | 0/1                                            | `drs_active`（`hasDRS` の車）                       |
-| `tc` / `abs`                                 | 滑り率の上限（0 は切）                         | 車内設定 `traction_control` / `abs`                 |
-| `heading` / `pitch` / `roll` / `cgHeight`    | rad・m                                         | チャンネルのみ                                      |
-| `carDamage[5]`                               | 前・後・左・右（ゲームの単位、5 つ目は未使用） | `Damage`、1 つでも 0 より大きければ警告 `damage`    |
-| `numberOfTyresOut`                           | コース外の輪の数                               | 3 輪以上で `surface: off_track`                     |
-| `pitLimiterOn`                               | 0/1                                            | 警告 `pit_limiter`                                  |
-| `kersCharge` / `kersInput` / `kersCurrentKJ` | 0〜1・0〜1・kJ                                 | `battery_pct`（KERS・ERS の車）、他はチャンネル     |
-| `autoShifterOn`                              | 0/1                                            | チャンネルのみ                                      |
-| `rideHeight[2]`                              | m、前・後                                      | `Wheel.ride_height_m`（前を左右前輪、後を左右後輪） |
-| `turboBoost`                                 | bar                                            | チャンネルのみ                                      |
-| `ballast`                                    | kg                                             | `weight_penalty_kg`                                 |
-| `airDensity`                                 | kg/m³                                          | チャンネルのみ                                      |
-| `airTemp` / `roadTemp`                       | ℃                                              | `Weather.air_temp_c` / `track_temp_c`               |
-| `localAngularVel[3]`                         | rad/s、車の座標                                | `yaw_rate_rps`（左を正）                            |
-| `finalFF`                                    | ハンドルの力                                   | チャンネルのみ                                      |
-| `performanceMeter`                           | s、ベストとの差                                | `delta_to_best_s`                                   |
-| `engineBrake`                                | 段                                             | 車内設定 `engine_brake`（段のある車）               |
-| `ersRecoveryLevel` / `ersPowerLevel`         | 段                                             | 車内設定 `ers_recovery` / `ers_power`（ERS の車）   |
-| `ersHeatCharging` / `ersIsCharging`          | 0/1                                            | チャンネルのみ                                      |
-| `drsAvailable` / `drsEnabled`                | 0/1                                            | `drs_active` は `drsEnabled`、他はチャンネル        |
-| `brakeTemp[4]`                               | ℃                                              | `Wheel.brake_temp_c`                                |
-| `clutch`                                     | ペダル 0〜1（1 で踏み切り）                    | `clutch`（1 − ペダル、1 で繋がる）                  |
-| `tyreTempI` / `tyreTempM` / `tyreTempO`      | ℃、内・中・外                                  | `Tyre.temp_c`・`Wheel.surface_c`（外・中・内）      |
-| `isAIControlled`                             | 0/1                                            | チャンネルのみ                                      |
-| `tyreContactPoint` / `Normal` / `Heading`    | 世界座標のベクトル                             | チャンネルのみ                                      |
-| `brakeBias`                                  | 0〜1、前の割合                                 | 車内設定 `brake_bias`（%）                          |
-| `localVelocity[3]`                           | m/s、車の座標                                  | `velocity_x_mps`（前）・`velocity_y_mps`（左）      |
+| 項目                                         | 単位・意味                       | Frame                                                     |
+| -------------------------------------------- | -------------------------------- | --------------------------------------------------------- |
+| `packetId`                                   | 更新ごとに増える                 | 新しいデータの判定                                        |
+| `gas` / `brake`                              | 0〜1                             | `throttle` / `brake`                                      |
+| `fuel`                                       | L                                | `fuel_l`                                                  |
+| `gear`                                       | 0 後退・1 中立・2 が 1 速        | `gear`（-1 後退・0 中立）                                 |
+| `rpms`                                       | rpm                              | `rpm`                                                     |
+| `steerAngle`                                 | -1〜1 の入力（舵角の上限は不明） | チャンネルのみ                                            |
+| `speedKmh`                                   | km/h                             | `speed_mps`                                               |
+| `velocity[3]`                                | m/s、世界座標                    | チャンネルのみ                                            |
+| `accG[3]`                                    | G、車の座標（横・上・前）        | `lat_accel_mps2`（左を正）・`long_accel_mps2`             |
+| `wheelSlip[4]`                               | 滑りの量                         | チャンネルのみ                                            |
+| `wheelLoad[4]`                               | N                                | `Wheel.load_n`                                            |
+| `wheelsPressure[4]`                          | psi                              | `Tyre.hot_kpa`・`Wheel.pressure_kpa`                      |
+| `wheelAngularSpeed[4]`                       | rad/s                            | `Wheel.speed_mps`（`tyreRadius` を掛ける）                |
+| `tyreWear[4]`                                | 新品 100 の残りのグリップ        | `Tyre.grip`（÷100）。溝ではないので `tread` は空          |
+| `tyreDirtyLevel[4]`                          | 汚れ                             | チャンネルのみ                                            |
+| `tyreCoreTemperature[4]`                     | ℃                                | `Tyre.core_c`                                             |
+| `camberRAD[4]`                               | rad                              | `Wheel.camber_rad`                                        |
+| `suspensionTravel[4]`                        | m                                | `Wheel.travel_m`、差分から `Wheel.shock_mps`              |
+| `drs`                                        | 0/1                              | `drs_active`（`hasDRS` の車）                             |
+| `tc` / `abs`                                 | 滑り率の上限（0 は切）           | 車内設定 `traction_control` / `abs`                       |
+| `heading` / `pitch` / `roll` / `cgHeight`    | rad・m                           | チャンネルのみ                                            |
+| `carDamage[5]`                               | 前・後・左・右（5 つ目は未使用） | `Damage`（400 で全損として 0〜1）、5% 以上で警告 `damage` |
+| `numberOfTyresOut`                           | コース外の輪の数                 | 3 輪以上で `surface: off_track`                           |
+| `pitLimiterOn`                               | 0/1                              | 警告 `pit_limiter`                                        |
+| `kersCharge` / `kersInput` / `kersCurrentKJ` | 0〜1・0〜1・kJ                   | `battery_pct`（KERS・ERS の車）、他はチャンネル           |
+| `autoShifterOn`                              | 0/1                              | チャンネルのみ                                            |
+| `rideHeight[2]`                              | m、前・後                        | `Wheel.ride_height_m`（前を左右前輪、後を左右後輪）       |
+| `turboBoost`                                 | bar                              | チャンネルのみ                                            |
+| `ballast`                                    | kg                               | `weight_penalty_kg`                                       |
+| `airDensity`                                 | kg/m³                            | チャンネルのみ                                            |
+| `airTemp` / `roadTemp`                       | ℃                                | `Weather.air_temp_c` / `track_temp_c`                     |
+| `localAngularVel[3]`                         | rad/s、車の座標                  | `yaw_rate_rps`（左を正）                                  |
+| `finalFF`                                    | ハンドルの力                     | チャンネルのみ                                            |
+| `performanceMeter`                           | s、ベストとの差                  | `delta_to_best_s`                                         |
+| `engineBrake`                                | 段                               | 車内設定 `engine_brake`（段のある車）                     |
+| `ersRecoveryLevel` / `ersPowerLevel`         | 段                               | 車内設定 `ers_recovery` / `ers_power`（ERS の車）         |
+| `ersHeatCharging` / `ersIsCharging`          | 0/1                              | チャンネルのみ                                            |
+| `drsAvailable` / `drsEnabled`                | 0/1                              | `drs_active` は `drsEnabled`、他はチャンネル              |
+| `brakeTemp[4]`                               | ℃                                | `Wheel.brake_temp_c`                                      |
+| `clutch`                                     | ペダル 0〜1（1 で踏み切り）      | `clutch`（1 − ペダル、1 で繋がる）                        |
+| `tyreTempI` / `tyreTempM` / `tyreTempO`      | ℃、内・中・外                    | `Tyre.temp_c`・`Wheel.surface_c`（外・中・内）            |
+| `isAIControlled`                             | 0/1                              | チャンネルのみ                                            |
+| `tyreContactPoint` / `Normal` / `Heading`    | 世界座標のベクトル               | チャンネルのみ                                            |
+| `brakeBias`                                  | 0〜1、前の割合                   | 車内設定 `brake_bias`（%）                                |
+| `localVelocity[3]`                           | m/s、車の座標                    | `velocity_x_mps`（前）・`velocity_y_mps`（左）            |
 
 ## 共有メモリ `graphics`
 
@@ -157,20 +157,21 @@ CrewChief の Python アプリ（CrewChiefEx、64 台版と 128 台版）が、�
 構造は `numVehicles`・`focusVehicle`・`serverName[512]`・`vehicle[]`。台数の上限が版で違うので、`numVehicles` 台だけ読む。
 車 0 が自車。
 
-| 項目                                                          | Frame                                        |
-| ------------------------------------------------------------- | -------------------------------------------- |
-| `carId`                                                       | `idx`                                        |
-| `driverName` / `carModel`                                     | `driver` / `car_name`                        |
-| `speedMS`                                                     | チャンネルのみ                               |
-| `bestLapMS` / `lastLapTimeMS` / `currentLapTimeMS`            | `best_lap_s` / `last_lap_s` / チャンネルのみ |
-| `lapCount`                                                    | `laps_completed`                             |
-| `currentLapInvalid`                                           | チャンネルのみ                               |
-| `worldPosition`                                               | チャンネルのみ                               |
-| `isCarInPitline` / `isCarInPit`                               | `on_pit_road` / `surface: in_pit_stall`      |
-| `carLeaderboardPosition` / `carRealTimeLeaderboardPosition`   | `position`（決勝は走行順、他は順位表）       |
-| `spLineLength`                                                | `lap_dist_pct`                               |
-| `isConnected`                                                 | 接続していない車は除く                       |
-| `suspensionDamage[4]` / `engineLifeLeft` / `tyreInflation[4]` | チャンネルのみ                               |
+| 項目                                                        | Frame                                                                   |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `carId`                                                     | `idx`                                                                   |
+| `driverName` / `carModel`                                   | `driver` / `car_name`                                                   |
+| `speedMS`                                                   | チャンネルのみ                                                          |
+| `bestLapMS` / `lastLapTimeMS` / `currentLapTimeMS`          | `best_lap_s` / `last_lap_s` / チャンネルのみ                            |
+| `lapCount`                                                  | `laps_completed`                                                        |
+| `currentLapInvalid`                                         | チャンネルのみ                                                          |
+| `worldPosition`                                             | チャンネルのみ                                                          |
+| `isCarInPitline` / `isCarInPit`                             | `on_pit_road` / `surface: in_pit_stall`                                 |
+| `carLeaderboardPosition` / `carRealTimeLeaderboardPosition` | `position`（決勝は走行順、他は順位表）                                  |
+| `spLineLength`                                              | `lap_dist_pct`                                                          |
+| `isConnected`                                               | 接続していない車は除く                                                  |
+| `suspensionDamage[4]` / `engineLifeLeft`                    | 車 0 の値を `Damage.suspension`（0〜1）/ `Damage.engine`（1000 が新品） |
+| `tyreInflation[4]`                                          | チャンネルのみ                                                          |
 
 ## UDP リモートテレメトリ
 
@@ -207,12 +208,13 @@ AC の共有メモリには、セッションの番号も経過時間も無い�
 
 公式の文書が単位や向きを書いていない項目は、次の解釈で正規化している。チャンネルには元の値が残る。
 
-| 項目                                          | 解釈                           |
-| --------------------------------------------- | ------------------------------ |
-| `accG` / `localVelocity` / `localAngularVel`  | 左手系（x 右・y 上・z 前）     |
-| `clutch`                                      | ペダルの踏み込み（1 で切れる） |
-| `tyreWear`                                    | 新品 100 からの残り            |
-| `sessionTimeLeft`                             | ms                             |
-| `windSpeed`                                   | km/h                           |
-| `performanceMeter`                            | ベストとの差（s、負が速い）    |
-| CrewChief の `carRealTimeLeaderboardPosition` | 0 から数える走行順             |
+| 項目                                          | 解釈                             |
+| --------------------------------------------- | -------------------------------- |
+| `accG` / `localVelocity` / `localAngularVel`  | 左手系（x 右・y 上・z 前）       |
+| `clutch`                                      | ペダルの踏み込み（1 で切れる）   |
+| `tyreWear`                                    | 新品 100 からの残りのグリップ    |
+| `carDamage`                                   | 400 で全損（CrewChief の読み方） |
+| `sessionTimeLeft`                             | ms                               |
+| `windSpeed`                                   | km/h                             |
+| `performanceMeter`                            | ベストとの差（s、負が速い）      |
+| CrewChief の `carRealTimeLeaderboardPosition` | 0 から数える走行順               |

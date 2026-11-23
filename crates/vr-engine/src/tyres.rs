@@ -31,10 +31,7 @@ pub(crate) fn field_tyres(state: &RaceState, f: &Frame) -> Vec<TyreGroup> {
 }
 
 fn wet(w: &vr_core::Weather) -> bool {
-    w.declared_wet == Some(true)
-        || w.wetness
-            .as_deref()
-            .is_some_and(|s| s != "dry" && s != "mostly dry")
+    w.declared_wet == Some(true) || w.wetness.is_some_and(vr_core::Wetness::is_wet)
 }
 
 /// A car's pace on the tyres it is on: its clean laps since the last stop.

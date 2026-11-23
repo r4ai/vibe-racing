@@ -58,10 +58,21 @@ impl SourceArgs {
 
     /// Where the game leaves telemetry files behind.
     pub fn recordings(&self) -> Option<PathBuf> {
+        self.recordings_in(dirs::document_dir()?.as_path())
+    }
+
+    /// [`SourceArgs::recordings`] in these documents.
+    fn recordings_in(&self, documents: &std::path::Path) -> Option<PathBuf> {
         match self.game() {
-            Game::Iracing => Some(vr_iracing::telemetry_dir(&dirs::document_dir()?)),
+            Game::Iracing => Some(vr_iracing::telemetry_dir(documents)),
             Game::Ac | Game::AcUdp | Game::Replay | Game::Synthetic => None,
         }
+    }
+
+    /// Whether `vr serve` keeps the sessions: those of real games, not the
+    /// demo or a replay, unless told not to.
+    pub fn keeps_sessions(&self, no_sessions: bool) -> bool {
+        !no_sessions && matches!(self.game(), Game::Iracing | Game::Ac | Game::AcUdp)
     }
 
     pub fn source_kind(&self, live: bool) -> SourceKind {
@@ -149,6 +160,7 @@ fn either_failed(iracing: SourceError, ac: SourceError) -> SourceError {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::path::Path;
 
     #[derive(Parser)]
     struct Cli {
@@ -167,14 +179,24 @@ mod tests {
         assert_eq!(s.game_id(), "ac");
         assert_eq!(s.source_kind(true), SourceKind::Live);
         assert_eq!(s.source_kind(false), SourceKind::Oneshot);
-        assert_eq!(s.recordings(), None);
+        assert_eq!(s.recordings_in(Path::new("docs")), None);
+        assert!(s.keeps_sessions(false));
+        assert!(!s.keeps_sessions(true), "--no-sessions");
         let s = parse(&["--game", "ac-udp", "--host", "gamepc:9000"]);
-        assert_eq!(
-            (s.game(), s.host.as_str()),
-            (Game::AcUdp, "gamepc:9000")
-        );
+        assert_eq!((s.game(), s.host.as_str()), (Game::AcUdp, "gamepc:9000"));
         assert_eq!(s.source_kind(true), SourceKind::Live);
+        assert!(s.keeps_sessions(false));
         let s = parse(&[]);
+        assert_eq!(
+            s.recordings_in(Path::new("docs")),
+            Some(Path::new("docs").join("iRacing").join("telemetry"))
+        );
+        assert!(s.keeps_sessions(false));
+        for demo in [&["--game", "synthetic"][..], &["--file", "x.ndjson"]] {
+            let s = parse(demo);
+            assert!(!s.keeps_sessions(false), "{demo:?}");
+            assert_eq!(s.recordings_in(Path::new("docs")), None);
+        }
         assert_eq!(
             (s.game(), s.host.as_str(), s.explicit()),
             (Game::Iracing, "127.0.0.1", false)
@@ -199,6 +221,21 @@ mod tests {
             SourceError::NotRunning(_)
         ));
         #[cfg(not(windows))]
-        assert!(matches!(open_any_live(), Err(SourceError::Unsupported(_))));
+        {
+            let message = |args: &[&str]| match parse(args).factory(1.0).unwrap()() {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("a game here"),
+            };
+            // Without --game both games are looked for; with it, only one.
+            let any = message(&[]);
+            assert!(
+                any.contains("iRacing") && any.contains("Assetto Corsa"),
+                "{any}"
+            );
+            let one = message(&["--game", "iracing"]);
+            assert!(one.contains("iRacing") && !one.contains("Assetto"), "{one}");
+            let one = message(&["--game", "ac"]);
+            assert!(one.contains("Assetto") && !one.contains("iRacing"), "{one}");
+        }
     }
 }
