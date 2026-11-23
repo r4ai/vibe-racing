@@ -773,6 +773,8 @@ DriverInfo:
             arr("CarIdxLastLapTime", 4),
             arr("CarIdxBestLapTime", 4),
             arr("CarIdxF2Time", 4),
+            arr("CarIdxBestLapNum", 2),
+            arr("CarIdxP2P_Count", 2),
         ];
         if with_player_idx {
             v.push(one("PlayerCarIdx", 2));
@@ -956,6 +958,8 @@ DriverInfo:
         img.set_f32("CarIdxLastLapTime", 1, 0.001);
         img.set_f32("CarIdxBestLapTime", 1, 0.001);
         img.set_f32("CarIdxF2Time", 1, 0.0);
+        img.set_i32("CarIdxBestLapNum", 1, 1);
+        img.set_i32("CarIdxP2P_Count", 1, 12);
         // Car 3: invalid sentinels.
         img.set_i32("CarIdxPosition", 3, -1);
         img.set_i32("CarIdxClassPosition", 3, -1);
@@ -978,6 +982,15 @@ DriverInfo:
         assert_eq!(a.lap_dist_pct, Some(1.0));
         assert!(a.last_lap_s.unwrap() > 0.0 && a.best_lap_s.unwrap() > 0.0);
         assert_eq!(a.gap_to_leader_s, Some(0.0), "leader gap 0 is valid");
+        assert_eq!(
+            (a.extra.best_lap_num, a.extra.p2p_count),
+            (Some(1), Some(12))
+        );
+        assert_eq!(
+            f.car(3).unwrap().extra.best_lap_num,
+            None,
+            "0: no best lap yet"
+        );
         let b = f.car(3).unwrap();
         assert_eq!(
             (b.position, b.class_position, b.lap, b.laps_completed),
@@ -1003,6 +1016,7 @@ DriverInfo:
         let a = f.car(1).unwrap();
         assert_eq!(a.lap_dist_pct, None);
         assert_eq!(a.gap_to_leader_s, None);
+        assert_eq!(a.extra.p2p_count, None, "uses, not what is left");
 
         // Delta is reported when valid.
         img.set_bool("LapDeltaToBestLap_OK", 0, true);

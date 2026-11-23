@@ -103,6 +103,21 @@ fn groups(
 mod tests {
     use super::*;
 
+    #[test]
+    fn wet_when_declared_or_wet_enough() {
+        use vr_core::{Weather, Wetness};
+        let w = |declared, wetness| Weather {
+            declared_wet: declared,
+            wetness,
+            ..Default::default()
+        };
+        assert!(!wet(&Weather::default()));
+        assert!(wet(&w(Some(true), None)));
+        assert!(!wet(&w(Some(false), Some(Wetness::MostlyDry))));
+        assert!(wet(&w(Some(false), Some(Wetness::VeryLightlyWet))));
+        assert!(wet(&w(None, Some(Wetness::LightlyWet))));
+    }
+
     fn lap(lap: i32, t: f64, pit: bool) -> LapRecord {
         LapRecord {
             lap,

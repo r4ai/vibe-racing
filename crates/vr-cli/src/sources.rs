@@ -56,15 +56,10 @@ impl SourceArgs {
         }
     }
 
-    /// Where the game leaves telemetry files behind.
-    pub fn recordings(&self) -> Option<PathBuf> {
-        self.recordings_in(dirs::document_dir()?.as_path())
-    }
-
-    /// [`SourceArgs::recordings`] in these documents.
-    fn recordings_in(&self, documents: &std::path::Path) -> Option<PathBuf> {
+    /// Where the game leaves telemetry files behind, in the user's documents.
+    pub fn recordings(&self, documents: Option<&std::path::Path>) -> Option<PathBuf> {
         match self.game() {
-            Game::Iracing => Some(vr_iracing::telemetry_dir(documents)),
+            Game::Iracing => Some(vr_iracing::telemetry_dir(documents?)),
             Game::Ac | Game::AcUdp | Game::Replay | Game::Synthetic => None,
         }
     }
@@ -179,7 +174,7 @@ mod tests {
         assert_eq!(s.game_id(), "ac");
         assert_eq!(s.source_kind(true), SourceKind::Live);
         assert_eq!(s.source_kind(false), SourceKind::Oneshot);
-        assert_eq!(s.recordings_in(Path::new("docs")), None);
+        assert_eq!(s.recordings(Some(Path::new("docs"))), None);
         assert!(s.keeps_sessions(false));
         assert!(!s.keeps_sessions(true), "--no-sessions");
         let s = parse(&["--game", "ac-udp", "--host", "gamepc:9000"]);
@@ -188,14 +183,15 @@ mod tests {
         assert!(s.keeps_sessions(false));
         let s = parse(&[]);
         assert_eq!(
-            s.recordings_in(Path::new("docs")),
+            s.recordings(Some(Path::new("docs"))),
             Some(Path::new("docs").join("iRacing").join("telemetry"))
         );
+        assert_eq!(s.recordings(None), None, "no documents");
         assert!(s.keeps_sessions(false));
         for demo in [&["--game", "synthetic"][..], &["--file", "x.ndjson"]] {
             let s = parse(demo);
             assert!(!s.keeps_sessions(false), "{demo:?}");
-            assert_eq!(s.recordings_in(Path::new("docs")), None);
+            assert_eq!(s.recordings(Some(Path::new("docs"))), None);
         }
         assert_eq!(
             (s.game(), s.host.as_str(), s.explicit()),

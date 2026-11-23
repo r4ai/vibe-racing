@@ -427,7 +427,10 @@ fn serve(
     };
     let collector =
         vr_server::spawn_collector(factory, state.clone(), tx.clone(), cfg, stop.clone())?;
-    if let Some(dir) = src.recordings().filter(|_| keep && import) {
+    if let Some(dir) = src
+        .recordings(dirs::document_dir().as_deref())
+        .filter(|_| keep && import)
+    {
         inbox::spawn(dir, store.clone(), state.clone(), stop.clone());
     }
 

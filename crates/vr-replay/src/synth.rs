@@ -699,6 +699,8 @@ mod tests {
         assert_eq!(w(245.0).0, Wetness::LightlyWet);
         assert_eq!(w(290.0).0, Wetness::ModeratelyWet);
         assert_eq!(w(395.0), (Wetness::VeryWet, 1.0));
+        let dry = frames[0].weather.clone().unwrap();
+        assert_eq!((dry.air_temp_c, dry.track_temp_c), (Some(22.0), Some(31.0)));
         assert_eq!(wetness_word(0.049), Wetness::Dry);
         assert_eq!(wetness_word(0.05), Wetness::LightlyWet);
         assert_eq!(wetness_word(0.35), Wetness::ModeratelyWet);
