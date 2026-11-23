@@ -81,7 +81,8 @@ impl Snapshot {
         if let Some(b) = &self.crewchief {
             out.extend(View::new(&CREWCHIEF, b).channels("crewchief"));
             for v in self.vehicles() {
-                let id = v.i32("carId").unwrap_or(-1);
+                // Every car of the page has its id.
+                let id = v.i32("carId").unwrap_or_default();
                 out.extend(v.channels(&format!("crewchief.vehicle[{id}]")));
             }
         }
@@ -96,7 +97,8 @@ impl Snapshot {
         let timed = timed(&s, &g);
         Sample {
             now_ms,
-            kind: g.i32("session").unwrap_or(-1),
+            // Only compared with the sample before.
+            kind: g.i32("session").unwrap_or_default(),
             event: format!(
                 "{}@{}/{}",
                 s.text("carModel").unwrap_or_default(),
