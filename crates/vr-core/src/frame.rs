@@ -525,3 +525,82 @@ pub struct Weather {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fog: Option<f64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worst_damage() {
+        assert_eq!(Damage::default().worst(), None);
+        let d = Damage {
+            aero: Some(0.1),
+            engine: None,
+            suspension: [None, Some(0.4), None, None],
+            brakes: [None, None, Some(0.3), None],
+        };
+        assert_eq!(d.worst(), Some(0.4));
+        let d = Damage {
+            engine: Some(0.9),
+            brakes: [None, None, None, Some(0.95)],
+            ..Default::default()
+        };
+        assert_eq!(d.worst(), Some(0.95));
+    }
+
+    #[test]
+    fn which_warnings_are_damage() {
+        let hurt = [
+            Warning::WaterTemp,
+            Warning::FuelPressure,
+            Warning::OilPressure,
+            Warning::OilTemp,
+            Warning::Damage,
+            Warning::Engine,
+            Warning::FlatTyre,
+        ];
+        for w in hurt {
+            assert!(w.is_damage(), "{w:?}");
+        }
+        for w in [
+            Warning::Stalled,
+            Warning::PitLimiter,
+            Warning::RevLimiter,
+            Warning::Clutch,
+        ] {
+            assert!(!w.is_damage(), "{w:?}");
+        }
+    }
+
+    #[test]
+    fn new_fields_stay_out_of_old_json() {
+        let json = serde_json::to_value(CarTelemetry::default()).unwrap();
+        for k in ["tc_active", "drs_available", "damage", "wheels"] {
+            assert!(json.get(k).is_none(), "{k}");
+        }
+        assert!(json["tyres"].get("live").is_none());
+        assert!(json["tyres"]["lf"].get("carcass_c").is_none());
+        assert!(json["pit"].get("planned").is_none());
+        let json = serde_json::to_value(CarExtra::default()).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+        let t = Tyres {
+            live: true,
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(&t).unwrap()["live"], true);
+        let back: Tyres = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!back.live);
+        assert_eq!(
+            serde_json::to_value(Flag::SlowCar).unwrap(),
+            serde_json::json!("slow_car")
+        );
+        assert_eq!(
+            serde_json::to_value(Flag::BlackWhite).unwrap(),
+            serde_json::json!("black_white")
+        );
+        assert_eq!(
+            serde_json::to_value(Warning::FlatTyre).unwrap(),
+            serde_json::json!("flat_tyre")
+        );
+    }
+}

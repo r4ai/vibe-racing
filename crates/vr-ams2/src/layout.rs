@@ -280,7 +280,6 @@ pub struct Layout {
     pub participant_offset: usize,
     pub participant_size: usize,
     /// Of the whole block.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub size: usize,
 }
 
@@ -365,15 +364,15 @@ impl Layout {
         self.participant_by_name.get(name).map(|i| &self.fields[*i])
     }
 
-    /// The end of the block a version writes.
+    /// The end of the block a version writes: where the first field it does
+    /// not have would begin.
     pub fn size_for(&self, version: u32) -> usize {
         self.fields
             .iter()
-            .filter(|f| !f.participant && f.since <= version)
-            .map(|f| f.offset + f.ty.size() * f.count)
-            .max()
-            .map(|end| align_up(end, 4))
-            .unwrap_or(0)
+            .filter(|f| !f.participant && f.since > version)
+            .map(|f| f.offset)
+            .min()
+            .unwrap_or(self.size)
     }
 }
 

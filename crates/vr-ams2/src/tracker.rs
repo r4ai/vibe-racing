@@ -82,6 +82,8 @@ const FUEL_WINDOW_S: f64 = 3.0;
 const FUEL_MIN_S: f64 = 1.5;
 /// Samples before the wheel radius is trusted.
 const RADIUS_SAMPLES: u32 = 30;
+/// Lap counts whose first crossing is kept.
+const LAPS_KEPT: usize = 400;
 /// Boundary samples kept per sector.
 const SECTOR_SAMPLES: usize = 31;
 
@@ -132,7 +134,6 @@ impl Tracker {
     /// Advance to the sample read at `now_s` (any monotonic clock, seconds).
     pub fn begin(&mut self, s: &Snapshot<'_>, now_s: f64) -> Moment {
         let state = s.u32("mGameState").unwrap_or(0);
-        let first_sample = self.key.is_none();
         if state == GAME_INGAME_RESTARTING {
             self.restarting = true;
         }
@@ -160,10 +161,6 @@ impl Tracker {
                 self.restarts += 1;
                 self.new_session(s);
             }
-        }
-        if first_sample && self.key.is_none() {
-            // Not in a session yet; keep counting from zero.
-            self.session_num = self.session_num.max(1);
         }
         let running = matches!(state, GAME_INGAME_PLAYING | GAME_INGAME_INMENU_TIME_TICKING);
         if let Some(before) = self.last_now {
@@ -206,7 +203,7 @@ impl Tracker {
         if laps > line.laps {
             line.crossed = Some((laps, time_s));
             self.first.entry(laps).or_insert(time_s);
-            while self.first.len() > 400 {
+            while self.first.len() > LAPS_KEPT {
                 self.first.pop_first();
             }
         }
@@ -395,7 +392,7 @@ mod tests {
         let img = Image::new();
         let mut t = Tracker::default();
         let m = t.begin(&img.snapshot(), 0.0);
-        assert_eq!((m.session_num, m.uid, m.player), (1, 0, Some(0)));
+        assert_eq!((m.session_num, m.uid, m.player), (0, 0, Some(0)));
     }
 
     #[test]
@@ -478,5 +475,101 @@ mod tests {
         assert_eq!(t.wheel_speed(1, -10.0, 3.0, true), None);
         assert_eq!(t.radius[1].1, 0);
         assert_eq!(t.wheel_speed(4, 1.0, 20.0, true), None);
+    }
+
+    #[test]
+    fn boundaries_of_the_session() {
+        let mut img = Image::new();
+        session(&mut img, 3);
+        let mut t = Tracker::default();
+        // Not timed (no duration): the remaining time is not a clock.
+        img.set_f32("mEventTimeRemaining", 0, 30.0);
+        assert_eq!(t.begin(&img.snapshot(), 0.0).session_num, 1);
+        img.set_f32("mEventTimeRemaining", 0, 40.0);
+        assert_eq!(t.begin(&img.snapshot(), 1.0).session_num, 1);
+        // Timed: up by exactly 5 s is not yet a restart.
+        img.set_f32("mSessionDuration", 0, 10.0);
+        img.set_f32("mEventTimeRemaining", 0, 500.0);
+        assert_eq!(t.begin(&img.snapshot(), 2.0).session_num, 2);
+        img.set_f32("mEventTimeRemaining", 0, 505.0);
+        assert_eq!(t.begin(&img.snapshot(), 3.0).session_num, 2);
+        img.set_f32("mEventTimeRemaining", 0, 510.5);
+        assert_eq!(t.begin(&img.snapshot(), 4.0).session_num, 3);
+        // No such car.
+        img.set_i32("mViewedParticipantIndex", 0, 64);
+        assert_eq!(Tracker::default().begin(&img.snapshot(), 0.0).player, None);
+        img.set_i32("mViewedParticipantIndex", 0, 63);
+        assert_eq!(
+            Tracker::default().begin(&img.snapshot(), 0.0).player,
+            Some(63)
+        );
+    }
+
+    #[test]
+    fn sector_lines_belong_to_the_track() {
+        let mut img = Image::new();
+        session(&mut img, 1);
+        let mut t = Tracker::default();
+        t.begin(&img.snapshot(), 0.0);
+        for car in 0..2 {
+            t.sector(car, 0, 0.1);
+            t.sector(car, 1, 0.5);
+        }
+        assert_eq!(t.sector_starts(2), vec![0.0, 0.5], "two sectors");
+        // Another session at the same track keeps them.
+        img.set_u32("mSessionState", 0, 3);
+        t.begin(&img.snapshot(), 1.0);
+        assert_eq!(t.sector_starts(2), vec![0.0, 0.5]);
+        img.set_str("mTrackLocation", 0, "Spa");
+        t.begin(&img.snapshot(), 2.0);
+        assert!(t.sector_starts(2).is_empty(), "another track");
+    }
+
+    #[test]
+    fn line_crossings_kept() {
+        let mut t = Tracker::default();
+        t.gap(0, 0, 0.0);
+        for lap in 1..=401 {
+            t.gap(0, lap, f64::from(lap));
+        }
+        assert_eq!(t.first.len(), LAPS_KEPT);
+        assert_eq!(t.first.first_key_value(), Some((&2, &2.0)));
+    }
+
+    #[test]
+    fn fuel_flow_edges() {
+        // Up by exactly 0.05 is still the same fill.
+        let mut t = Tracker::default();
+        t.fuel_flow(0.0, Some(10.0));
+        t.fuel_flow(1.0, Some(10.05));
+        assert_eq!(t.fuel.len(), 2);
+        assert_eq!(t.fuel_flow(2.0, Some(10.0)), Some(0.0));
+        // A sample exactly 3 s old is still in the window.
+        let mut t = Tracker::default();
+        t.fuel_flow(0.0, Some(50.0));
+        t.fuel_flow(1.0, Some(49.95));
+        let r = t.fuel_flow(3.0, Some(49.94)).unwrap();
+        assert!((r - 72.0).abs() < 1e-6, "{r}");
+    }
+
+    #[test]
+    fn wheel_radius_edges() {
+        let mut t = Tracker::default();
+        assert_eq!(t.wheel_speed(0, 1.0, 20.0, true), None);
+        assert_eq!(t.radius[0].1, 0, "1 rad/s is not turning");
+        t.wheel_speed(0, 100.0, 15.0, true);
+        assert_eq!(t.radius[0].1, 0, "15 m/s is too slow");
+        // The first sample sets the radius, the next ones move it by 5 %.
+        t.wheel_speed(0, 100.0, 30.0, true);
+        assert_eq!(t.radius[0], (0.3, 1));
+        t.wheel_speed(0, 100.0, 50.0, true);
+        let (k, n) = t.radius[0];
+        assert_eq!(n, 2);
+        assert!((k - 0.31).abs() < 1e-12, "{k}");
+        for _ in 0..RADIUS_SAMPLES {
+            t.wheel_speed(1, -100.0, 33.0, true);
+        }
+        let v = t.wheel_speed(1, -100.0, 40.0, true).unwrap();
+        assert!((v - 33.35).abs() < 1e-9, "{v}");
     }
 }

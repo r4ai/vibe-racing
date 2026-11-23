@@ -288,3 +288,15 @@ fn game_name(id: &str) -> &str {
         other => other,
     }
 }
+
+#[cfg(test)]
+mod game_name_tests {
+    use super::game_name;
+
+    #[test]
+    fn games_by_their_names() {
+        assert_eq!(game_name("iracing"), "iRacing");
+        assert_eq!(game_name("ams2"), "Automobilista 2");
+        assert_eq!(game_name("other"), "other");
+    }
+}

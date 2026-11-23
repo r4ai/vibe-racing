@@ -74,23 +74,53 @@ impl<M: SharedMemory> Ams2Source<M> {
         self.word(at)
     }
 
-    /// A copy the game did not write to while it was taken.
-    fn copy(&self) -> Result<Option<(u32, Vec<u8>)>, SourceError> {
-        let before = self.seq()?;
-        if before % 2 == 1 {
-            return Ok(None);
-        }
+    /// A copy taken while the sequence number stayed at `seq` (even): the
+    /// game wrote nothing in between.
+    fn copy(&self, seq: u32) -> Result<Option<Vec<u8>>, SourceError> {
         let version = self.word(0)?;
-        if version < MIN_VERSION {
-            return Ok(Some((before, version.to_le_bytes().to_vec())));
-        }
-        let len = Layout::get().size_for(version);
+        let len = if version < MIN_VERSION {
+            4
+        } else {
+            Layout::get().size_for(version)
+        };
         let data = self.mem.read(0, len).ok_or_else(|| {
             SourceError::Format(format!(
                 "shared memory smaller than version {version} needs ({len} bytes)"
             ))
         })?;
-        Ok((self.seq()? == before).then_some((before, data)))
+        Ok((self.seq()? == seq).then_some(data))
+    }
+
+    fn frame(&mut self, seq: u32, data: Vec<u8>) -> Result<Poll, SourceError> {
+        let s = Snapshot::new(&data);
+        if s.version == 0 {
+            // The game has not filled it in yet.
+            return Ok(Poll::Disconnected);
+        }
+        if s.version < MIN_VERSION {
+            return Err(SourceError::Unsupported(format!(
+                "Automobilista 2 shared memory version {} is too old; set \
+                 Options > System > Shared Memory to \"Project CARS 2\"",
+                s.version
+            )));
+        }
+        if matches!(
+            s.u32("mGameState"),
+            Some(GAME_EXITED | GAME_FRONT_END | GAME_INGAME_REPLAY | GAME_FRONT_END_REPLAY)
+        ) {
+            return Ok(Poll::Disconnected);
+        }
+        self.last_seq = Some(seq);
+        self.last_frame = Some(Instant::now());
+        let frame = {
+            let mut t = self
+                .tracker
+                .lock()
+                .map_err(|_| SourceError::Format("tracker poisoned".into()))?;
+            build_frame(&s, &mut t, u64::from(seq / 2), now_ms(), now_s())
+        };
+        self.last_data = data;
+        Ok(Poll::Frame(Box::new(frame)))
     }
 }
 
@@ -119,56 +149,22 @@ impl<M: SharedMemory> TelemetrySource for Ams2Source<M> {
         let deadline = Instant::now() + timeout;
         loop {
             let seq = self.seq()?;
-            let due = self.last_frame.is_none_or(|t| t.elapsed() >= MIN_INTERVAL);
-            if seq % 2 == 0 && Some(seq) != self.last_seq && due {
-                if let Some((seq, data)) = self.copy()? {
-                    let s = Snapshot::new(&data);
-                    if s.version < MIN_VERSION {
-                        if s.version == 0 {
-                            // The game has not filled it in yet.
-                            return Ok(Poll::Disconnected);
-                        }
-                        return Err(SourceError::Unsupported(format!(
-                            "Automobilista 2 shared memory version {} is too old; set \
-                             Options > System > Shared Memory to \"Project CARS 2\"",
-                            s.version
-                        )));
-                    }
-                    if matches!(
-                        s.u32("mGameState"),
-                        Some(
-                            GAME_EXITED
-                                | GAME_FRONT_END
-                                | GAME_INGAME_REPLAY
-                                | GAME_FRONT_END_REPLAY
-                        )
-                    ) {
-                        return Ok(Poll::Disconnected);
-                    }
-                    self.last_seq = Some(seq);
-                    self.last_frame = Some(Instant::now());
-                    let frame = {
-                        let mut t = self
-                            .tracker
-                            .lock()
-                            .map_err(|_| SourceError::Format("tracker poisoned".into()))?;
-                        build_frame(&s, &mut t, u64::from(seq / 2), now_ms(), now_s())
-                    };
-                    self.last_data = data;
-                    return Ok(Poll::Frame(Box::new(frame)));
-                }
-                continue;
+            // Until the next frame may be passed on.
+            let wait = self
+                .last_frame
+                .map_or(Duration::ZERO, |t| MIN_INTERVAL.saturating_sub(t.elapsed()));
+            if seq % 2 == 0
+                && Some(seq) != self.last_seq
+                && wait.is_zero()
+                && let Some(data) = self.copy(seq)?
+            {
+                return self.frame(seq, data);
             }
             let now = Instant::now();
             if now >= deadline {
                 return Ok(Poll::Idle);
             }
-            let wake = self
-                .last_frame
-                .map(|t| t + MIN_INTERVAL)
-                .filter(|w| *w > now && !due)
-                .unwrap_or(now + NAP);
-            std::thread::sleep(wake.min(deadline) - now);
+            std::thread::sleep(wait.max(NAP).min(deadline - now));
         }
     }
 }
@@ -219,11 +215,19 @@ mod tests {
         assert!(src.capabilities().gaps);
         assert_eq!(src.extras(), None, "nothing read yet");
 
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
         let Poll::Frame(f) = src.poll(Duration::ZERO).unwrap() else {
             panic!("expected a frame")
         };
         assert_eq!(f.game, "ams2");
         assert_eq!(f.tick, 5);
+        assert!(
+            (before..before + 5_000).contains(&f.timestamp_ms),
+            "wall clock stamp"
+        );
         assert_eq!(f.session.kind, SessionKind::Race);
         assert_eq!(f.session.phase, SessionPhase::Racing);
         assert_eq!(f.session.flags, vec![Flag::Blue]);
@@ -294,6 +298,18 @@ mod tests {
                 Poll::Disconnected
             ));
         }
+    }
+
+    #[test]
+    fn the_oldest_layout_read() {
+        let mut img = race();
+        img.set_u32("mVersion", 0, MIN_VERSION);
+        let mem = MemoryImage::new(img.bytes[..Layout::get().size_for(MIN_VERSION)].to_vec());
+        let Poll::Frame(f) = Ams2Source::new(mem).poll(Duration::ZERO).unwrap() else {
+            panic!("expected a frame")
+        };
+        assert_eq!(f.session.track.unwrap().name, "Interlagos");
+        assert_eq!(f.session.time_total_s, None, "not in version 9");
     }
 
     #[test]

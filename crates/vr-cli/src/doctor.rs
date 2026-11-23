@@ -152,3 +152,52 @@ fn check<S: TelemetrySource>(opened: Result<S, SourceError>) -> Check {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vr_core::{Capabilities, SourceError};
+
+    struct Once(Option<Result<Poll, SourceError>>);
+
+    impl TelemetrySource for Once {
+        fn game(&self) -> &str {
+            "test"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+        fn poll(&mut self, _: Duration) -> Result<Poll, SourceError> {
+            self.0.take().unwrap()
+        }
+    }
+
+    fn of(r: Result<Poll, SourceError>) -> Check {
+        check(Ok(Once(Some(r))))
+    }
+
+    #[test]
+    fn what_each_answer_says() {
+        let c = check::<Once>(Err(SourceError::NotRunning("not here".into())));
+        assert!(!c.ok);
+        assert_eq!(c.detail, "game is not running: not here");
+        let c = of(Ok(Poll::Idle));
+        assert!(!c.ok);
+        assert_eq!(c.detail, "shared memory present but no new data within 1s");
+        let c = of(Ok(Poll::Disconnected));
+        assert!(!c.ok);
+        assert_eq!(
+            c.detail,
+            "sim running but not in a session (status disconnected)"
+        );
+        let c = of(Err(SourceError::Format("torn".into())));
+        assert!(!c.ok);
+        assert_eq!(c.detail, "read error: telemetry format error: torn");
+        let mut src = vr_replay::SynthSource::new(vr_replay::SynthConfig::default(), 0.0);
+        let frame = src.poll(Duration::ZERO).unwrap();
+        let c = of(Ok(frame));
+        assert!(c.ok);
+        assert!(c.detail.starts_with("connected: "), "{}", c.detail);
+        assert!(c.detail.contains("| session Race "), "{}", c.detail);
+    }
+}

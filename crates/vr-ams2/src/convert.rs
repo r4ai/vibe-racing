@@ -38,24 +38,25 @@ const PIT_SCHEDULE_DRIVE_THROUGH: u32 = 5;
 const PIT_SCHEDULE_STOP_GO: u32 = 6;
 
 // (Type#9) Car flags
-const CAR_ENGINE_ACTIVE: u32 = 1 << 1;
-const CAR_ENGINE_WARNING: u32 = 1 << 2;
-const CAR_SPEED_LIMITER: u32 = 1 << 3;
-const CAR_ABS: u32 = 1 << 4;
-const CAR_TCS: u32 = 1 << 6;
+const CAR_ENGINE_ACTIVE: u32 = 0x02;
+const CAR_ENGINE_WARNING: u32 = 0x04;
+const CAR_SPEED_LIMITER: u32 = 0x08;
+const CAR_ABS: u32 = 0x10;
+const CAR_TCS: u32 = 0x40;
 
 // (Type#10) Tyre flags
-const TYRE_ATTACHED: u32 = 1 << 0;
-const TYRE_INFLATED: u32 = 1 << 1;
+const TYRE_ATTACHED: u32 = 0x01;
+/// Attached and inflated (`TYRE_INFLATED` is 0x02).
+const TYRE_SOUND: u32 = 0x03;
 
 // (Type#12) Crash state
 const CRASH_DAMAGE_OFFTRACK: u32 = 1;
 
 // (Type#14) DRS state
-const DRS_INSTALLED: u32 = 1 << 0;
-const DRS_AVAILABLE_NEXT: u32 = 1 << 2;
-const DRS_AVAILABLE_NOW: u32 = 1 << 3;
-const DRS_ACTIVE: u32 = 1 << 4;
+const DRS_INSTALLED: u32 = 0x01;
+/// Available on the next zone (0x04) or now (0x08).
+const DRS_AVAILABLE: u32 = 0x0c;
+const DRS_ACTIVE: u32 = 0x10;
 
 // (Type#16) Yellow flag state (full course yellow)
 const YFS_PENDING: i32 = 1;
@@ -69,6 +70,9 @@ const PSI_KPA: f64 = 6.894_757;
 const KELVIN: f64 = 273.15;
 /// Damage from which the car wants mending.
 const DAMAGE_WARNING: f64 = 0.2;
+/// A wheel rolls freely below this throttle and side force, off the brake.
+const FREE_THROTTLE: f64 = 0.25;
+const FREE_LAT_MPS2: f64 = 3.0;
 
 fn kind(state: Option<u32>) -> SessionKind {
     match state {
@@ -482,9 +486,9 @@ pub fn build_frame(
     let lat = local("mLocalAcceleration", 0);
     let throttle = s.f64("mThrottle");
     let brake = s.f64("mBrake");
-    let free = throttle.is_some_and(|x| x < 0.2)
-        && brake.is_some_and(|x| x < 0.01)
-        && lat.is_some_and(|a| a.abs() < 3.0);
+    let free = throttle.is_some_and(|x| x < FREE_THROTTLE)
+        && brake == Some(0.0)
+        && lat.is_some_and(|a| a.abs() < FREE_LAT_MPS2);
     let terrain: Vec<u32> = (0..4).filter_map(|i| s.u32_at("mTerrain", i)).collect();
     let off_track = (terrain.len() == 4 && !terrain.iter().any(|t| racing_surface(*t)))
         || s.u32("mCrashState") == Some(CRASH_DAMAGE_OFFTRACK);
@@ -498,9 +502,7 @@ pub fn build_frame(
     let damage = damage(s);
     let tyre_flags: Vec<u32> = (0..4).filter_map(|i| s.u32_at("mTyreFlags", i)).collect();
     let flat = tyre_flags.iter().any(|f| f & TYRE_ATTACHED != 0)
-        && tyre_flags
-            .iter()
-            .any(|f| f & (TYRE_ATTACHED | TYRE_INFLATED) != TYRE_ATTACHED | TYRE_INFLATED);
+        && tyre_flags.iter().any(|f| f & TYRE_SOUND != TYRE_SOUND);
     let player_car = m.player.and_then(|p| cars.iter_mut().find(|c| c.idx == p));
     let on_track = in_session && pit_mode != Some(PIT_MODE_IN_GARAGE) && player_car.is_some();
     if let Some(c) = player_car {
@@ -555,7 +557,6 @@ pub fn build_frame(
 
     let car = CarTelemetry {
         clutch: s.f64("mClutch").map(|c| 1.0 - c),
-        steering_rad: None,
         yaw_rate_rps: local("mAngularVelocity", 1).map(|v| -v),
         lat_accel_mps2: lat,
         long_accel_mps2: forward("mLocalAcceleration"),
@@ -566,11 +567,7 @@ pub fn build_frame(
             .map(|a| a || car_flags & CAR_ABS != 0),
         oil_press_bar: positive(s.f64("mOilPressureKPa")).map(|k| k / 100.0),
         fuel_press_bar: positive(s.f64("mFuelPressureKPa")).map(|k| k / 100.0),
-        oil_level_l: None,
-        water_level_l: None,
-        voltage: None,
         warnings,
-        shift_rpm: None,
         tyres: Tyres {
             lf: tyre(s, 0),
             rf: tyre(s, 1),
@@ -579,8 +576,6 @@ pub fn build_frame(
             live: true,
         },
         tyre_compound: compound(s),
-        tyre_sets_used: None,
-        tyre_sets_available: None,
         pit: PitState {
             open: pits_open,
             in_stall: pit_mode.map(|p| p == PIT_MODE_IN_PIT),
@@ -593,7 +588,7 @@ pub fn build_frame(
         p2p_count: boost.map(|a| a.round() as i32),
         p2p_active: boost_on,
         drs_active: drs.map(|d| d & DRS_ACTIVE != 0),
-        drs_available: drs.map(|d| d & (DRS_AVAILABLE_NOW | DRS_AVAILABLE_NEXT) != 0),
+        drs_available: drs.map(|d| d & DRS_AVAILABLE != 0),
         tc_active: Some(car_flags & CAR_TCS != 0),
         alongside: m.player.and_then(|p| alongside(s, p, &cars)),
         wheels: Some(wheels(s, t, speed.unwrap_or(0.0), free)),
@@ -662,7 +657,6 @@ pub fn build_frame(
         weather: Some(Weather {
             air_temp_c: s.f64("mAmbientTemperature"),
             track_temp_c: s.f64("mTrackTemperature"),
-            wetness: None,
             precipitation: s.f64("mRainDensity").map(|r| r.clamp(0.0, 1.0)),
             wind_mps: s.f64("mWindSpeed").filter(|w| *w >= 0.0),
             ..Default::default()
@@ -737,7 +731,7 @@ mod tests {
         img.set_i32("mTractionControlSetting", 0, -1);
         img.set_i32("mYellowFlagState", 0, -1);
         for i in 0..4 {
-            img.set_u32("mTyreFlags", i, TYRE_ATTACHED | TYRE_INFLATED | 4);
+            img.set_u32("mTyreFlags", i, TYRE_SOUND | 4);
         }
         for (car, name, pos) in [(0, "Leader", 1), (ME, "Me", 2), (2, "Third", 3)] {
             img.part_bool(car, "mIsActive", true);
@@ -1061,7 +1055,7 @@ mod tests {
         img.set_i32("mEnforcedPitStopLap", 0, 12);
         img.set_u32("mPitMode", 0, PIT_MODE_IN_PIT);
         img.set_u32("mPitSchedule", 0, 1);
-        img.set_u32("mDrsState", 0, DRS_INSTALLED | DRS_AVAILABLE_NOW);
+        img.set_u32("mDrsState", 0, DRS_INSTALLED | 0x08);
         img.set_f32("mBoostAmount", 0, 42.4);
         img.set_bool("mBoostActive", 0, true);
         let mut t = Tracker::default();
@@ -1181,7 +1175,7 @@ mod tests {
 
         img.set_u32("mTyreFlags", 2, TYRE_ATTACHED);
         assert_eq!(warnings(&img), vec![Warning::FlatTyre], "deflated");
-        img.set_u32("mTyreFlags", 2, TYRE_INFLATED);
+        img.set_u32("mTyreFlags", 2, 0x02);
         assert_eq!(warnings(&img), vec![Warning::FlatTyre], "came off");
         for i in 0..4 {
             img.set_u32("mTyreFlags", i, 0);
@@ -1414,5 +1408,121 @@ mod tests {
         assert_eq!(f.player_car_idx, None);
         assert_eq!(f.session.track, None);
         assert!(!f.player.unwrap().on_track);
+    }
+
+    #[test]
+    fn exact_ids_and_units() {
+        assert_eq!(class_id("GT3"), 1_812_731_170);
+        assert_eq!(class_id("F-Ultimate"), 1_925_234_198);
+        assert_eq!(kpa(Some(70.0)), Some(70.0), "70 reads as kPa");
+        assert_eq!(kpa(Some(-1.0)), None);
+        assert_eq!(metres(Some(-1.5)), Some(-0.015));
+        assert_eq!(celsius(Some(0.0)), None);
+    }
+
+    #[test]
+    fn edges_of_the_players_car() {
+        let mut img = race();
+        img.set_f32("mFuelPressureKPa", 0, 350.0);
+        img.set_u32("mCarFlags", 0, CAR_ENGINE_ACTIVE | CAR_TCS);
+        img.set_bool("mAntiLockActive", 0, false);
+        img.set_f32("mBoostAmount", 0, 42.0);
+        img.set_bool("mBoostActive", 0, false);
+        img.set_i32("mEnforcedPitStopLap", 0, 0);
+        img.set_u32("mDrsState", 0, DRS_INSTALLED);
+        img.set_f32("mRpm", 0, 50.0);
+        let f = frame(&img, &mut Tracker::default(), 0.0);
+        let c = car(&f);
+        assert_eq!(c.fuel_press_bar, Some(3.5));
+        assert_eq!(c.abs_active, Some(false));
+        assert_eq!((c.p2p_count, c.p2p_active), (Some(42), Some(false)));
+        assert_eq!(c.pit.mandatory_lap, None);
+        assert_eq!((c.drs_active, c.drs_available), (Some(false), Some(false)));
+        img.set_u32("mDrsState", 0, DRS_INSTALLED | 0x04 | DRS_ACTIVE);
+        img.set_u32("mCarFlags", 0, 0);
+        let f = frame(&img, &mut Tracker::default(), 0.0);
+        let c = car(&f);
+        assert_eq!((c.drs_active, c.drs_available), (Some(true), Some(true)));
+        assert_eq!(c.warnings, vec![], "50 rpm is turning");
+        assert_eq!(c.tc_active, Some(false));
+        // The viewed car is not in the race.
+        img.set_i32("mViewedParticipantIndex", 0, 5);
+        let f = frame(&img, &mut Tracker::default(), 0.0);
+        assert_eq!(f.player_car_idx, None);
+        assert!(!f.player.unwrap().on_track);
+    }
+
+    #[test]
+    fn when_a_wheel_rolls_freely() {
+        let learnt = |throttle: f32, brake: f32, lat: f32| {
+            let mut img = race();
+            img.set_f32("mSpeed", 0, 40.0);
+            img.set_tyres("mTyreRPS", [-125.0; 4]);
+            img.set_f32("mThrottle", 0, throttle);
+            img.set_f32("mBrake", 0, brake);
+            img.set_f32("mLocalAcceleration", 0, lat);
+            let mut t = Tracker::default();
+            for i in 0..=30 {
+                frame(&img, &mut t, f64::from(i));
+            }
+            car(&frame(&img, &mut t, 99.0))
+                .wheels
+                .clone()
+                .unwrap()
+                .lf
+                .speed_mps
+                .is_some()
+        };
+        assert!(learnt(0.24, 0.0, -2.9));
+        assert!(!learnt(0.25, 0.0, 0.0), "on the throttle");
+        assert!(!learnt(0.0, 0.001, 0.0), "on the brake");
+        assert!(!learnt(0.0, 0.0, 3.0), "cornering");
+        assert!(!learnt(0.0, 0.0, -3.0), "cornering the other way");
+    }
+
+    /// Where a car is that runs `side` m to the left and `behind` m behind a
+    /// car at `me` turned by `yaw`.
+    fn offset(me: [f32; 3], yaw: f32, side: f32, behind: f32) -> [f32; 3] {
+        let (s, c) = yaw.sin_cos();
+        [
+            me[0] + side * c + behind * s,
+            me[1],
+            me[2] - side * s + behind * c,
+        ]
+    }
+
+    #[test]
+    fn alongside_at_any_heading_and_height() {
+        const YAW: f32 = std::f32::consts::FRAC_PI_4;
+        let mut img = race();
+        img.set_f32("mOrientation", 1, YAW);
+        let me = [100.0, 10.0, 100.0];
+        let put = |img: &mut Image, car: usize, p: [f32; 3]| {
+            for (i, v) in p.into_iter().enumerate() {
+                img.part_f32(car, "mWorldPosition", i, v);
+            }
+        };
+        put(&mut img, ME, me);
+        put(&mut img, 2, [500.0, 10.0, 500.0]);
+        let beside = |img: &Image| {
+            car(&frame(img, &mut Tracker::default(), 0.0))
+                .alongside
+                .clone()
+        };
+        put(&mut img, 0, offset(me, YAW, 5.0, 0.0));
+        assert_eq!(beside(&img).as_deref(), Some("left"));
+        put(&mut img, 0, offset(me, YAW, -2.0, 4.0));
+        assert_eq!(beside(&img).as_deref(), Some("right"));
+        put(&mut img, 0, offset(me, YAW, 2.0, 6.0));
+        assert_eq!(beside(&img), None, "6 m behind");
+        put(&mut img, 0, offset(me, YAW, 2.0, -6.0));
+        assert_eq!(beside(&img), None, "6 m ahead");
+        let mut level = offset(me, YAW, 5.0, 0.0);
+        level[1] = 13.0;
+        put(&mut img, 0, level);
+        assert_eq!(beside(&img).as_deref(), Some("left"), "3 m up still counts");
+        level[1] = 13.5;
+        put(&mut img, 0, level);
+        assert_eq!(beside(&img), None);
     }
 }

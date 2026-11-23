@@ -39,3 +39,18 @@ pub fn open_live() -> Result<Ams2Source<shm::Mapped>, vr_core::SourceError> {
         shared_tracker(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_tracker_per_process() {
+        assert!(Arc::ptr_eq(&shared_tracker(), &shared_tracker()));
+        #[cfg(not(windows))]
+        assert!(matches!(
+            open_live(),
+            Err(vr_core::SourceError::Unsupported(_))
+        ));
+    }
+}
