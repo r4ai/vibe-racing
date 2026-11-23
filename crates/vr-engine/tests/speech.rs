@@ -244,7 +244,10 @@ fn topics_have_names() {
 #[test]
 fn the_car_ahead_comes_with_what_to_do() {
     let mut m = made();
-    assert_eq!(say(&m, SpeechTopic::Ahead), "前と0.6秒。あと2周で追いつく、仕掛けよう。");
+    assert_eq!(
+        say(&m, SpeechTopic::Ahead),
+        "前と0.6秒。あと2周で追いつく、仕掛けよう。"
+    );
     m.sectors = Some(sectors([0.2, -0.3, 0.05]));
     assert_eq!(
         say(&m, SpeechTopic::Ahead),
