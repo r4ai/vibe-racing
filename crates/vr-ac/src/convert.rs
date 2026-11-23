@@ -300,18 +300,17 @@ fn car_telemetry(snap: &Snapshot, tracker: &mut Tracker, time_s: f64) -> CarTele
     let shock = tracker.shock(p.arr("suspensionTravel"), time_s);
     let window = pit_window(&s);
     let has = |n: &str| s.flag(n) == Some(true);
+    // Not told: the steering angle (the game gives a -1..1 input without the
+    // lock) and whether the ABS is at work.
     CarTelemetry {
         // The pedal is pressed at 1, when the clutch is open.
         clutch: p.f64("clutch").map(|c| (1.0 - c).clamp(0.0, 1.0)),
-        // A -1..1 input; the steering lock is not told.
-        steering_rad: None,
         // Left-handed axes (x right, y up, z forward): left is negative x.
         yaw_rate_rps: p.f64_at("localAngularVel", 1).map(|r| -r),
         lat_accel_mps2: p.f64_at("accG", 0).map(|a| -a * G),
         long_accel_mps2: p.f64_at("accG", 2).map(|a| a * G),
         velocity_x_mps: p.f64_at("localVelocity", 2),
         velocity_y_mps: p.f64_at("localVelocity", 0).map(|v| -v),
-        abs_active: None,
         warnings,
         tyres: Tyres {
             lf: tyre(&p, 0),
@@ -452,8 +451,7 @@ pub fn build_frame(snap: &Snapshot, tracker: &mut Tracker, tick: u64, now_ms: i6
         uid,
         time_s,
     } = tracker.advance(&snap.sample(now_ms));
-    let raw_kind = g.i32("session").unwrap_or(-1);
-    let kind = session_kind(raw_kind);
+    let kind = g.i32("session").map_or(SessionKind::Other, session_kind);
     let race = kind == SessionKind::Race;
     let phase = phase(&g, race);
 
@@ -489,7 +487,8 @@ pub fn build_frame(snap: &Snapshot, tracker: &mut Tracker, tick: u64, now_ms: i6
     let sectors = tracker.sectors(
         s.i32("sectorCount").unwrap_or(0),
         g.i32("currentSectorIndex").unwrap_or(0),
-        g.f64("normalizedCarPosition").unwrap_or(-1.0),
+        // Nowhere, when not told: never a boundary.
+        g.f64("normalizedCarPosition").unwrap_or(f64::NAN),
     );
     let car = car_telemetry(snap, tracker, time_s);
     let best = cars[0].best_lap_s;
@@ -795,6 +794,18 @@ mod tests {
         assert!(close(wx.wind_mps, 5.0));
         assert!(close(wx.wind_dir_deg, 10.0));
         assert!(close(wx.track_grip, 0.98));
+        // No wind blows from nowhere.
+        let mut g = g;
+        g.f32("windSpeed", 0.0);
+        let wx = build_frame(&snap(&p, &g, &s), &mut Tracker::default(), 0, 0)
+            .weather
+            .unwrap();
+        assert_eq!((wx.wind_mps, wx.wind_dir_deg), (Some(0.0), None));
+        g.f32("windSpeed", -1.0);
+        let wx = build_frame(&snap(&p, &g, &s), &mut Tracker::default(), 0, 0)
+            .weather
+            .unwrap();
+        assert_eq!((wx.wind_mps, wx.wind_dir_deg), (None, None));
         assert_eq!(wx.wetness, None);
     }
 
@@ -1071,6 +1082,39 @@ mod tests {
                 ("ers_power", 1.0)
             ]
         );
+        // Before 1.7 the page ends ahead of `drsEnabled`: the old flag counts.
+        let drs = |v: f32| {
+            let mut old = p.bytes.clone();
+            old[PHYSICS.field("drs").unwrap().offset..][..4].copy_from_slice(&v.to_le_bytes());
+            old.truncate(PHYSICS.field("drsEnabled").unwrap().offset);
+            let snap = Snapshot {
+                physics: old,
+                ..snap(&p, &g, &s)
+            };
+            build_frame(&snap, &mut Tracker::default(), 0, 0)
+                .player
+                .unwrap()
+                .car
+                .drs_active
+        };
+        assert_eq!(drs(1.0), Some(true));
+        assert_eq!(drs(0.5), Some(false));
+        assert_eq!(drs(0.0), Some(false));
+        let ers = |s: &crate::layout::Writer<'_>| -> Vec<String> {
+            build_frame(&snap(&p, &g, s), &mut Tracker::default(), 0, 0)
+                .player
+                .unwrap()
+                .car
+                .controls
+                .into_iter()
+                .map(|c| c.id)
+                .filter(|id| id.starts_with("ers"))
+                .collect()
+        };
+        s.i32("ersPowerControllerCount", 0);
+        assert_eq!(ers(&s), ["ers_recovery"], "no power controllers");
+        s.i32("ersPowerControllerCount", 3).i32("hasERS", 0);
+        assert!(ers(&s).is_empty(), "no ERS at all");
         s.i32("ersPowerControllerCount", 0)
             .i32("hasERS", 0)
             .i32("hasKERS", 1);
@@ -1122,6 +1166,15 @@ mod tests {
         let c = f.car(4).unwrap();
         assert_eq!(c.position, Some(1));
         assert_eq!(c.driver, "Car 4");
+        // Not on the leaderboard yet; in the pit lane but not stopped.
+        let mut cc = crewchief(&[(4, "", 2, 0.35, 0, 1, false)]);
+        let at = CREWCHIEF.size + VEHICLE.field("isCarInPitline").unwrap().offset;
+        cc[at..at + 4].copy_from_slice(&1i32.to_le_bytes());
+        snapshot.crewchief = Some(cc);
+        let f = build_frame(&snapshot, &mut Tracker::default(), 0, 0);
+        let c = f.car(4).unwrap();
+        assert_eq!(c.position, None);
+        assert_eq!((c.on_pit_road, c.surface), (true, TrackSurface::OnTrack));
 
         // The app names the player when the game does not.
         let mut s = s;
