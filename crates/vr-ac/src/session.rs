@@ -175,8 +175,12 @@ mod tests {
         t.advance(&at(61_200, 0, 500.0));
         let c = t.advance(&at(61_300, 0, 449.0));
         assert_eq!((c.uid, c.time_s), (2, 0.0));
-        let c = t.advance(&at(61_400, 0, 400.0));
-        assert_eq!((c.uid, c.time_s), (2, 0.1), "50 m back is not a restart");
+        let c = t.advance(&at(61_400, 0, 399.0));
+        assert_eq!(
+            (c.uid, c.time_s),
+            (2, 0.1),
+            "exactly 50 m back is not a restart"
+        );
         // A timed session's countdown going up.
         let timed = |now_ms, left| Sample {
             time_left_s: Some(left),
