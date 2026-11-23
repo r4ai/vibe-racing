@@ -124,6 +124,16 @@ fn gap_line(label: &str, g: &GapInfo, ahead: bool) -> String {
     if g.on_pit_road {
         s.push_str(" | ON PIT ROAD");
     }
+    match (g.p2p_left, g.p2p_active) {
+        (Some(n), Some(true)) => {
+            let _ = write!(s, " | P2P/OTS {n} left, ON now");
+        }
+        (Some(n), _) => {
+            let _ = write!(s, " | P2P/OTS {n} left");
+        }
+        (None, Some(true)) => s.push_str(" | P2P/OTS ON now"),
+        _ => {}
+    }
     s
 }
 
@@ -753,6 +763,8 @@ mod tests {
             live_s: None,
             live_change_s: None,
             live_ahead: None,
+            p2p_left: None,
+            p2p_active: None,
         }
     }
 
@@ -918,6 +930,28 @@ mod tests {
                 None => assert_eq!(line, "ahead: P3 #7 D +1.23s"),
             }
         }
+    }
+
+    #[test]
+    fn the_push_to_pass_of_a_rival_is_told() {
+        let mut g = gap(None);
+        g.p2p_left = Some(64);
+        assert_eq!(
+            gap_line("ahead", &g, true),
+            "ahead: P3 #7 D +1.23s | P2P/OTS 64 left"
+        );
+        g.p2p_active = Some(true);
+        assert_eq!(
+            gap_line("ahead", &g, true),
+            "ahead: P3 #7 D +1.23s | P2P/OTS 64 left, ON now"
+        );
+        g.p2p_left = None;
+        assert_eq!(
+            gap_line("ahead", &g, true),
+            "ahead: P3 #7 D +1.23s | P2P/OTS ON now"
+        );
+        g.p2p_active = Some(false);
+        assert_eq!(gap_line("ahead", &g, true), "ahead: P3 #7 D +1.23s");
     }
 
     #[test]
