@@ -64,6 +64,24 @@ pub fn bends(track: &str, length_m: f64) -> Option<&'static [Bend]> {
     }
 }
 
+/// The corners of a track as the game names it.
+pub fn of_track(t: &vr_core::TrackInfo) -> Option<&'static [Bend]> {
+    let name = format!("{} {}", t.name, t.config.as_deref().unwrap_or_default());
+    bends(&name, t.length_m?)
+}
+
+/// The last corner driven through before a share of the lap: one that ended
+/// there or before, over the line from the end of the lap before.
+pub fn last_before(bends: &[Bend], at: f64) -> Option<&'static str> {
+    let at = at.rem_euclid(1.0);
+    bends
+        .iter()
+        .filter(|b| b.to <= at)
+        .max_by(|a, b| a.to.total_cmp(&b.to))
+        .or_else(|| bends.iter().max_by(|a, b| a.to.total_cmp(&b.to)))
+        .map(|b| b.name)
+}
+
 /// The place at a share of the lap.
 pub fn name_at(bends: &[Bend], at: f64) -> Option<&'static str> {
     bends
@@ -72,9 +90,62 @@ pub fn name_at(bends: &[Bend], at: f64) -> Option<&'static str> {
         .map(|b| b.name)
 }
 
+/// The corners within a stretch of the lap, the most of it first: two at the
+/// most, or the nearest one when none lies in it.
+pub fn names_in(bends: &[Bend], from: f64, to: f64) -> Option<String> {
+    let mut within: Vec<(f64, &str)> = bends
+        .iter()
+        .map(|b| (b.to.min(to) - b.from.max(from), b.name))
+        .filter(|(o, _)| *o > 0.0)
+        .collect();
+    within.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if within.is_empty() {
+        let mid = (from + to) / 2.0;
+        let near = bends.iter().min_by(|a, b| {
+            let d = |x: &Bend| (x.from - mid).abs().min((x.to - mid).abs());
+            d(a).total_cmp(&d(b))
+        })?;
+        return Some(format!("{}付近", near.name));
+    }
+    Some(
+        within
+            .iter()
+            .take(2)
+            .map(|(_, n)| *n)
+            .collect::<Vec<_>>()
+            .join("・"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_corner_just_driven() {
+        let s = bends("Suzuka International Racing Course - Grand Prix", 5756.5).unwrap();
+        // In Spoon: the last one done is 200R.
+        assert_eq!(name_at(s, 0.66), Some("スプーン"));
+        assert_eq!(last_before(s, 0.66), Some("200R"));
+        // Out of Spoon, towards 130R.
+        assert_eq!(last_before(s, 0.75), Some("スプーン"));
+        assert_eq!(last_before(s, 0.72), Some("スプーン"));
+        // Over the line: the last corner of the lap before.
+        assert_eq!(last_before(s, 0.05), Some("最終コーナー"));
+        assert_eq!(last_before(&[], 0.5), None);
+    }
+
+    #[test]
+    fn stretches_are_named_by_their_corners() {
+        let s = bends("Suzuka International Racing Course - Grand Prix", 5756.5).unwrap();
+        // Mostly the S curves, a little of the second corner.
+        assert_eq!(names_in(s, 0.15, 0.20).as_deref(), Some("S字・2コーナー"));
+        assert_eq!(names_in(s, 0.25, 0.30).as_deref(), Some("逆バンク・S字"));
+        assert_eq!(names_in(s, 0.65, 0.70).as_deref(), Some("スプーン"));
+        // Between corners: the nearest one.
+        assert_eq!(names_in(s, 0.76, 0.80).as_deref(), Some("130R付近"));
+        assert_eq!(names_in(&[], 0.1, 0.2), None);
+    }
 
     #[test]
     fn known_tracks_have_names() {

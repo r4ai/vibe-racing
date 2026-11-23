@@ -127,6 +127,7 @@ impl RaceApi for RaceState {
                 leader: None,
                 running_ahead: None,
                 running_behind: None,
+                field_tyres: Vec::new(),
             });
         };
         let mut nearby = self.nearby(f, None);
@@ -151,6 +152,7 @@ impl RaceApi for RaceState {
             weather: f.weather.clone(),
             rain_trend: self.rain_trend(),
             car: f.player.as_ref().map(|p| p.car.clone()),
+            field_tyres: crate::tyres::field_tyres(self, f),
         })
     }
 
@@ -563,7 +565,18 @@ impl RaceApi for RaceState {
             laps_sampled: laps.len(),
             mean,
             laps,
-            zones: tracker.zones(5),
+            zones: {
+                let bends = self.frame().and_then(|f| {
+                    let t = f.session.track.as_ref()?;
+                    let name = format!("{} {}", t.name, t.config.as_deref().unwrap_or_default());
+                    crate::tracks::bends(&name, t.length_m?)
+                });
+                let mut z = tracker.zones(5);
+                for z in &mut z {
+                    z.place = bends.and_then(|b| crate::tracks::names_in(b, z.from_pct, z.to_pct));
+                }
+                z
+            },
             controls: self.controls(),
             adjustments: self.adjustments().to_vec(),
             advice: advice.unwrap_or_default(),

@@ -369,7 +369,12 @@ fn the_running_order_is_ahead_of_the_official_one() {
     assert_eq!((behind.car.idx, behind.live_ahead), (1, Some(true)));
     let text = b.to_text();
     assert!(text.contains("running P2 on track now"), "{text}");
-    assert!(text.contains("AHEAD of you on track"), "{text}");
+    assert!(
+        text.contains(
+            "AHEAD of you on track (they have passed you; the places change at the line)"
+        ),
+        "{text}"
+    );
     assert!(text.contains("running ahead now: P2 #11"), "{text}");
     assert_eq!(st.live().unwrap().values["live_position"], 2.0);
     // The same as the places: nothing more to tell.

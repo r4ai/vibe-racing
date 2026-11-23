@@ -382,6 +382,24 @@ impl StrategyReport {
                 f.fresh_gain_stops,
             );
         }
+        if let Some(c) = &self.tyre_call {
+            let mut line = format!(
+                "other tyres: {} {:.2}s/lap faster than yours",
+                c.compound, c.gain_s_per_lap
+            );
+            if let Some(p) = c.payback_laps {
+                let _ = write!(line, "; the stop pays back in {p:.1} laps");
+            }
+            if let Some(l) = c.laps_left {
+                let _ = write!(line, "; {l} laps left");
+            }
+            match c.worth {
+                Some(true) => line.push_str(": worth changing now"),
+                Some(false) => line.push_str(": not worth it before the end"),
+                None => {}
+            }
+            let _ = writeln!(out, "{line}");
+        }
         if let Some(l) = self.pit_loss.seconds {
             let _ = writeln!(
                 out,
@@ -733,9 +751,10 @@ impl HandlingReport {
         if !self.zones.is_empty() {
             out.push_str("where (share of the lap):\n");
             for z in &self.zones {
+                let place = z.place.as_ref().map_or(String::new(), |p| format!(" {p}"));
                 let _ = writeln!(
                     out,
-                    "  {:.0}-{:.0}%: {} {:.1}s/lap",
+                    "  {:.0}-{:.0}%{place}: {} {:.1}s/lap",
                     z.from_pct * 100.0,
                     z.to_pct * 100.0,
                     z.tendency.label(),

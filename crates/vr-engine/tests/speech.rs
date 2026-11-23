@@ -164,6 +164,9 @@ fn made() -> Made {
                 on_pit_road: false,
                 on_track: true,
                 live_position: Some(4),
+                lap_pct: None,
+                corner_now: None,
+                corner_before: None,
             }),
             ahead: Some(gap("16", 3, 0.62, Some(-0.4))),
             behind: Some(gap("30", 5, 2.5, Some(0.3))),
@@ -176,6 +179,7 @@ fn made() -> Made {
             leader: Some(gap("1", 1, 7.94, Some(0.2))),
             running_ahead: None,
             running_behind: None,
+            field_tyres: Vec::new(),
         },
         sectors: None,
         forecast: None,
@@ -738,6 +742,12 @@ fn flags_and_weather() {
     );
     m.brief.rain_trend.as_mut().unwrap().direction = RainDirection::Easing;
     assert!(say(&m, SpeechTopic::Weather).ends_with("雨は弱まる。"));
+    m.brief.rain_trend.as_mut().unwrap().per_min = -0.05;
+    assert_eq!(
+        say(&m, SpeechTopic::Weather),
+        "路面は少し濡れてる。雨は弱まってる、7分ほどで止む見込み。"
+    );
+    m.brief.rain_trend.as_mut().unwrap().per_min = 0.04;
     m.brief.rain_trend = None;
     assert!(say(&m, SpeechTopic::Weather).ends_with("雨が降ってる。"));
     let w = m.brief.weather.as_mut().unwrap();
@@ -920,6 +930,18 @@ fn the_ideal_lap_takes_the_sectors_done_now_and_empty_comparisons_go() {
     r.rows[0].current = vec![Some(29.0), Some(39.0), None];
     let text = r.to_text();
     assert!(text.contains(" | ideal lap 1:52.900"), "{text}");
+    // The lap so far against the best sectors there are: S1 has none.
+    assert!(
+        text.contains(" | this lap so far -0.90s against your best sectors (S2, + is slower)"),
+        "{text}"
+    );
+    r.rows[0].best[0] = Some(29.5);
+    let text = r.to_text();
+    assert!(
+        text.contains(" | this lap so far -1.40s against your best sectors (S1-S2, + is slower)"),
+        "{text}"
+    );
+    r.rows[0].best[0] = None;
     assert!(text.contains("you vs #16"), "{text}");
     r.delta = vec![None; 3];
     r.rows[0].current = vec![None; 3];

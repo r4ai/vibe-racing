@@ -216,6 +216,9 @@ pub struct Zone {
     pub tendency: Tendency,
     /// Seconds per lap.
     pub seconds: f64,
+    /// The corners there, on a track whose corners have names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
 }
 
 /// A quantile followed without keeping the samples.
@@ -304,6 +307,7 @@ impl HandlingTracker {
                     to_pct: (i + 1) as f64 / ZONES as f64,
                     tendency,
                     seconds: s / self.zone_laps,
+                    place: None,
                 }
             })
             .filter(|z| z.seconds >= 0.05)

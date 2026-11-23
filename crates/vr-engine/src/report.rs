@@ -77,6 +77,15 @@ pub struct PlayerSummary {
     /// official one changes at the line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_position: Option<u32>,
+    /// Where on the lap the car is now, 0..1: what a short call is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lap_pct: Option<f64>,
+    /// The corner the car is in, and the last one it drove through, on a
+    /// track whose corners have names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_now: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_before: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +195,25 @@ pub struct Brief {
     pub running_ahead: Option<GapInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_behind: Option<GapInfo>,
+    /// The class by the tyres they are on, when they are not all on the same
+    /// or the track is wet: who is on what, and how fast on it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_tyres: Vec<TyreGroup>,
+}
+
+/// The cars of the class on one kind of tyre.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TyreGroup {
+    pub compound: String,
+    pub cars: Vec<CarRef>,
+    /// The driver is on it.
+    pub you: bool,
+    /// The median of the cars' paces on it: each car's median of its clean
+    /// laps since its last stop.
+    pub pace_s: Option<f64>,
+    /// The fastest car on it.
+    pub fastest: Option<CarRef>,
+    pub fastest_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

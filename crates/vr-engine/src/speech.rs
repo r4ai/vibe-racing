@@ -827,11 +827,20 @@ impl Voice<'_> {
         }
         let road = wet.map(|w| format!("路面は{}。", wetness(w)));
         let rain = w.precipitation.map(|p| {
-            let trend = self.b.rain_trend.map(|t| t.direction);
-            let text = match (p > 0.0, trend) {
+            let trend = self.b.rain_trend;
+            let text = match (p > 0.0, trend.map(|t| t.direction)) {
                 (false, _) => "雨は無い。",
                 (true, Some(RainDirection::Rising)) => "雨が強くなる、備えよう。",
-                (true, Some(RainDirection::Easing)) => "雨は弱まる。",
+                // At the rate it eases: the game tells no forecast.
+                (true, Some(RainDirection::Easing)) => match trend.filter(|t| t.per_min < 0.0) {
+                    Some(t) => {
+                        return format!(
+                            "雨は弱まってる、{:.0}分ほどで止む見込み。",
+                            (p / -t.per_min).ceil()
+                        );
+                    }
+                    None => "雨は弱まる。",
+                },
                 (true, _) => "雨が降ってる。",
             };
             text.to_string()

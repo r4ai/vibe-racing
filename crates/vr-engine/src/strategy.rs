@@ -275,6 +275,52 @@ pub struct StrategyReport {
     pub rejoin_now: Option<Rejoin>,
     pub rivals: Vec<Rival>,
     pub calls: Vec<StrategyCall>,
+    /// Faster tyres others are on, and whether changing to them pays before the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tyre_call: Option<TyreCall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TyreCall {
+    pub compound: String,
+    /// Faster on them than on yours, per lap.
+    pub gain_s_per_lap: f64,
+    /// Laps the stop takes to pay back.
+    pub payback_laps: Option<f64>,
+    /// The lap in progress counted.
+    pub laps_left: Option<i32>,
+    /// It pays before the end.
+    pub worth: Option<bool>,
+}
+
+/// Gains less a lap are the track, not the tyres.
+const TYRE_GAIN_S: f64 = 0.5;
+
+/// The fastest other tyres of the class against the driver's own.
+pub(crate) fn tyre_call(
+    groups: &[crate::report::TyreGroup],
+    loss: Option<f64>,
+    laps_left: Option<i32>,
+) -> Option<TyreCall> {
+    let mine = groups.iter().find(|g| g.you)?.pace_s?;
+    let other = groups
+        .iter()
+        .filter(|g| !g.you)
+        .filter_map(|g| Some((g, g.pace_s?)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    let gain = mine - other.1;
+    if gain < TYRE_GAIN_S {
+        return None;
+    }
+    let payback = loss.map(|l| l / gain);
+    Some(TyreCall {
+        compound: other.0.compound.clone(),
+        gain_s_per_lap: gain,
+        payback_laps: payback,
+        laps_left,
+        // Paid back only on the last lap is no gain (and no float noise decides it).
+        worth: payback.zip(laps_left).map(|(p, l)| p < f64::from(l) - 1e-6),
+    })
 }
 
 /// Clean laps of a stint with the age of the tyres.
@@ -698,6 +744,7 @@ pub(crate) fn strategy(state: &RaceState, prior_loss: Option<f64>) -> StrategyRe
         rejoin_now: None,
         rivals: Vec::new(),
         calls: Vec::new(),
+        tyre_call: None,
     };
     let Some(frame) = state.frame() else {
         report.missing.push("no data yet".into());
@@ -850,6 +897,11 @@ pub(crate) fn strategy(state: &RaceState, prior_loss: Option<f64>) -> StrategyRe
     }
     report.rivals = rivals(frame, player, &all, mine, &pace_of, &report);
     report.calls = calls(&report, frame, lap);
+    report.tyre_call = tyre_call(
+        &crate::tyres::field_tyres(state, frame),
+        loss,
+        report.laps_total.map(|t| t - lap + 1),
+    );
     report
 }
 

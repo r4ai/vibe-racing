@@ -66,14 +66,30 @@ const HANDLING: &[&str] = &[
     "入らない",
     "入んない",
     "入りにく",
+    // Not アンダーカット, a question of strategy.
     "アンダーステア",
     "アンダーが",
     "アンダー出",
     "アンダーで",
+    "アンダーな",
+    "アンダーだ",
+    "アンダー気味",
+    "アンダー強",
+    "アンダーきつ",
+    "アンダーひど",
     "オーバーステア",
     "オーバーが",
     "オーバー出",
     "オーバーで",
+    "オーバーなん",
+    "オーバー気味",
+    "リアが",
+    "リア出",
+    "フロントが",
+    "ロック",
+    "ふらつ",
+    "不安定",
+    "跳ね",
     "滑る",
     "滑っ",
     "すべる",
@@ -225,6 +241,15 @@ const DRIVING: &[&str] = &[
     "アクセル",
     "全開",
     "伸びしろ",
+    "足りな",
+    "追いつ",
+    "追い付",
+    "もっと速",
+    "速くなる",
+    "速くする",
+    "今の周",
+    "この周",
+    "今周",
     // Against the others and the best lap: the sectors and the corners tell.
     "仕掛け",
     "抜け",
@@ -293,6 +318,25 @@ const STRATEGY: &[&str] = &[
     "入ったほう",
     "ストップ",
     "止まったら",
+    // Tyres for the weather, and how it goes on.
+    "タイヤ変え",
+    "タイヤ替え",
+    "タイヤを変え",
+    "タイヤを替え",
+    "履き替え",
+    "スリック",
+    "ドライタイヤ",
+    "ウェットタイヤ",
+    "レインタイヤ",
+    "ドライで",
+    "ドライに",
+    "ウェットに",
+    "レインに",
+    "晴れ",
+    "止む",
+    "やむ",
+    "乾い",
+    "乾く",
     "ウィンドウ",
     "ウインドウ",
 ];
@@ -410,13 +454,19 @@ pub fn commands(found: &Found, text: &str) -> Vec<String> {
     if found.topics.contains(&Topic::Handling) && SETUP.iter().any(|w| contains(&folded, w)) {
         out.push("vr setup".into());
     }
-    // Where the car behind is faster: our laps against its.
-    if found.topics.contains(&Topic::Driving)
-        && ["後ろ", "後続", "うしろ"]
+    // Where the car behind or ahead is faster: our laps against its.
+    if found.topics.contains(&Topic::Driving) {
+        if ["後ろ", "後続", "うしろ"]
             .iter()
             .any(|w| folded.contains(w))
-    {
-        out.push("vr sectors --car behind".into());
+        {
+            out.push("vr sectors --car behind".into());
+        } else if ["前の", "前は", "前に", "前と", "前が", "前を"]
+            .iter()
+            .any(|w| folded.contains(w))
+        {
+            out.push("vr sectors --car ahead".into());
+        }
     }
     for n in car_numbers(&folded) {
         out.push(format!("vr gap --car {n}"));
@@ -593,6 +643,52 @@ mod tests {
         assert_eq!(q.chars().count(), PLAIN_CHARS);
         assert_eq!(read(q), Some(Found::default()));
         assert_eq!(read(&format!("{q}あ")), None);
+    }
+
+    #[test]
+    fn complaints_and_open_questions_bring_their_data() {
+        for q in [
+            "アンダーなんだけど",
+            "リアが滑る",
+            "ブレーキでロックする",
+            "オーバー気味",
+        ] {
+            assert!(topics(q).contains(&Topic::Handling), "{q}");
+        }
+        for q in [
+            "何が足りない？",
+            "前に追いつくにはどうすればいい？",
+            "今の周どう？",
+            "もっと速く走るには？",
+        ] {
+            assert!(topics(q).contains(&Topic::Driving), "{q}");
+        }
+        // The car the question is about.
+        let ahead = commands(&about(&[Topic::Driving], false), "前はどこで遅い？");
+        assert_eq!(
+            ahead.last().map(String::as_str),
+            Some("vr sectors --car ahead")
+        );
+        let behind = commands(&about(&[Topic::Driving], false), "後ろに対してどこを守る？");
+        assert_eq!(
+            behind.last().map(String::as_str),
+            Some("vr sectors --car behind")
+        );
+        let none = commands(&about(&[Topic::Driving], false), "どこで攻める？");
+        assert!(!none.iter().any(|c| c.contains("--car")), "{none:?}");
+    }
+
+    #[test]
+    fn weather_and_tyre_calls_bring_the_strategy() {
+        for q in [
+            "いつ晴れるの？",
+            "ドライで走ってるやついる？",
+            "タイヤ変えなくていい？",
+            "雨いつ止む？",
+            "路面乾いてきた？",
+        ] {
+            assert!(topics(q).contains(&Topic::Strategy), "{q}");
+        }
     }
 
     #[test]

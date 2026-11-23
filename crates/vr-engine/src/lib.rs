@@ -23,6 +23,7 @@ mod strategy;
 mod timing;
 mod trace;
 pub mod tracks;
+pub(crate) mod tyres;
 mod util;
 
 pub use advice::{Advice, MIN_LAPS as ADVICE_MIN_LAPS, Place};
@@ -40,7 +41,7 @@ pub use report::*;
 pub use speech::{Speech, Topic as SpeechTopic, speak, speak_with};
 pub use state::*;
 pub use strategy::{
-    Basis, Fade, PitLoss, Plan, Rejoin, Rival, StrategyCall, StrategyReport, pit_loss_of,
+    Basis, Fade, PitLoss, Plan, Rejoin, Rival, StrategyCall, StrategyReport, TyreCall, pit_loss_of,
 };
 pub use trace::{
     Corner, CornersReport, LapTrace, POINTS as TRACE_POINTS, Speeds, compare as compare_laps,

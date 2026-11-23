@@ -983,6 +983,23 @@ impl RaceState {
             on_pit_road: car.on_pit_road,
             on_track: p.on_track,
             live_position: self.live_position(frame),
+            lap_pct: car.lap_dist_pct.filter(|p| (0.0..=1.0).contains(p)),
+            corner_now: frame
+                .session
+                .track
+                .as_ref()
+                .and_then(crate::tracks::of_track)
+                .zip(car.lap_dist_pct)
+                .and_then(|(b, at)| crate::tracks::name_at(b, at))
+                .map(String::from),
+            corner_before: frame
+                .session
+                .track
+                .as_ref()
+                .and_then(crate::tracks::of_track)
+                .zip(car.lap_dist_pct)
+                .and_then(|(b, at)| crate::tracks::last_before(b, at))
+                .map(String::from),
         })
     }
 

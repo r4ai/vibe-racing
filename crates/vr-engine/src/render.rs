@@ -112,9 +112,9 @@ fn gap_line(label: &str, g: &GapInfo, ahead: bool) -> String {
         let passed = if runs_ahead == ahead {
             ""
         } else if ahead {
-            " BEHIND you on track"
+            " BEHIND you on track (you have passed them; the places change at the line)"
         } else {
-            " AHEAD of you on track"
+            " AHEAD of you on track (they have passed you; the places change at the line)"
         };
         let _ = write!(s, " | now {l:.2}s{passed}");
         if let Some(c) = g.live_change_s {
@@ -177,9 +177,19 @@ fn weather_line(w: &vr_core::Weather, trend: Option<&RainTrend>) -> Option<Strin
     if let Some(wet) = &w.wetness {
         let mut p = wet.clone();
         let rain = w.precipitation.filter(|r| *r > 0.0);
+        // When it stops, if it eases on as it does: no forecast comes from the game.
+        let stops = match (rain, trend) {
+            (Some(r), Some(t)) if t.direction == RainDirection::Easing && t.per_min < 0.0 => {
+                format!(
+                    ", stops in about {:.0} min at this rate",
+                    (r / -t.per_min).ceil()
+                )
+            }
+            _ => String::new(),
+        };
         let trend = trend.map(|t| match t.direction {
             RainDirection::Rising => format!("rising {:.0}%/min", t.per_min * 100.0),
-            RainDirection::Easing => format!("easing {:.0}%/min", -t.per_min * 100.0),
+            RainDirection::Easing => format!("easing {:.0}%/min{stops}", -t.per_min * 100.0),
             RainDirection::Steady => "steady".into(),
         });
         match (rain, trend) {
@@ -203,6 +213,42 @@ fn weather_line(w: &vr_core::Weather, trend: Option<&RainTrend>) -> Option<Strin
         parts.push(format!("track {t:.1}C"));
     }
     (!parts.is_empty()).then(|| format!("weather: {}", parts.join(" | ")))
+}
+
+/// Who is on which tyres and how fast on them, the fastest kind first.
+fn tyres_line(groups: &[TyreGroup]) -> String {
+    let parts: Vec<String> = groups
+        .iter()
+        .map(|g| {
+            let mut p = format!(
+                "{} {} car{}",
+                g.compound,
+                g.cars.len(),
+                if g.cars.len() == 1 { "" } else { "s" }
+            );
+            if g.you {
+                p.push_str(" (you)");
+            }
+            if g.cars.len() <= 4 {
+                let n: Vec<String> = g.cars.iter().map(|c| format!("#{}", c.number)).collect();
+                let _ = write!(p, " {}", n.join(" "));
+            }
+            match (g.pace_s, &g.fastest, g.fastest_s) {
+                (Some(pace), Some(c), Some(f)) => {
+                    let _ = write!(
+                        p,
+                        ", pace {} (fastest #{} {})",
+                        fmt_lap(pace),
+                        c.number,
+                        fmt_lap(f)
+                    );
+                }
+                _ => p.push_str(", no clean laps on them yet"),
+            }
+            p
+        })
+        .collect();
+    format!("tyres in the class: {}", parts.join(" | "))
 }
 
 impl Brief {
@@ -282,6 +328,16 @@ impl Brief {
             if let Some(now) = p.live_position.filter(|n| Some(*n) != official) {
                 let _ = write!(l, " | running P{now} on track now");
             }
+            // Where the car is: a short call is about what was just driven.
+            if let Some(at) = p.lap_pct {
+                let _ = write!(l, " | on the lap {:.0}%", at * 100.0);
+                if let Some(c) = &p.corner_now {
+                    let _ = write!(l, ", in {c}");
+                }
+                if let Some(c) = &p.corner_before {
+                    let _ = write!(l, ", last corner {c}");
+                }
+            }
             let _ = writeln!(out, "{l}");
         }
         match &self.ahead {
@@ -316,6 +372,9 @@ impl Brief {
             .and_then(|w| weather_line(w, self.rain_trend.as_ref()))
         {
             let _ = writeln!(out, "{w}");
+        }
+        if !self.field_tyres.is_empty() {
+            let _ = writeln!(out, "{}", tyres_line(&self.field_tyres));
         }
         if let Some(l) = self.car.as_ref().and_then(crate::render_car::car_line) {
             let _ = writeln!(out, "{l}");
@@ -491,6 +550,26 @@ impl SectorsReport {
             }
             if r.role == "you" && r.current.iter().any(Option::is_some) {
                 let _ = write!(out, " | this lap {}", list(&r.current));
+                // The verdict on the lap so far: its sectors against the best ones.
+                let done: Vec<(usize, f64)> = r
+                    .current
+                    .iter()
+                    .zip(&r.best)
+                    .enumerate()
+                    .filter_map(|(i, (c, b))| Some((i + 1, (*c)? - (*b)?)))
+                    .collect();
+                if let (Some(first), Some(last)) = (done.first(), done.last()) {
+                    let sum: f64 = done.iter().map(|(_, d)| d).sum();
+                    let span = if first.0 == last.0 {
+                        format!("S{}", first.0)
+                    } else {
+                        format!("S{}-S{}", first.0, last.0)
+                    };
+                    let _ = write!(
+                        out,
+                        " | this lap so far {sum:+.2}s against your best sectors ({span}, + is slower)"
+                    );
+                }
             }
             out.push('\n');
         }
@@ -718,7 +797,45 @@ mod tests {
             leader: None,
             running_ahead: None,
             running_behind: None,
+            field_tyres: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_tyres_of_the_class_are_told_fastest_first() {
+        let car = |n: &str| CarRef {
+            idx: 0,
+            number: n.into(),
+            driver: String::new(),
+            class_name: None,
+            position: None,
+            class_position: None,
+        };
+        let mut b = brief();
+        b.field_tyres = vec![
+            TyreGroup {
+                compound: "Dry".into(),
+                cars: vec![car("5"), car("7")],
+                you: false,
+                pace_s: Some(121.4),
+                fastest: Some(car("5")),
+                fastest_s: Some(120.95),
+            },
+            TyreGroup {
+                compound: "Wet".into(),
+                cars: (0..10).map(|i| car(&i.to_string())).collect(),
+                you: true,
+                pace_s: None,
+                fastest: None,
+                fastest_s: None,
+            },
+        ];
+        let text = b.to_text();
+        assert!(
+            text.contains("tyres in the class: Dry 2 cars #5 #7, pace 2:01.400 (fastest #5 2:00.950) | Wet 10 cars (you), no clean laps on them yet
+"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -747,7 +864,9 @@ mod tests {
         );
         assert_eq!(
             weather_line(&wet, Some(&trend(-0.05, RainDirection::Easing))).as_deref(),
-            Some("weather: lightly wet (rain 30%, easing 5%/min)")
+            Some(
+                "weather: lightly wet (rain 30%, easing 5%/min, stops in about 6 min at this rate)"
+            )
         );
         let dry = vr_core::Weather {
             wetness: Some("dry".into()),
@@ -940,6 +1059,9 @@ mod tests {
             on_pit_road: false,
             on_track: true,
             live_position: None,
+            lap_pct: None,
+            corner_now: None,
+            corner_before: None,
         });
         let t = b.to_text();
         assert!(
@@ -948,6 +1070,26 @@ mod tests {
         );
         assert!(t.contains("ahead: none (leading)"));
         assert!(!t.contains("nearby") && !t.contains("recent events") && !t.contains("fuel:"));
+        // Where the car is, and the corner a short call is about.
+        let p = b.player.as_mut().unwrap();
+        p.lap_pct = Some(0.664);
+        p.corner_now = Some("スプーン".into());
+        p.corner_before = Some("200R".into());
+        let t = b.to_text();
+        assert!(
+            t.contains(
+                "
+you: P1/2 | last -- | best -- | avg -- | on the lap 66%, in スプーン, last corner 200R
+"
+            ),
+            "{t}"
+        );
+        let p = b.player.as_mut().unwrap();
+        p.corner_now = None;
+        assert!(b.to_text().contains(
+            "| on the lap 66%, last corner 200R
+"
+        ));
     }
 
     #[test]
