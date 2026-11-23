@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod calibrate;
 pub mod facts;
+pub mod gold;
 pub mod html;
 pub mod judge;
 pub mod report;

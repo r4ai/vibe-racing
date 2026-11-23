@@ -1,0 +1,66 @@
+# Questions after a race whose answers the kept sessions know (`vr-eval gold`).
+# `{race}` is the newest race, `{before}` the race before it on the track,
+# `{warmup}` the warm-up before the race. `cols`: what the answer has to say
+# (all columns by default), `rows`: how many rows of it (1 by default).
+
+- ask: このレースで一番タイムをロスしたコーナーはどこ？合計で何秒？
+  sql: SELECT corner, lost_s FROM corner_stats WHERE session = {race} ORDER BY lost_s DESC LIMIT 1
+
+- ask: ヘアピンが一番速かった周は何周目？
+  sql: SELECT lap FROM corners WHERE session = {race} AND corner = 'ヘアピン' AND NOT pit ORDER BY time_s LIMIT 1
+
+- ask: 昨日のレースとコーナーごとのベスト同士で比べて、今日一番遅いのはどこ？何秒？
+  sql: >-
+    WITH a AS (SELECT corner, min(time_s) b FROM corners WHERE session = {race} AND NOT pit GROUP BY corner),
+    o AS (SELECT corner, min(time_s) b FROM corners WHERE session = {before} AND NOT pit GROUP BY corner)
+    SELECT corner, a.b - o.b FROM a JOIN o USING (corner) ORDER BY 2 DESC LIMIT 1
+
+- ask: 自分のベストと、各コーナーのベストを繋いだタイムの差は？
+  sql: >-
+    SELECT (SELECT best_s FROM lap_stats WHERE session = {race} AND is_player)
+      - (SELECT sum(best_s) FROM corner_stats WHERE session = {race})
+
+- ask: ブレーキの踏み始めが一番ばらついてるコーナーは？
+  sql: SELECT corner FROM corner_stats WHERE session = {race} AND brake_spread_m IS NOT NULL ORDER BY brake_spread_m DESC LIMIT 1
+
+- ask: このレースで一番ペースが安定してたのは何号車？
+  sql: SELECT CASE WHEN is_player THEN '君' ELSE car_number END FROM lap_stats WHERE session = {race} AND laps >= 3 ORDER BY spread_s LIMIT 1
+
+- ask: 自分のラップタイム、序盤と終盤でどれくらい変わった？
+  sql: SELECT fade_s FROM lap_stats WHERE session = {race} AND is_player
+  tol: 0.1
+
+- ask: インシデントは全部で何回あった？
+  sql: SELECT count(*) FROM events WHERE session = {race} AND type = 'incident'
+
+- ask: 今日のウォームアップと決勝、ベストの差は？
+  sql: >-
+    SELECT (SELECT best_s FROM lap_stats WHERE session = {warmup} AND is_player)
+      - (SELECT best_s FROM lap_stats WHERE session = {race} AND is_player)
+
+- ask: S字の通過タイム、ベストの周と最後の周でどれだけ違う？
+  sql: >-
+    SELECT (SELECT time_s FROM corners WHERE session = {race} AND corner = 'S字' ORDER BY lap DESC LIMIT 1)
+      - (SELECT min(time_s) FROM corners WHERE session = {race} AND corner = 'S字' AND NOT pit)
+
+- ask: 一番速いベストラップは誰で何秒？
+  # The driver by name or by the number of the car.
+  sql: SELECT driver || '|' || car_number || '号車', best_s FROM lap_stats WHERE session = {race} ORDER BY best_s LIMIT 1
+
+- ask: 鈴鹿で今まで一番速かった自分のラップは何秒？
+  sql: >-
+    SELECT min(best_s) FROM lap_stats WHERE is_player
+      AND session IN (SELECT id FROM sessions WHERE track = (SELECT track FROM sessions WHERE id = {race}))
+
+- ask: スプーンの最低速度、一番遅かった周は何キロ？
+  sql: SELECT min(min_kmh) FROM corners WHERE session = {race} AND corner = 'スプーン' AND NOT pit
+
+- ask: ベストラップは何周目で何秒？
+  sql: SELECT lap, time_s FROM laps WHERE session = {race} AND is_player AND NOT pit AND lap > 1 ORDER BY time_s LIMIT 1
+
+- ask: 他の車と比べて一番遅れてるコーナーはどこ？一番速い人より何秒？
+  # From every car's corner times: empty until a race is kept with them.
+  sql: SELECT corner, you_lose_s FROM corner_field WHERE session = {race} ORDER BY you_lose_s DESC LIMIT 1
+
+- ask: シケイン、ブレーキを一番遅く踏んだ周のタイムは？
+  sql: SELECT corner_s FROM brakes WHERE session = {race} AND corner = 'シケイン' ORDER BY brake_on_m DESC LIMIT 1

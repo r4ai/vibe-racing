@@ -4,9 +4,12 @@
 //!
 //! `<sessions>/<id>.lake/telemetry/part-*.parquet`: the player's car, every
 //! frame. `cars/part-*.parquet`: every car, ten times a second.
-//! `corners/lap-*.parquet`: each corner of each lap. Laps, events and the
-//! sessions themselves are read from the session files.
+//! `corners/lap-*.parquet`: each corner of each lap.
+//! `crossings/part-*.parquet`: the moment each car began each corner, at the
+//! rate the game tells it, so every car's corner times compare with yours.
+//! Laps, events and the sessions themselves are read from the session files.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -78,6 +81,86 @@ struct CarRow {
     is_player: bool,
 }
 
+/// A car beginning a corner.
+struct Crossing {
+    t: f64,
+    idx: i32,
+    number: String,
+    driver: String,
+    is_player: bool,
+    lap: Option<i32>,
+    corner_no: i32,
+    corner: String,
+    in_pits: bool,
+}
+
+/// Where the corners of a track begin, and their names.
+struct Marks {
+    key: String,
+    at: Vec<f64>,
+    names: Vec<String>,
+}
+
+impl Marks {
+    /// The line, then the start of each named corner; on a track without
+    /// names, twenty equal stretches.
+    fn of(track: &str, length_m: f64) -> Self {
+        let (at, names) = match vr_engine::tracks::bends(track, length_m) {
+            Some(b) => (
+                std::iter::once(0.0)
+                    .chain(b.iter().map(|b| b.from))
+                    .collect(),
+                std::iter::once(START_STRAIGHT.to_string())
+                    .chain(b.iter().map(|b| b.name.to_string()))
+                    .collect(),
+            ),
+            None => (
+                (0..STRETCHES)
+                    .map(|i| i as f64 / STRETCHES as f64)
+                    .collect(),
+                (0..STRETCHES)
+                    .map(|i| format!("{}%", i * 100 / STRETCHES))
+                    .collect(),
+            ),
+        };
+        Self {
+            key: format!("{track}|{length_m}"),
+            at,
+            names,
+        }
+    }
+}
+
+/// Stretches of a lap on a track whose corners have no names.
+const STRETCHES: usize = 20;
+/// More of the lap than this in one frame is a jump (a tow, a reset), not driving.
+const JUMP: f64 = 0.05;
+
+/// The marks passed going from `a` to `b` (shares of the lap, over the line
+/// too), each with how far along the way it lies, in order.
+fn passed(marks: &[f64], a: f64, b: f64) -> Vec<(usize, f64)> {
+    let mut d = b - a;
+    if d < -0.5 {
+        d += 1.0;
+    }
+    if d <= 0.0 || d > JUMP {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, f64)> = marks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| {
+            let mut x = m - a;
+            if x <= 0.0 {
+                x += 1.0;
+            }
+            (x <= d).then_some((i, x / d))
+        })
+        .collect();
+    out.sort_by(|x, y| x.1.total_cmp(&y.1));
+    out
+}
+
 const G: f64 = 9.806_65;
 
 const TELEMETRY: &str = "CREATE TABLE telemetry (
@@ -103,6 +186,10 @@ const CORNERS: &str = "CREATE TABLE corners (
     min_kmh DOUBLE, exit_kmh DOUBLE, gear INTEGER, brake_before_m DOUBLE,
     min_throttle_pct INTEGER)";
 
+const CROSSINGS: &str = "CREATE TABLE crossings (
+    session VARCHAR, t DOUBLE, idx INTEGER, car_number VARCHAR, driver VARCHAR,
+    is_player BOOLEAN, lap INTEGER, number INTEGER, corner VARCHAR, in_pits BOOLEAN)";
+
 /// Collects what is driven and writes it out now and then. Lives on the
 /// thread the telemetry arrives on.
 pub struct Writer {
@@ -111,18 +198,25 @@ pub struct Writer {
     cars: Vec<CarRow>,
     last_cars: Option<f64>,
     last_flush: Instant,
+    crossings: Vec<Crossing>,
+    /// Each car's place on the lap at the last frame.
+    was: HashMap<i32, (f64, f64)>,
+    marks: Option<Marks>,
 }
 
 impl Writer {
     pub fn new() -> Result<Self> {
         let db = Connection::open_in_memory()?;
-        db.execute_batch(&format!("{TELEMETRY}; {CARS}; {CORNERS};"))?;
+        db.execute_batch(&format!("{TELEMETRY}; {CARS}; {CORNERS}; {CROSSINGS};"))?;
         Ok(Self {
             db,
             rows: Vec::new(),
             cars: Vec::new(),
             last_cars: None,
             last_flush: Instant::now(),
+            crossings: Vec::new(),
+            was: HashMap::new(),
+            marks: None,
         })
     }
 
@@ -165,6 +259,7 @@ impl Writer {
                 ],
             });
         }
+        self.cross(f);
         if self
             .last_cars
             .is_none_or(|l| t - l >= CARS_EVERY_S || t < l)
@@ -192,6 +287,49 @@ impl Writer {
         }
     }
 
+    /// Every car that began a corner since the last frame.
+    fn cross(&mut self, f: &Frame) {
+        let Some(track) = &f.session.track else {
+            return;
+        };
+        let Some(length) = track.length_m.filter(|l| *l > 0.0) else {
+            return;
+        };
+        let key = format!("{}|{length}", track.name);
+        if self.marks.as_ref().is_none_or(|m| m.key != key) {
+            self.marks = Some(Marks::of(&track.name, length));
+            self.was.clear();
+        }
+        let Some(marks) = &self.marks else {
+            return;
+        };
+        let t = f.session.time_s;
+        for c in &f.cars {
+            let idx = c.idx as i32;
+            let Some(now) = c.lap_dist_pct.filter(|p| (0.0..=1.0).contains(p)) else {
+                self.was.remove(&idx);
+                continue;
+            };
+            if let Some((t0, before)) = self.was.insert(idx, (t, now))
+                && t > t0
+            {
+                for (i, along) in passed(&marks.at, before, now) {
+                    self.crossings.push(Crossing {
+                        t: t0 + (t - t0) * along,
+                        idx,
+                        number: c.number.clone(),
+                        driver: c.driver.clone(),
+                        is_player: c.is_player,
+                        lap: c.lap,
+                        corner_no: i as i32,
+                        corner: marks.names[i].clone(),
+                        in_pits: c.on_pit_road,
+                    });
+                }
+            }
+        }
+    }
+
     /// Time to write what was collected.
     pub fn due(&self) -> bool {
         self.last_flush.elapsed() >= FLUSH_EVERY && !self.rows.is_empty()
@@ -200,9 +338,10 @@ impl Writer {
     /// Writes what was collected into the session's folder.
     pub fn flush(&mut self, dir: &Path, session: &str) -> Result<()> {
         self.last_flush = Instant::now();
-        let (rows, cars) = (
+        let (rows, cars, crossings) = (
             std::mem::take(&mut self.rows),
             std::mem::take(&mut self.cars),
+            std::mem::take(&mut self.crossings),
         );
         let Some(first) = rows.first().map(|r| r.ts_ms) else {
             return Ok(());
@@ -278,6 +417,24 @@ impl Writer {
             }
             app.flush()?;
         }
+        {
+            let mut app = self.db.appender("crossings")?;
+            for c in &crossings {
+                app.append_row(params![
+                    session,
+                    c.t,
+                    c.idx,
+                    c.number,
+                    c.driver,
+                    c.is_player,
+                    c.lap,
+                    c.corner_no,
+                    c.corner,
+                    c.in_pits,
+                ])?;
+            }
+            app.flush()?;
+        }
         let dir = folder(dir, session);
         self.copy(
             "telemetry",
@@ -285,6 +442,11 @@ impl Writer {
             &format!("part-{first}"),
         )?;
         self.copy("cars", &dir.join("cars"), &format!("part-{first}"))?;
+        self.copy(
+            "crossings",
+            &dir.join("crossings"),
+            &format!("part-{first}"),
+        )?;
         Ok(())
     }
 
@@ -422,6 +584,9 @@ pub struct QueryReport {
     pub rows: Vec<Vec<Value>>,
     /// More rows were found than are shown.
     pub truncated: bool,
+    /// What the asker may have overlooked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl QueryReport {
@@ -454,6 +619,9 @@ impl QueryReport {
                 self.rows.len()
             ));
         }
+        if let Some(n) = &self.note {
+            out.push_str(&format!("({n})\n"));
+        }
         out
     }
 }
@@ -467,9 +635,13 @@ events: session, seq, session_time_s, type (incident, flag_raised, position_chan
 telemetry (yours, 60 per second): session, t (session seconds), lap, lap_pct (0-1), lap_m (metres from the line), lap_time, speed_kmh, throttle_pct, brake_pct, clutch_pct, gear, rpm, steer_deg, lat_g, long_g, yaw_dps, abs, fuel_l, delta_best_s, on_track, in_pits, lf_/rf_/lr_/rr_speed_kmh, _brake_bar, _ride_mm, _shock_mps
 cars (everyone, 10 per second): session, t, idx, number, driver, class, position, class_position, lap, lap_pct, in_pits, surface, last_lap_s, best_lap_s, gap_to_leader_s, is_player
 corners (yours, one row per corner per lap): session, lap, lap_time_s, pit, number, corner (name on known tracks: スプーン, S字...; number 0 'ホームストレート' is the line to the first corner, so a lap's rows add up to the lap), from_pct, to_pct, time_s (start of it to start of the next), entry_kmh, min_kmh, exit_kmh, gear, brake_before_m (braking began this far before the slowest point), min_throttle_pct (100 = flat out)
+crossings (everyone, at the frame rate): session, t, car_number, driver, is_player, lap, number, corner (as in corners; on a track without names 20 stretches '0%', '5%'...), in_pits: the moment the car began that corner
 Summaries (start here; pit laps, caution laps and the first lap left out):
 lap_stats: session, car_number, driver, is_player, laps, best_s, median_s, spread_s (stddev: how steady), early_s (laps 2-4), late_s (last 3), fade_s (late - early: + is slower at the end)
 corner_stats: session, number, corner, laps, best_s, median_s, lost_s (time lost there over the session against its best), min_kmh_low, min_kmh_high, brake_spread_m, flat_out
+car_corners (everyone, one row per corner per lap, from crossings): session, car_number, driver, is_player, lap, number, corner, time_s, pit
+corner_field (per corner: you against the whole field, best laps of each): session, number, corner, cars, you_s, field_best_s, fastest_car, fastest_driver, you_lose_s, you_place (1 = the fastest there)
+brakes (yours, each stop from the 60 per second telemetry, about a metre apart): session, lap, number, corner, brake_on_m, brake_off_m, brake_s, entry_kmh, peak_brake_pct, min_kmh, apex_m, throttle_on_m (50% throttle again), corner_s (that corner's time on that lap)
 events also has lap (the driver's lap it happened on)
 Examples (the current session: session = (SELECT max(id) FROM sessions); leave out pit laps and the first lap for pace):
   -- where the session lost most, and the lap of the best corners together:
@@ -485,6 +657,12 @@ Examples (the current session: session = (SELECT max(id) FROM sessions); leave o
   SELECT lap, count(*) n, string_agg(text, '; ') FROM events WHERE type = 'incident' AND session = (SELECT max(id) FROM sessions) GROUP BY lap ORDER BY lap
   -- this session against an earlier one, corner by corner:
   WITH a AS (SELECT corner, min(time_s) b FROM corners WHERE session = (SELECT max(id) FROM sessions) GROUP BY corner), o AS (SELECT corner, min(time_s) b FROM corners WHERE session = '<id from sessions>' GROUP BY corner) SELECT corner, round(a.b - o.b, 3) slower FROM a JOIN o USING (corner) ORDER BY slower DESC
+  -- where the field is faster than you, and who to learn from:
+  SELECT corner, round(you_lose_s, 2) lose, fastest_car, fastest_driver, you_place FROM corner_field WHERE session = (SELECT max(id) FROM sessions) ORDER BY lose DESC LIMIT 3
+  -- you against the car behind, corner by corner (its best of each corner):
+  SELECT corner, round(min(time_s) FILTER (is_player) - min(time_s) FILTER (car_number = '7'), 2) slower FROM car_corners WHERE session = (SELECT max(id) FROM sessions) AND NOT pit GROUP BY number, corner ORDER BY number
+  -- the brake point of one corner lap by lap, and what it gave:
+  SELECT lap, round(brake_on_m) brake_m, round(entry_kmh) entry, round(min_kmh) apex, round(corner_s, 2) t FROM brakes WHERE corner = 'シケイン' AND session = (SELECT max(id) FROM sessions) ORDER BY lap
   -- the speed through a stretch of one lap:
   SELECT round(lap_m, -1) m, avg(speed_kmh), avg(brake_pct) FROM telemetry WHERE session = (SELECT max(id) FROM sessions) AND lap = 5 AND lap_m BETWEEN 3700 AND 4100 GROUP BY m ORDER BY m";
 
@@ -511,6 +689,7 @@ pub fn query(sessions: &Path, sql: &str) -> Result<QueryReport> {
         bail!("one statement at a time");
     }
     let dir = sessions.to_path_buf();
+    let everywhere = every_session(&sql);
     let (tx, rx) = mpsc::channel();
     // A query that runs away is left behind: the process ends anyway.
     std::thread::spawn(move || {
@@ -518,8 +697,35 @@ pub fn query(sessions: &Path, sql: &str) -> Result<QueryReport> {
         let _ =
             tx.send(ran.unwrap_or_else(|_| Err(anyhow::anyhow!("the query failed inside DuckDB"))));
     });
-    rx.recv_timeout(TIMEOUT)
-        .unwrap_or_else(|_| bail!("the query took longer than {TIMEOUT:?}; narrow it"))
+    let mut r = rx
+        .recv_timeout(TIMEOUT)
+        .unwrap_or_else(|_| bail!("the query took longer than {TIMEOUT:?}; narrow it"))?;
+    r.note = everywhere.then(|| {
+        "no session in the query: every session kept is in it; for this one add session = (SELECT max(id) FROM sessions)".to_string()
+    });
+    Ok(r)
+}
+
+/// A question over tables of many sessions that does not say which.
+fn every_session(sql: &str) -> bool {
+    const TABLES: [&str; 11] = [
+        "telemetry",
+        "cars",
+        "corners",
+        "crossings",
+        "laps",
+        "events",
+        "lap_stats",
+        "corner_stats",
+        "car_corners",
+        "corner_field",
+        "brakes",
+    ];
+    let sql = sql.to_lowercase();
+    let words: Vec<&str> = sql
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .collect();
+    !words.iter().any(|w| *w == "session" || *w == "id") && words.iter().any(|w| TABLES.contains(w))
 }
 
 /// Statements in the text: a `;` within quotes ends none.
@@ -572,6 +778,7 @@ fn run(dir: &Path, sql: &str) -> Result<QueryReport> {
         columns,
         rows: out,
         truncated,
+        note: None,
     })
 }
 
@@ -609,6 +816,7 @@ fn views(dir: &Path) -> String {
         ("telemetry", "telemetry", TELEMETRY),
         ("cars", "cars", CARS),
         ("corners", "corners", CORNERS),
+        ("crossings", "crossings", CROSSINGS),
     ] {
         if files(sub) {
             out.push_str(&format!(
@@ -674,6 +882,40 @@ CREATE VIEW corner_stats AS
     sum(time_s) - count(*) * min(time_s) AS lost_s, min(min_kmh) AS min_kmh_low, max(min_kmh) AS min_kmh_high,
     stddev(brake_before_m) AS brake_spread_m, bool_and(min_throttle_pct = 100) AS flat_out
   FROM corners WHERE NOT pit GROUP BY ALL;
+CREATE VIEW car_corners AS
+  WITH x AS (SELECT *, lead(t) OVER w AS next_t, lead(number) OVER w AS next_no, lead(in_pits) OVER w AS next_pits,
+      max(number) OVER (PARTITION BY session) AS last_no
+    FROM crossings WINDOW w AS (PARTITION BY session, idx ORDER BY t))
+  SELECT session, car_number, driver, is_player, lap, number, corner, next_t - t AS time_s, in_pits OR next_pits AS pit
+  FROM x WHERE next_no = CASE WHEN number = last_no THEN 0 ELSE number + 1 END AND next_t - t < 120;
+CREATE VIEW corner_field AS
+  WITH b AS (SELECT session, number, corner, car_number, driver, is_player, min(time_s) AS best_s,
+      rank() OVER (PARTITION BY session, number ORDER BY min(time_s)) AS place
+    FROM car_corners WHERE NOT pit GROUP BY session, number, corner, car_number, driver, is_player)
+  SELECT session, number, corner, count(*) AS cars, min(best_s) FILTER (is_player) AS you_s, min(best_s) AS field_best_s,
+    arg_min(car_number, best_s) AS fastest_car, arg_min(driver, best_s) AS fastest_driver,
+    min(best_s) FILTER (is_player) - min(best_s) AS you_lose_s, min(place) FILTER (is_player) AS you_place
+  FROM b GROUP BY session, number, corner;
+CREATE VIEW brakes AS
+  WITH f AS (SELECT session, t, lap, lap_pct, lap_m, speed_kmh, brake_pct, throttle_pct,
+      brake_pct > 5 AND coalesce(lag(brake_pct) OVER w, 0) <= 5 AS starts
+    FROM telemetry WHERE NOT in_pits WINDOW w AS (PARTITION BY session ORDER BY t)),
+  g AS (SELECT *, sum(CAST(starts AS INTEGER)) OVER (PARTITION BY session ORDER BY t) AS stop FROM f),
+  s AS (SELECT session, stop, min(t) AS on_t, max(t) FILTER (brake_pct > 5) AS off_t, max(brake_pct) AS peak_brake_pct
+    FROM g WHERE stop > 0 GROUP BY session, stop),
+  w AS (SELECT s.*, (SELECT min(g.t) FROM g WHERE g.session = s.session AND g.stop = s.stop AND g.t > s.off_t
+      AND g.throttle_pct >= 50) AS throttle_t FROM s),
+  r AS (SELECT w.session, w.stop, w.peak_brake_pct, w.off_t - w.on_t AS brake_s,
+      arg_min(g.lap, g.t) AS lap, arg_min(g.lap_m, g.t) AS brake_on_m, arg_min(g.speed_kmh, g.t) AS entry_kmh,
+      arg_min(g.lap_m, abs(g.t - w.off_t)) AS brake_off_m, min(g.speed_kmh) AS min_kmh,
+      arg_min(g.lap_m, g.speed_kmh) AS apex_m, arg_min(g.lap_pct, g.speed_kmh) AS apex_pct,
+      arg_min(g.lap_m, abs(g.t - w.throttle_t)) FILTER (w.throttle_t IS NOT NULL) AS throttle_on_m
+    FROM w JOIN g ON g.session = w.session AND g.stop = w.stop AND g.t <= coalesce(w.throttle_t, w.off_t)
+    GROUP BY w.session, w.stop, w.peak_brake_pct, w.on_t, w.off_t, w.throttle_t)
+  SELECT r.session, r.lap, c.number, c.corner, r.brake_on_m, r.brake_off_m, r.brake_s, r.entry_kmh, r.peak_brake_pct,
+    r.min_kmh, r.apex_m, r.throttle_on_m, c.time_s AS corner_s
+  FROM r LEFT JOIN corners c ON c.session = r.session AND c.lap = r.lap AND r.apex_pct >= c.from_pct AND r.apex_pct < c.to_pct
+  WHERE r.brake_s >= 0.15;
 ";
 
 fn has_files(dir: &Path, sub: &str) -> bool {
@@ -687,4 +929,62 @@ fn has_files(dir: &Path, sub: &str) -> bool {
                 r.any(|f| f.is_ok_and(|f| f.path().extension().is_some_and(|x| x == "parquet")))
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marks_passed_between_two_frames() {
+        let m = [0.0, 0.25, 0.5];
+        let p = passed(&m, 0.24, 0.26);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].0, 1);
+        assert!((p[0].1 - 0.5).abs() < 1e-9);
+        // Exactly on a mark counts once: on arriving, not on leaving.
+        assert_eq!(passed(&m, 0.23, 0.25), vec![(1, 1.0)]);
+        assert_eq!(passed(&m, 0.25, 0.26), vec![]);
+        // Over the line.
+        let over = passed(&m, 0.99, 0.01);
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].0, 0);
+        assert!((over[0].1 - 0.5).abs() < 1e-9);
+        // Backwards, standing still or jumping: nothing passed.
+        assert_eq!(passed(&m, 0.26, 0.24), vec![]);
+        assert_eq!(passed(&m, 0.30, 0.30), vec![]);
+        assert_eq!(passed(&m, 0.20, 0.20 + JUMP + 0.01), vec![]);
+        assert_eq!(passed(&m, 0.24, 0.24 + JUMP).len(), 1);
+    }
+
+    #[test]
+    fn a_question_over_every_session_is_noted() {
+        assert!(every_session(
+            "SELECT corner, lost_s FROM corner_stats ORDER BY lost_s DESC"
+        ));
+        assert!(!every_session(
+            "SELECT * FROM corner_stats WHERE session = 'x'"
+        ));
+        assert!(!every_session("SELECT id, track FROM sessions"));
+        assert!(!every_session("SELECT 1"));
+        // Over every session on purpose, by naming it.
+        assert!(!every_session(
+            "SELECT session, min(best_s) FROM lap_stats GROUP BY session"
+        ));
+    }
+
+    #[test]
+    fn marks_are_the_corners_or_twenty_stretches() {
+        let s = Marks::of("Suzuka International Racing Course - Grand Prix", 5756.0);
+        assert_eq!((s.at.len(), s.at[0], s.at[1]), (14, 0.0, 0.120));
+        assert_eq!(
+            (s.names[0].as_str(), s.names[10].as_str()),
+            (START_STRAIGHT, "スプーン")
+        );
+        let u = Marks::of("Nowhere", 4000.0);
+        assert_eq!(
+            (u.at.len(), u.at[1], u.names[19].as_str()),
+            (20, 0.05, "95%")
+        );
+    }
 }

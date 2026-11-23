@@ -291,3 +291,65 @@ fn the_summaries_are_worked_out_right() {
     );
     assert_eq!(r.rows[0][0], true);
 }
+
+/// Every car's corners, timed from the frames, add up to its laps, and the
+/// field's best of each corner is found with who drove it.
+#[test]
+fn every_car_is_timed_through_every_corner() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = driven(dir.path());
+    // The synthetic track has no names: twenty stretches a lap.
+    let r = ask(
+        &store,
+        "SELECT count(DISTINCT car_number), count(DISTINCT number), min(corner), bool_and(time_s > 0) FROM car_corners",
+    );
+    assert_eq!((number(&r, 0, 0), number(&r, 0, 1)), (12.0, 20.0), "{r:?}");
+    assert_eq!(
+        (r.rows[0][2].as_str(), &r.rows[0][3]),
+        (Some("0%"), &true.into())
+    );
+    // A whole lap of stretches is the lap the game timed, within a frame
+    // (the synthetic game steps a tenth of a second and times laps by steps).
+    let r = ask(
+        &store,
+        "WITH c AS (SELECT car_number, lap, sum(time_s) s, count(*) n FROM car_corners GROUP BY ALL HAVING n = 20)
+         SELECT count(*), max(abs(c.s - l.time_s)) FROM c JOIN laps l ON l.car_number = c.car_number AND l.lap = c.lap AND NOT l.pit",
+    );
+    assert!(number(&r, 0, 0) >= 12.0, "{r:?}");
+    assert!(number(&r, 0, 1) < 0.1, "{r:?}");
+    // The field against you: the fastest there, and your place among them.
+    let r = ask(
+        &store,
+        "SELECT count(*), bool_and(cars = 12), bool_and(field_best_s <= you_s), bool_and(you_lose_s >= 0),
+           bool_and(you_place BETWEEN 1 AND 12), bool_and((you_place = 1) = (you_lose_s = 0)), bool_and(fastest_driver IS NOT NULL) FROM corner_field",
+    );
+    assert_eq!(number(&r, 0, 0), 20.0, "{r:?}");
+    assert!(r.rows[0][1..].iter().all(|v| v == true), "{r:?}");
+    let r = ask(
+        &store,
+        "SELECT f.field_best_s = (SELECT min(time_s) FROM car_corners c WHERE c.number = f.number AND NOT c.pit AND c.car_number = f.fastest_car) FROM corner_field f",
+    );
+    assert!(r.rows.iter().all(|v| v[0] == true), "{r:?}");
+}
+
+/// Each stop of the driver's, from the frames: where the brake went on and
+/// off, the slowest point between, and the throttle again after it.
+#[test]
+fn each_stop_is_found_in_the_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = driven(dir.path());
+    let r = ask(
+        &store,
+        "SELECT count(*), bool_and(brake_on_m <= brake_off_m), bool_and(brake_on_m <= apex_m),
+           bool_and(throttle_on_m IS NULL OR throttle_on_m >= brake_off_m), bool_and(min_kmh <= entry_kmh),
+           bool_and(peak_brake_pct > 5), bool_and(brake_s >= 0.15), count(corner) FROM brakes",
+    );
+    assert!(number(&r, 0, 0) >= 3.0, "{r:?}");
+    assert!(r.rows[0][1..7].iter().all(|v| v == true), "{r:?}");
+    // The slowest point of a stop is the slowest frame between brake and throttle.
+    let r = ask(
+        &store,
+        "SELECT b.min_kmh = (SELECT min(speed_kmh) FROM telemetry t WHERE t.session = b.session AND t.lap_m = b.apex_m) FROM brakes b",
+    );
+    assert!(r.rows.iter().all(|v| v[0] == true), "{r:?}");
+}

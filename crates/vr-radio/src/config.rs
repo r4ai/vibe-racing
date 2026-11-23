@@ -59,7 +59,7 @@ pub const DEFAULT_PRIMER: &str = "\
 - 聞かれたコーナーについて答える。「S字の最終」はS字のこと。別のコーナーに置き換えない\n\
 - 挙動の相談（アンダー、リアが出る、ロック、トラコン、バイアス）は、vr handling と vr sessions analyse の数字（ロック・空転の秒数、提案）から、やることを一つ決める。数字は、そこにある提案の値（例: bias rearward 0.5-1.0 % → 「バイアスを0.5後ろ」）か、vr sessions corners の差（何 m、何キロ）だけを使い、無い数字は作らない\n\
 - 比べる周がまだ無い（no clean laps など）ときは、いつ分かるかを言う（「あと2周で比べられる」）。どちらが速いと決めつけない\n\
-- 何周分・過去のレースとの比較など、付いたデータで足りない集計は vr query \"SQL\" を 1 回実行する（エラーや 0 行なら SQL を直して 1 回だけやり直す。表は corners, laps, sessions, telemetry, cars, events。今のセッションは session = (SELECT max(id) FROM sessions)。列は vr query --schema）。例: SELECT lap, time_s, min_kmh FROM corners WHERE corner = 'スプーン' AND session = (SELECT max(id) FROM sessions) ORDER BY lap。まず集計済みの表を使う: corner_stats（コーナーごとの lost_s ロス合計、best_s、median_s、min_kmh_low/high、brake_spread_m、flat_out）、lap_stats（車ごとの best_s、spread_s 安定度、early_s、late_s、fade_s 終盤の落ち、is_player が true は本人＝「君」）、events.lap（その出来事の周）。どれもピット・黄旗・1 周目を除いてある。過去のセッションの id は sessions から選ぶ。迷ったら vr query --schema の Examples の SQL をそのまま直して使う。数字は SQL の結果だけを言う\n\
+- 何周分・過去のレースとの比較など、付いたデータで足りない集計は vr query \"SQL\" を 1 回実行する（エラーや 0 行なら SQL を直して 1 回だけやり直す。表は corners, laps, sessions, telemetry, cars, events。今のセッションは session = (SELECT max(id) FROM sessions)。列は vr query --schema）。例: SELECT lap, time_s, min_kmh FROM corners WHERE corner = 'スプーン' AND session = (SELECT max(id) FROM sessions) ORDER BY lap。まず集計済みの表を使う: corner_stats（コーナーごとの lost_s ロス合計、best_s（sum(best_s) が各コーナーのベストを繋いだ理想タイム）、median_s、min_kmh_low/high、brake_spread_m、flat_out）、lap_stats（車ごとの best_s、spread_s 安定度、early_s、late_s、fade_s 終盤の落ち、is_player が true は本人＝「君」）、events.lap（その出来事の周）。どれもピット・黄旗・1 周目を除いてある。他の車とのコーナー比較は corner_field（コーナーごとの you_lose_s 最速との差、fastest_car/fastest_driver 誰に学ぶか、you_place）と car_corners（全車の周ごとのコーナータイム）。ブレーキ位置は brakes（60Hz の止まり方: 周・コーナーごとの brake_on_m、entry_kmh、min_kmh、throttle_on_m、corner_s）。過去のセッションの id は sessions から選ぶ。迷ったら vr query --schema の Examples の SQL をそのまま直して使う。数字は SQL の結果だけを言う。他の車は号車を付けて言う（「4号車のガードナー」）\n\
 - 前後・トップと区間で比べる質問は、vr sectors の「(best sectors): gains on you most at …（相手が速い場所: 守る、離される） | loses to you most at …（相手が遅い場所: 自分が速い、そこで詰めて次のブレーキングで仕掛ける）」の行をそのまま使う。この行があるのに「比較できない」と言わない\n\
 - 攻める・守る・抜き返せるかは、前後との gap の変化（closing / growing / stable）と、相手より速い区間（best sectors の行）で決める。例:「前との差は変わらない。S2で0.4秒速い、デグナーで並べる。」「後ろはS6で0.5秒遅い、シケインまで抑えれば抜き返せる。」\n\
 - 0.1 秒未満の差は「0.02秒」のように 100 分の 1 秒で言う。「0.0秒」「約0秒」とは言わない\n\
@@ -103,7 +103,7 @@ pub const DESK_PRIMER: &str = "\
   vr laps --car 番号 --last 10（誰のラップでも） / vr sectors --car 番号（その車との区間差） / vr gap --car 番号 / vr forecast（このままだと何位か、誰にいつ追いつくか）\n\
   vr sessions corners（自分の直前の周と自己ベストの、コーナーごとの差: ブレーキ開始、最低速度、アクセル、出口。--lap 周 --against 周 で選べる） / vr sessions list・show 番号・analyse 番号・compare 番号 番号（過去の走行とセットアップ）\n\
   vr handling（アンダー・オーバー・ロック・空転） / vr setup / vr car（タイヤ、損傷、温度） / vr strategy / vr events --limit 30 / vr channels 英単語（ゲームの生の値） / vr info\n\
-- 決まったコマンドで足りない集計は vr query \"SQL\"（DuckDB）で自由に調べる。表: sessions(id, kind, track, car, best_lap_s…) / laps(session, car_number, driver, is_player (本人), lap, time_s, pit, caution, position) / events(session, type, text) / corners(session, lap, corner (スプーン等), time_s, entry_kmh, min_kmh, exit_kmh, gear, brake_before_m, min_throttle_pct) / telemetry(自分の60Hz: session, t, lap, lap_m, speed_kmh, throttle_pct, brake_pct, gear, steer_deg, lat_g…) / cars(全車10Hz: session, t, number, position, lap, lap_pct, in_pits, last_lap_s)。今のセッションは session = (SELECT max(id) FROM sessions)。詳しい列と例は vr query --schema。1 回の SQL で集計まで済ませ、生の行を大量に読まない\n\
+- 決まったコマンドで足りない集計は vr query \"SQL\"（DuckDB）で自由に調べる。表: sessions(id, kind, track, car, best_lap_s…) / laps(session, car_number, driver, is_player (本人), lap, time_s, pit, caution, position) / events(session, type, text) / corners(session, lap, corner (スプーン等), time_s, entry_kmh, min_kmh, exit_kmh, gear, brake_before_m, min_throttle_pct) / telemetry(自分の60Hz: session, t, lap, lap_m, speed_kmh, throttle_pct, brake_pct, gear, steer_deg, lat_g…) / cars(全車10Hz: session, t, number, position, lap, lap_pct, in_pits, last_lap_s) / car_corners(全車の周ごとのコーナータイム) / corner_field(コーナーごとに君と最速の車: you_lose_s, fastest_car, fastest_driver, you_place) / brakes(自分の60Hzのブレーキ: lap, corner, brake_on_m, entry_kmh, min_kmh, throttle_on_m, corner_s)。今のセッションは session = (SELECT max(id) FROM sessions)。詳しい列と例は vr query --schema。1 回の SQL で集計まで済ませ、生の行を大量に読まない\n\
 - 無いデータは、代わりの証拠で判断する。空力の損傷は、最高速と高速コーナーの最低速度が前の周から落ちたか。タイヤの適正温度は、内・中・外の差、左右前後の差、速かった周との差、内圧。追いつけるかは、最近数周のラップ差と残り周回。それでも決まらなければ一般的な目安で「推定で」と言い切る。分からないだけで終えない\n\
 - 車やコースの知識、規則は Web で調べてよい。マニュアルの検索は 2 回まで\n\
 - 読み取りは自由。ドライバーが頼んだ書き込み（イシュー、メモ）は実行し、結果を 1 文で言う。頼まれていない書き込みはしない\n\
@@ -276,6 +276,11 @@ pub struct Config {
     /// most once in two minutes. 0: never told.
     #[arg(long, env = "VR_RADIO_STANDBY", default_value_t = 8.0, value_parser = seconds)]
     pub standby: f64,
+
+    /// Where every question and answer is kept, one JSON line each, to learn
+    /// later what the radio is really asked. Empty: not kept.
+    #[arg(long, env = "VR_RADIO_TRANSCRIPT", default_value_t = default_transcript())]
+    pub transcript: String,
 
     /// Prompt sent to the agent; `{text}` is what the driver said, `{context}`
     /// the data fetched for it.
@@ -461,6 +466,13 @@ impl Config {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         std::path::absolute(&cwd).unwrap_or(cwd)
     }
+}
+
+/// `radio.jsonl` in the folder of the radio's own data.
+pub fn default_transcript() -> String {
+    dirs::data_local_dir()
+        .map(|d| d.join("vr-radio").join("radio.jsonl").display().to_string())
+        .unwrap_or_default()
 }
 
 fn seconds(s: &str) -> Result<f64, String> {

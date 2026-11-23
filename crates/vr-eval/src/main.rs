@@ -120,6 +120,23 @@ enum Cmd {
         #[arg(long)]
         problems: bool,
     },
+    /// Questions about the kept sessions with answers from SQL: prints the
+    /// right answers, checks answers for their numbers and names, and lists
+    /// what the radio was asked that the set does not have yet.
+    Gold {
+        #[arg(long, default_value = "crates/vr-eval/scenarios/gold.yaml")]
+        set: PathBuf,
+        /// JSON lines with `q` and `a` (a run), or `asked` and `said` (the
+        /// radio's transcript), to check.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+        /// The radio's transcript: its questions the set does not have.
+        #[arg(long)]
+        harvest: Option<PathBuf>,
+        /// Where the sessions are kept; `vr`'s folder by default.
+        #[arg(long)]
+        sessions: Option<PathBuf>,
+    },
     /// One stint in its own process (used by `run`).
     #[command(hide = true)]
     Stint {
@@ -228,6 +245,17 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Gold {
+            set,
+            answers,
+            harvest,
+            sessions,
+        } => gold(
+            set,
+            answers.as_deref(),
+            harvest.as_deref(),
+            sessions.clone(),
+        ),
         Cmd::Topics {
             set,
             model,
@@ -657,6 +685,76 @@ fn print_report(dir: &Path, names: &[String], problems: bool) -> Result<()> {
         for rows in runs.values() {
             println!("{}", report::problems(rows));
         }
+    }
+    Ok(())
+}
+
+fn gold(
+    set: &std::path::Path,
+    answers: Option<&std::path::Path>,
+    harvest: Option<&std::path::Path>,
+    sessions: Option<PathBuf>,
+) -> Result<()> {
+    use vr_eval::gold;
+    let qs = gold::load(set)?;
+    if let Some(t) = harvest {
+        let said = gold::answers(t)?;
+        for a in gold::unasked(&qs, &said) {
+            println!(
+                "- ask: {}\n  # said: {}\n  sql: \"\"",
+                a.q,
+                a.a.replace('\n', " ")
+            );
+        }
+        return Ok(());
+    }
+    let dir = sessions.unwrap_or_else(vr_server::sessions_dir);
+    let places = gold::places(&dir)?;
+    for (k, id) in &places {
+        println!("{k} = {id}");
+    }
+    let said = answers.map(gold::answers).transpose()?;
+    let (mut right, mut asked) = (0, 0);
+    for q in &qs {
+        let facts = match gold::gold(&dir, q, &places) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("[error] {}: {e:#}", q.ask);
+                continue;
+            }
+        };
+        if facts.is_empty() {
+            println!("[no data] {}", q.ask);
+            continue;
+        }
+        let shown: Vec<String> = facts.iter().map(ToString::to_string).collect();
+        let Some(said) = &said else {
+            println!("{} => {}", q.ask, shown.join(", "));
+            continue;
+        };
+        for a in said.iter().filter(|a| a.q == q.ask) {
+            asked += 1;
+            let miss = gold::missing(&a.a, &facts, q.tol);
+            if miss.is_empty() {
+                right += 1;
+            }
+            let miss: Vec<String> = miss.iter().map(ToString::to_string).collect();
+            println!(
+                "[{}] {} => {} | right: {}{}",
+                if miss.is_empty() { "ok" } else { "miss" },
+                q.ask,
+                a.a,
+                shown.join(", "),
+                if miss.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | missing: {}", miss.join(", "))
+                }
+            );
+        }
+    }
+    if said.is_some() {
+        println!("{right}/{asked} answers say every fact");
     }
     Ok(())
 }

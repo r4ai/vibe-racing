@@ -133,6 +133,17 @@ target/release/vr-eval topics --problems
 
 `--model` で判定モデルを変え、`--no-words` で語を使わずに全問を聞く。
 
+保存した実セッションへの質問は、正解を SQL で毎回求め、答えの数字と名前を採点者なしで確かめる（[`gold`](../src/gold.rs)、問題は [`scenarios/gold.yaml`](../scenarios/gold.yaml)）。
+
+```bash
+target/release/vr-eval gold                                   # 正解を表示
+target/release/vr-eval gold --answers run.jsonl               # 答え（q と a の JSON 行）を確かめる
+target/release/vr-eval gold --harvest %LOCALAPPDATA%r-radio
+adio.jsonl  # 無線で聞かれたがまだ問題にない質問
+```
+
+`vr-radio` は質問と返答を 1 行ずつ `radio.jsonl` に残す（`--transcript`、空で残さない）。実際に聞かれた質問を `--harvest` で拾い、SQL を書いて問題に足していく。
+
 ## 限界
 
 - 声は合成音声で、ドライバー本人の声・実際のマイクではない

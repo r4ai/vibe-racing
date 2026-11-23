@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -226,6 +227,8 @@ pub struct Deps {
     pub live: Option<Feed>,
     /// Silence after which the driver is told to wait; `None`: never told.
     pub standby: Option<Duration>,
+    /// Where each exchange is kept, one JSON line each.
+    pub transcript: Option<PathBuf>,
 }
 
 /// The data, without the outputs the session was sent before and has still:
@@ -420,6 +423,28 @@ struct Exchange {
     engineer: String,
     /// The agent knows of it.
     known: bool,
+}
+
+/// One exchange at the end of the transcript: what the driver asked (empty
+/// for a call of the radio's own) and what was said.
+fn keep(path: &Path, asked: &str, said: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let line = serde_json::json!({
+        "ts_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64),
+        "asked": asked,
+        "said": said,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{line}")?;
+    Ok(())
 }
 
 impl Exchange {
@@ -660,6 +685,7 @@ struct Engine {
     now: Values,
     heard: Option<Instant>,
     log: VecDeque<Exchange>,
+    transcript: Option<PathBuf>,
     /// What each command printed when it was last sent to this session.
     sent: BTreeMap<String, String>,
     /// What was said last, and whether it was a question.
@@ -1214,6 +1240,11 @@ impl Engine {
             return;
         }
         self.last_said = engineer.clone();
+        if let Some(path) = &self.transcript
+            && let Err(e) = keep(path, &driver, &engineer)
+        {
+            tracing::warn!("transcript {}: {e:#}", path.display());
+        }
         self.log.push_back(Exchange {
             driver,
             engineer,
@@ -2285,6 +2316,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         rules,
         mut live,
         standby,
+        transcript,
     } = deps;
     let gate = Arc::new(Gate::default());
     let generation = Arc::new(AtomicU64::new(0));
@@ -2371,6 +2403,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         study: None,
         studies: VecDeque::new(),
         stood_by: None,
+        transcript,
     };
     engine.warm(engine.speaker.load(Ordering::Relaxed));
     engine.set_volume(volume);
@@ -2400,6 +2433,26 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::*;
+
+    #[test]
+    fn each_exchange_is_kept_on_a_line_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio").join("radio.jsonl");
+        keep(&path, "前との差は？", "1.2秒。").unwrap();
+        keep(&path, "", "残り5周。").unwrap();
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            (lines[0]["asked"].as_str(), lines[0]["said"].as_str()),
+            (Some("前との差は？"), Some("1.2秒。"))
+        );
+        assert_eq!(lines[1]["asked"], "");
+        assert!(lines[1]["ts_ms"].as_u64().unwrap() >= lines[0]["ts_ms"].as_u64().unwrap());
+    }
     use crate::agent::{SessionConfig, fake};
     use crate::audio::Recording;
     use crate::policy::Permissions;
@@ -2588,6 +2641,7 @@ mod tests {
                 agent_command: "other".into(),
                 agent_options: AgentOptions::default(),
                 standby,
+                transcript: None,
                 connect: Box::new(move |command, _| {
                     connected.lock().unwrap().push(command.to_string());
                     match command {

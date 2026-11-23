@@ -1319,6 +1319,7 @@ pub fn deps(
             .unwrap_or_default(),
         live: None,
         standby: (cfg.standby > 0.0).then(|| Duration::from_secs_f64(cfg.standby)),
+        transcript: Some(PathBuf::from(&cfg.transcript)).filter(|p| !p.as_os_str().is_empty()),
     }
 }
 
