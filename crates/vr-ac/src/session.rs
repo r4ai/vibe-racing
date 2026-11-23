@@ -239,6 +239,11 @@ mod tests {
         assert_eq!(t.sectors(3, 0, 0.9), vec![0.0, 0.33, 0.71]);
         // A boundary out of order is not used.
         assert_eq!(t.sectors(3, 1, 0.8), Vec::<f64>::new());
+        // Two boundaries at one place are not sectors either.
+        let mut t = Tracker::default();
+        for (i, at) in [(0, 0.1), (1, 0.4), (2, 0.4)] {
+            assert_eq!(t.sectors(3, i, at), Vec::<f64>::new(), "{i}");
+        }
         // A new track starts over.
         t.advance(&at(0, 0, 0.0));
         t.advance(&Sample {

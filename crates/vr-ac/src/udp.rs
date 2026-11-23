@@ -212,7 +212,8 @@ fn build_udp_frame(
     );
     let clock = tracker.advance(&Sample {
         now_ms,
-        kind: -1,
+        // Not told over UDP: the same for every sample.
+        kind: 0,
         event,
         completed_laps: lap_count.unwrap_or(0),
         distance_m: 0.0,
@@ -435,11 +436,11 @@ impl TelemetrySource for UdpSource {
             if self.update.answered && self.heard.elapsed() > SILENT {
                 return Ok(Poll::Disconnected);
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
                 return Ok(Poll::Idle);
             }
-            std::thread::sleep(Duration::from_millis(2).min(deadline - now));
+            std::thread::sleep(Duration::from_millis(2).min(left));
         }
     }
 }
@@ -635,6 +636,12 @@ mod tests {
         let (_, again) = game.recv_from(&mut buf).unwrap();
         assert_eq!(op(&buf), HANDSHAKE);
         assert!(again == a || again == b);
+        // Anything but the answer does not count as one.
+        game.send_to(&rt_lap(3, 1, 1), src.update.sock.local_addr().unwrap())
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = src.poll(Duration::ZERO);
+        assert!(!src.update.answered);
         // Answered, then silent.
         game.send_to(&response(), src.update.sock.local_addr().unwrap())
             .unwrap();
@@ -683,5 +690,25 @@ mod tests {
         );
         assert_eq!(f.player_car().unwrap().driver, "Player");
         assert_eq!(f.session.session_num, 1, "another car: another session");
+        // In the pits; a wheel whose size is not told.
+        let mut w = Writer::new(&RT_CAR_INFO);
+        w.bytes = car_info(0);
+        w.i32("isInPit", 1)
+            .f32s("camberRAD", &[-0.05, 0.0, 0.0, 0.0])
+            .f32s("tyreRadius", &[0.0, 0.3, 0.3, 0.3]);
+        let f = build_udp_frame(
+            &View::new(&RT_CAR_INFO, &w.bytes),
+            None,
+            &laps,
+            &mut t,
+            4,
+            30,
+            (None, None),
+        );
+        assert!(f.player_car().unwrap().on_pit_road);
+        let wheels = f.player.unwrap().car.wheels.unwrap();
+        assert_eq!(wheels.lf.speed_mps, None, "no radius");
+        assert!((wheels.rf.speed_mps.unwrap() - 30.0).abs() < 1e-4);
+        assert!((wheels.lf.camber_rad.unwrap() + 0.05).abs() < 1e-6);
     }
 }

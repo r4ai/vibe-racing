@@ -7,7 +7,7 @@ use vr_core::{Capabilities, Extras, Poll, SourceError, TelemetrySource};
 use crate::convert::{
     GAME, STATUS_LIVE, STATUS_OFF, STATUS_PAUSE, STATUS_REPLAY, Snapshot, build_frame,
 };
-use crate::layout::{CREWCHIEF, GRAPHICS, PHYSICS, VEHICLE, View};
+use crate::layout::{CREWCHIEF, GRAPHICS, PHYSICS, View};
 use crate::pages::{Page, Pages};
 use crate::session::Tracker;
 
@@ -98,17 +98,6 @@ impl<P: Pages> AcSource<P> {
         self.pages.read(page, 0, page.size())
     }
 
-    /// CrewChief's page, only as far as it has cars.
-    fn crewchief(&mut self) -> Option<Vec<u8>> {
-        let head = self.pages.read(Page::CrewChief, 0, CREWCHIEF.size)?;
-        let n = View::new(&CREWCHIEF, &head)
-            .i32("numVehicles")
-            .unwrap_or(0)
-            .clamp(0, 128) as usize;
-        self.pages
-            .read(Page::CrewChief, 0, CREWCHIEF.size + n * VEHICLE.size)
-    }
-
     fn packet(&mut self, page: Page) -> Option<i32> {
         let b = self.pages.read(page, 0, 4)?;
         Some(i32::from_le_bytes(b.try_into().ok()?))
@@ -170,7 +159,7 @@ impl<P: Pages> TelemetrySource for AcSource<P> {
                         // The game writes as we copy; keep only an unchanged step.
                         if self.packet(Page::Physics) == id {
                             self.last_packets = packets;
-                            let crewchief = self.crewchief();
+                            let crewchief = self.page(Page::CrewChief);
                             self.crewchief = crewchief.is_some();
                             let snap = Snapshot {
                                 physics,
@@ -183,16 +172,16 @@ impl<P: Pages> TelemetrySource for AcSource<P> {
                             self.last = Some(snap);
                             return Ok(Poll::Frame(Box::new(frame)));
                         }
-                        continue;
+                        // Copied while written: read again, within the timeout.
                     }
                 }
                 Some(_) => {}
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
                 return Ok(Poll::Idle);
             }
-            std::thread::sleep(POLL_EVERY.min(deadline - now));
+            std::thread::sleep(POLL_EVERY.min(left));
         }
     }
 }
@@ -224,11 +213,17 @@ mod tests {
         ));
 
         put(&m, &p, &g, &s);
-        let before = now_ms();
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
         let Poll::Frame(f) = src.poll(Duration::ZERO).unwrap() else {
             panic!("no frame")
         };
-        assert!((before..before + 5_000).contains(&f.timestamp_ms));
+        assert!(
+            (before..before + 5_000).contains(&f.timestamp_ms),
+            "wall clock"
+        );
         assert_eq!(f.tick, 1);
         assert_eq!(f.player_car().unwrap().laps_completed, Some(2));
 
@@ -315,9 +310,20 @@ mod tests {
         std::fs::write(&path, r#"{"track":"monza","sessions":[{"type":3}]}"#).unwrap();
         let info = src.extras().unwrap().info.unwrap();
         assert_eq!(info["results"]["track"], "monza");
-        std::fs::write(&path, "not json").unwrap();
-        let mut r = Results::new(path.clone(), SystemTime::now() + Duration::from_secs(3600));
+        let modified = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let written = modified();
+        let mut r = Results::new(path.clone(), written + Duration::from_millis(1));
         assert_eq!(r.get(), None, "older than the source");
+        let mut r = Results::new(path.clone(), written);
+        assert_eq!(r.get().unwrap()["track"], "monza", "written as it opened");
+        // Read again only when the file changes.
+        let f = std::fs::File::options().write(true).open(&path).unwrap();
+        std::fs::write(&path, r#"{"track":"spa"}"#).unwrap();
+        f.set_modified(written).unwrap();
+        assert_eq!(r.get().unwrap()["track"], "monza", "unchanged time: kept");
+        f.set_modified(written + Duration::from_secs(1)).unwrap();
+        assert_eq!(r.get().unwrap()["track"], "spa");
+        std::fs::write(&path, "not json").unwrap();
         let mut r = Results::new(path, SystemTime::UNIX_EPOCH);
         assert_eq!(r.get(), None, "not json");
 
@@ -341,17 +347,19 @@ mod tests {
         );
     }
 
-    /// Changes the physics page between the copy and the check.
+    /// Changes the physics page between the copy and the check, `torn`
+    /// times.
     struct Tearing {
         inner: MemoryPages,
         reads: usize,
+        torn: usize,
     }
 
     impl Pages for Tearing {
         fn read(&mut self, page: Page, offset: usize, len: usize) -> Option<Vec<u8>> {
             if page == Page::Physics && len == 4 {
                 self.reads += 1;
-                if self.reads == 1 {
+                if self.reads <= self.torn {
                     return Some(999i32.to_le_bytes().to_vec());
                 }
             }
@@ -364,11 +372,29 @@ mod tests {
         let (p, g, s) = snapshot();
         let m = MemoryPages::default();
         put(&m, &p, &g, &s);
-        let mut src = AcSource::new(Tearing { inner: m, reads: 0 });
-        let Poll::Frame(f) = src.poll(Duration::ZERO).unwrap() else {
+        let mut src = AcSource::new(Tearing {
+            inner: m.clone(),
+            reads: 0,
+            torn: 1,
+        });
+        let Poll::Frame(f) = src.poll(Duration::from_secs(1)).unwrap() else {
             panic!("no frame")
         };
         assert_eq!(f.tick, 1, "one frame, from the second copy");
         assert_eq!(src.pages.reads, 2);
+
+        // Never settling: the timeout still holds.
+        let mut src = AcSource::new(Tearing {
+            inner: m,
+            reads: 0,
+            torn: usize::MAX,
+        });
+        let t0 = Instant::now();
+        assert!(matches!(
+            src.poll(Duration::from_millis(30)).unwrap(),
+            Poll::Idle
+        ));
+        assert!(t0.elapsed() < Duration::from_secs(1));
+        assert!(src.pages.reads > 1, "tried again");
     }
 }
