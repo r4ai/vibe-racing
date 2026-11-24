@@ -105,7 +105,7 @@ jobs:
           cargo mutants --workspace --in-diff mutants.diff --no-shuffle -j 2
       - name: All mutants
         if: github.event_name != 'pull_request'
-        run: cargo mutants -p vr-engine -p vr-iracing -p vr-replay -p vr-radio --no-shuffle -j 2
+        run: cargo mutants -p vr-engine -p vr-iracing -p vr-ams2 -p vr-replay -p vr-radio --no-shuffle -j 2
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -260,6 +260,7 @@ impl RaceEvent {
                         | "caution"
                         | "red"
                         | "black"
+                        | "black_white"
                         | "repair"
                         | "disqualify"
                 )
@@ -491,13 +492,14 @@ mod tests {
             "caution",
             "red",
             "black",
+            "black_white",
             "repair",
             "disqualify",
         ] {
             assert!(event("flag_raised", Some(f)).urgent(), "{f}");
             assert!(!event("flag_cleared", Some(f)).urgent(), "{f}");
         }
-        for f in ["green", "blue", "white", "checkered", "debris"] {
+        for f in ["green", "blue", "white", "checkered", "debris", "slow_car"] {
             assert!(!event("flag_raised", Some(f)).urgent(), "{f}");
         }
         for k in ["incident", "damage", "fuel_low"] {

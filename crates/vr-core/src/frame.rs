@@ -100,6 +100,10 @@ pub enum Flag {
     Disqualify,
     Debris,
     OneLapToGreen,
+    /// A slow car ahead (a white flag that is not the last lap).
+    SlowCar,
+    /// Black and white: a warning for the way the car is driven.
+    BlackWhite,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -180,6 +184,20 @@ pub struct CarExtra {
     pub gear: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rpm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_mps: Option<f64>,
+    /// The current lap will not count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lap_invalidated: Option<bool>,
+    /// Out of the race (retired, did not finish).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired: Option<bool>,
+    /// The game's sector times: the latest of each sector, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sector_s: Vec<Option<f64>>,
+    /// The best of each sector this session.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub best_sector_s: Vec<Option<f64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -268,6 +286,12 @@ pub struct CarTelemetry {
     /// Seconds of time penalty not yet served.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub penalty_s: Option<f64>,
+    /// Traction control is cutting in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tc_active: Option<bool>,
+    /// DRS may be opened now (or on the next zone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drs_available: Option<bool>,
 }
 
 /// How badly the car is hurt: each part from 0.0 (whole) to 1.0 (destroyed).
@@ -288,6 +312,12 @@ pub struct Damage {
     pub suspension: [Option<f64>; 4],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine: Option<f64>,
+    /// The aero as a whole, where the game does not tell the body by sides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aero: Option<f64>,
+    /// Each wheel's brakes: LF, RF, LR, RR.
+    #[serde(skip_serializing_if = "all_none")]
+    pub brakes: [Option<f64>; 4],
 }
 
 fn all_none(v: &[Option<f64>; 4]) -> bool {
@@ -298,19 +328,33 @@ fn all_none(v: &[Option<f64>; 4]) -> bool {
 pub const DAMAGE_SCRATCH: f64 = 0.05;
 
 impl Damage {
-    pub fn parts(&self) -> [(&'static str, Option<f64>); 9] {
+    pub fn parts(&self) -> [(&'static str, Option<f64>); 14] {
         let [lf, rf, lr, rr] = self.suspension;
+        let [blf, brf, blr, brr] = self.brakes;
         [
             ("front", self.front),
             ("rear", self.rear),
             ("left", self.left),
             ("right", self.right),
+            ("aero", self.aero),
             ("LF suspension", lf),
             ("RF suspension", rf),
             ("LR suspension", lr),
             ("RR suspension", rr),
+            ("LF brake", blf),
+            ("RF brake", brf),
+            ("LR brake", blr),
+            ("RR brake", brr),
             ("engine", self.engine),
         ]
+    }
+
+    /// The worst part, if anything is known.
+    pub fn worst(&self) -> Option<f64> {
+        self.parts()
+            .into_iter()
+            .filter_map(|(_, d)| d)
+            .max_by(f64::total_cmp)
     }
 
     /// The parts that are more than scratched, the worst first.
@@ -371,6 +415,12 @@ pub enum Warning {
     RevLimiter,
     /// The game wants the car repaired, or repairs are pending.
     Damage,
+    /// The engine's warning light.
+    Engine,
+    /// A tyre is deflated or has come off.
+    FlatTyre,
+    /// The clutch is overheated.
+    Clutch,
 }
 
 impl Warning {
@@ -378,7 +428,13 @@ impl Warning {
     pub fn is_damage(self) -> bool {
         matches!(
             self,
-            Self::WaterTemp | Self::FuelPressure | Self::OilPressure | Self::OilTemp | Self::Damage
+            Self::WaterTemp
+                | Self::FuelPressure
+                | Self::OilPressure
+                | Self::OilTemp
+                | Self::Damage
+                | Self::Engine
+                | Self::FlatTyre
         )
     }
 }
@@ -390,6 +446,10 @@ pub struct Tyres {
     pub rf: Tyre,
     pub lr: Tyre,
     pub rr: Tyre,
+    /// Tread and temperatures change while driving, rather than only at
+    /// the stops.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub live: bool,
 }
 
 impl Tyres {
@@ -455,6 +515,9 @@ pub struct PitState {
     /// `fuel`, `windshield tearoff`, `fast repair`.
     pub requested: Vec<String>,
     pub requested_fuel_l: Option<f64>,
+    /// Why the car is due in, e.g. `"player requested"`, `"drive through"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned: Option<String>,
     /// When the rules let the car stop.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window: Option<PitWindow>,
@@ -640,6 +703,7 @@ mod tests {
             right: None,
             suspension: [None, Some(0.6), None, None],
             engine: Some(0.0),
+            ..Default::default()
         };
         assert_eq!(
             d.hurt(),
@@ -660,6 +724,95 @@ mod tests {
             whole,
             serde_json::json!({}),
             "nothing told, nothing written"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ams2_tests {
+    use super::*;
+
+    #[test]
+    fn worst_damage() {
+        assert_eq!(Damage::default().worst(), None);
+        let d = Damage {
+            aero: Some(0.1),
+            suspension: [None, Some(0.4), None, None],
+            brakes: [None, None, Some(0.3), None],
+            ..Default::default()
+        };
+        assert_eq!(d.worst(), Some(0.4));
+        let d = Damage {
+            engine: Some(0.9),
+            brakes: [None, None, None, Some(0.95)],
+            ..Default::default()
+        };
+        assert_eq!(d.worst(), Some(0.95));
+        let d = Damage {
+            aero: Some(0.3),
+            brakes: [None, Some(0.5), None, Some(0.01)],
+            ..Default::default()
+        };
+        assert_eq!(d.hurt(), [("RF brake", 0.5), ("aero", 0.3)]);
+        assert_eq!(
+            serde_json::to_value(&d).unwrap()["brakes"],
+            serde_json::json!([null, 0.5, null, 0.01])
+        );
+    }
+
+    #[test]
+    fn which_warnings_are_damage() {
+        let hurt = [
+            Warning::WaterTemp,
+            Warning::FuelPressure,
+            Warning::OilPressure,
+            Warning::OilTemp,
+            Warning::Damage,
+            Warning::Engine,
+            Warning::FlatTyre,
+        ];
+        for w in hurt {
+            assert!(w.is_damage(), "{w:?}");
+        }
+        for w in [
+            Warning::Stalled,
+            Warning::PitLimiter,
+            Warning::RevLimiter,
+            Warning::Clutch,
+        ] {
+            assert!(!w.is_damage(), "{w:?}");
+        }
+    }
+
+    #[test]
+    fn new_fields_stay_out_of_old_json() {
+        let json = serde_json::to_value(CarTelemetry::default()).unwrap();
+        for k in ["tc_active", "drs_available", "damage", "wheels"] {
+            assert!(json.get(k).is_none(), "{k}");
+        }
+        assert!(json["tyres"].get("live").is_none());
+        assert!(json["tyres"]["lf"].get("core_c").is_none());
+        assert!(json["pit"].get("planned").is_none());
+        let json = serde_json::to_value(CarExtra::default()).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+        let t = Tyres {
+            live: true,
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(&t).unwrap()["live"], true);
+        let back: Tyres = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!back.live);
+        assert_eq!(
+            serde_json::to_value(Flag::SlowCar).unwrap(),
+            serde_json::json!("slow_car")
+        );
+        assert_eq!(
+            serde_json::to_value(Flag::BlackWhite).unwrap(),
+            serde_json::json!("black_white")
+        );
+        assert_eq!(
+            serde_json::to_value(Warning::FlatTyre).unwrap(),
+            serde_json::json!("flat_tyre")
         );
     }
 }

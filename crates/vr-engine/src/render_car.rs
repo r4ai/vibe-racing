@@ -68,6 +68,11 @@ fn tyre_line(name: &str, t: &Tyre) -> String {
     s
 }
 
+/// When the tyre values were taken.
+fn tyres_when(t: &vr_core::Tyres) -> &'static str {
+    if t.live { "now" } else { "as of the last stop" }
+}
+
 /// `damage front 25%, RF suspension 10%`; `None` when nothing is more than
 /// scratched or the game does not tell.
 fn body_damage(d: Option<&vr_core::Damage>) -> Option<String> {
@@ -123,7 +128,11 @@ pub(crate) fn car_line(c: &CarTelemetry) -> Option<String> {
         .collect();
     if !tread.is_empty() {
         let name = c.tyre_compound.as_deref().unwrap_or("tyres");
-        parts.push(format!("{name} {} (as of the last stop)", tread.join(" ")));
+        parts.push(format!(
+            "{name} {} ({})",
+            tread.join(" "),
+            tyres_when(&c.tyres)
+        ));
     }
     let grip: Vec<String> = c
         .tyres
@@ -197,6 +206,9 @@ fn pit_line(p: &vr_core::PitState) -> String {
     if let Some(l) = p.requested_fuel_l.filter(|l| *l > 0.0) {
         let _ = write!(s, " ({l:.1}L)");
     }
+    if let Some(why) = &p.planned {
+        let _ = write!(s, " | due in: {why}");
+    }
     if let Some(w) = &p.window {
         let unit = match w.unit {
             vr_core::WindowUnit::Lap => "lap",
@@ -258,8 +270,9 @@ impl CarReport {
         };
         let _ = writeln!(
             out,
-            "tyres: {}{sets} (tread and temperatures are as of the last stop)",
-            c.tyre_compound.as_deref().unwrap_or("--")
+            "tyres: {}{sets} (tread and temperatures are {})",
+            c.tyre_compound.as_deref().unwrap_or("--"),
+            tyres_when(&c.tyres)
         );
         for (name, t) in c.tyres.all() {
             let _ = writeln!(out, "{}", tyre_line(name, t));
@@ -284,10 +297,11 @@ impl CarReport {
             let _ = writeln!(out, "P2P/OTS: {n} left{active}");
         }
         if c.drs_active.is_some() || c.battery_pct.is_some() {
-            let drs = match c.drs_active {
-                Some(true) => "open",
-                Some(false) => "closed",
-                None => "--",
+            let drs = match (c.drs_active, c.drs_available) {
+                (Some(true), _) => "open",
+                (Some(false), Some(true)) => "closed (available)",
+                (Some(false), _) => "closed",
+                (None, _) => "--",
             };
             let battery = opt(c.battery_pct.map(|b| b * 100.0), "%", 0);
             let _ = writeln!(out, "DRS {drs} | battery {battery}");

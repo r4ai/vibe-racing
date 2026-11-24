@@ -89,6 +89,8 @@ pub fn tell(e: &RaceEvent, v: &Values) -> Told {
             "repair" => say("ミートボールフラッグ、修理が要る。この周ピットに入ろう。"),
             "disqualify" => say("失格だ。"),
             "debris" => say("デブリに注意。"),
+            "slow_car" => say("前に遅い車、注意。"),
+            "black_white" => say("白黒旗、走り方の警告だ。"),
             "green" if is(v, "racing") => say("グリーン。"),
             _ => Told::Nothing,
         },
@@ -288,6 +290,8 @@ mod tests {
             ),
             ("disqualify", "失格だ。"),
             ("debris", "デブリに注意。"),
+            ("slow_car", "前に遅い車、注意。"),
+            ("black_white", "白黒旗、走り方の警告だ。"),
             ("green", "グリーン。"),
         ] {
             assert_eq!(said(&flag(name), &v), want);

@@ -21,6 +21,7 @@ pub const LIVE_KEYS: &[(&str, &str)] = &[
     ("gear", "-1 reverse, 0 neutral"),
     ("rpm", ""),
     ("abs", "ABS at work, 0/1"),
+    ("tc", "traction control at work, 0/1"),
     ("lap", "lap the car is on"),
     ("lap_pct", "progress around the lap, 0-100"),
     ("lap_m", "metres from the line"),
@@ -77,6 +78,10 @@ pub const LIVE_KEYS: &[(&str, &str)] = &[
     ("track_temp", "degrees C"),
     ("rain", "0-100"),
     ("p2p", "push-to-pass left"),
+    ("drs", "DRS open, 0/1"),
+    ("drs_available", "DRS may be opened, 0/1"),
+    ("damage", "the worst damaged part, 0-100"),
+    ("lap_invalid", "this lap will not count, 0/1"),
     ("yellow", "local or full course, 0/1"),
     ("caution", "full course, 0/1"),
     ("blue", "0/1"),
@@ -168,6 +173,13 @@ fn values(state: &RaceState, f: &Frame) -> BTreeMap<&'static str, f64> {
         put("gear", p.gear.map(f64::from));
         put("rpm", p.rpm);
         put("abs", c.abs_active.and_then(on));
+        put("tc", c.tc_active.and_then(on));
+        put("drs", c.drs_active.and_then(on));
+        put("drs_available", c.drs_available.and_then(on));
+        put(
+            "damage",
+            c.damage.as_ref().and_then(|d| d.worst()).map(|d| d * 100.0),
+        );
         put("lap_time", p.current_lap_s.filter(|t| *t >= 0.0));
         put("delta_best", p.delta_to_best_s);
         put("fuel", p.fuel_l);
@@ -209,6 +221,7 @@ fn values(state: &RaceState, f: &Frame) -> BTreeMap<&'static str, f64> {
         put("cars", Some(same.count() as f64));
         put("on_pit", on(car.on_pit_road));
         put("off_track", on(car.surface == TrackSurface::OffTrack));
+        put("lap_invalid", car.extra.lap_invalidated.and_then(on));
         for (offset, gap, trend) in [
             (-1, "gap_ahead", "trend_ahead"),
             (1, "gap_behind", "trend_behind"),

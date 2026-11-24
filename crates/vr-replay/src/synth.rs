@@ -458,6 +458,7 @@ impl SynthSource {
                 rf: tyre.clone(),
                 lr: tyre.clone(),
                 rr: tyre,
+                live: false,
             },
             pit: PitState {
                 open: Some(true),
@@ -623,6 +624,17 @@ mod tests {
         let last = frames.last().unwrap();
         assert_eq!(last.session.phase, SessionPhase::Checkered);
         assert!(last.cars.iter().all(|c| c.laps_completed.unwrap() >= 3));
+    }
+
+    #[test]
+    fn the_players_tyres_wear_as_it_drives() {
+        let frames = synth_frames(SynthConfig::default(), Some(300.0));
+        let tyres = &frames.last().unwrap().player.as_ref().unwrap().car.tyres;
+        for (_, t) in tyres.all() {
+            assert_eq!(t.cold_kpa, Some(160.0));
+            assert!(t.min_tread().is_some_and(|w| w < 1.0), "{t:?}");
+        }
+        assert!(!tyres.live, "as of the last stop, like iRacing");
     }
 
     fn player_laps(cfg: SynthConfig) -> Vec<f64> {

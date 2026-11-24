@@ -14,7 +14,8 @@
   - `white` ファイナルラップ / `chequered` ゴール
   - `black` ペナルティ（ピットへ） / `meatball (repair)` 修理のため要ピット / `disqualify` 失格
   - `debris` 路面に破片 / `one lap to green` 次の周でリスタート
-- **incident (x)**: iRacing のインシデントポイント。`2x` など。
+  - `slow car` 前に遅い車（AMS2 の白旗） / `black and white (warning)` 走り方への警告
+- **incident (x)**: iRacing のインシデントポイント。`2x` など。AMS2 には無い。
 - **BB / brake bias**: 制動力の前寄りの割合。数値が大きいほど前。
 - **TC / ABS**: 空転・ロックの介入。数値と強さの向きは車種による。
 - **OTS / P2P**: オーバーテイクシステム（push-to-pass）。レース中は残り（単位はゲームによる）。

@@ -380,6 +380,7 @@ fn tyre_temperatures_suggest_pressure_and_camber() {
         rf: tyre([80.0, 85.9, 80.0]),
         lr: tyre([80.0, 87.5, 95.0]),
         rr: tyre([90.0, 79.0, 80.0]),
+        live: false,
     };
     s.run(DT, |_, _| {});
     let a = s.handling().advice;
@@ -859,4 +860,87 @@ fn laps_with_a_jump_or_a_stop_at_the_pits() {
     let laps = s.st.take_traces();
     let got: Vec<_> = laps.iter().map(|l| (l.lap, l.pit)).collect();
     assert_eq!(got, [(2, false), (4, true), (5, false)]);
+}
+
+#[test]
+fn live_tyres_damage_and_what_ams2_adds() {
+    let mut s = Sim::new();
+    let c = &mut s.p().car;
+    c.tyre_compound = Some("Soft".into());
+    c.tyres.live = true;
+    c.tyres.lf.tread = [None, Some(0.75), None];
+    c.tyres.lf.temp_c = [Some(80.0), Some(85.0), Some(90.0)];
+    c.tyres.lf.core_c = Some(95.4);
+    c.wheels = Some(Wheels {
+        lf: Wheel {
+            brake_temp_c: Some(452.6),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    c.damage = Some(Damage {
+        aero: Some(0.25),
+        engine: Some(0.0),
+        suspension: [Some(0.0), None, None, Some(0.6)],
+        brakes: [Some(0.1), Some(0.0), None, None],
+        ..Default::default()
+    });
+    c.pit.planned = Some("drive through".into());
+    c.pit.window = Some(PitWindow {
+        from: 12.0,
+        to: 12.0,
+        unit: WindowUnit::Lap,
+    });
+    c.drs_active = Some(false);
+    c.drs_available = Some(true);
+    c.tc_active = Some(true);
+    s.frame.cars[0].extra.lap_invalidated = Some(true);
+    s.run(DT, |_, _| {});
+
+    let brief = s.st.brief().unwrap().to_text();
+    let want = "car: damage RR suspension 60%, aero 25%, LF brake 10% | Soft LF 75% (now)\n";
+    assert!(brief.contains(want), "{brief}");
+    let text = s.st.car().unwrap().to_text();
+    for want in [
+        "tyres: Soft (tread and temperatures are now)\n",
+        "  LF: tread --/75/--% | 80/85/90C (outer/middle/inner) | core 95C\n",
+        "brakes: LF 453C\n",
+        "pit: -- | due in: drive through | window lap 12-12\n",
+        "damage RR suspension 60%, aero 25%, LF brake 10%\n",
+        "DRS closed (available) | battery --\n",
+    ] {
+        assert!(text.contains(want), "{want}\n{text}");
+    }
+    let live = s.st.live().unwrap().values;
+    let v = |k: &str| live.get(k).copied();
+    assert_eq!(v("tc"), Some(1.0));
+    assert_eq!(v("drs"), Some(0.0));
+    assert_eq!(v("drs_available"), Some(1.0));
+    assert_eq!(v("damage"), Some(60.0));
+    assert_eq!(v("lap_invalid"), Some(1.0));
+
+    let c = &mut s.p().car;
+    c.damage = Some(Damage {
+        aero: Some(0.0),
+        ..Default::default()
+    });
+    c.drs_available = Some(false);
+    s.run(DT, |_, _| {});
+    let text = s.st.car().unwrap().to_text();
+    assert!(!text.contains("damage RR"), "{text}");
+    assert!(text.contains("DRS closed | battery --\n"), "{text}");
+    let brief = s.st.brief().unwrap().to_text();
+    assert!(!brief.contains("damage"), "{brief}");
+    assert_eq!(s.st.live().unwrap().values.get("damage"), Some(&0.0));
+    s.p().car.drs_active = Some(true);
+    s.run(DT, |_, _| {});
+    assert!(
+        s.st.car()
+            .unwrap()
+            .to_text()
+            .contains("DRS open | battery --\n")
+    );
+    s.p().car.damage = None;
+    s.run(DT, |_, _| {});
+    assert_eq!(s.st.live().unwrap().values.get("damage"), None);
 }

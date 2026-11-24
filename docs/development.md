@@ -12,9 +12,9 @@
 | cargo-llvm-cov | 任意                                             | カバレッジ計測             |
 | cargo-mutants  | 任意                                             | ミューテーションテスト     |
 
-iRacing と Assetto Corsa の共有メモリは Windows のみ（他 OS では `Unsupported`）。
+iRacing・Automobilista 2・Assetto Corsa の共有メモリは Windows のみ（他 OS では `Unsupported`）。
 Assetto Corsa の UDP（`--game ac-udp`）はどの OS でも読める。テストは偽のゲームを UDP の loopback に立てる。
-Win32 のコードは `rustup target add x86_64-pc-windows-gnu` の後、`cargo check -p vr-iracing -p vr-ac --target x86_64-pc-windows-gnu` で型検査できる。
+Win32 のコードは `rustup target add x86_64-pc-windows-gnu` の後、`cargo check -p vr-iracing -p vr-ams2 -p vr-ac --target x86_64-pc-windows-gnu` で型検査できる。
 Linux で `vr-radio` をビルドするには ALSA の開発パッケージ（`libasound2-dev`、`pkg-config`）が必要。
 
 ## ビルドと実行
@@ -88,22 +88,24 @@ pnpm install --frozen-lockfile; pnpm fmt
 cargo test --workspace
 ```
 
-| 対象            | 場所                                        | 方法                                                             |
-| --------------- | ------------------------------------------- | ---------------------------------------------------------------- |
-| iRacing 読取    | `crates/vr-iracing/src/*.rs` 内の単体テスト | ヘッダ・変数表・データバッファを合成したメモリイメージ           |
-| セッション YAML | `crates/vr-iracing/src/session_info.rs`     | 不正なドライバー名を含むサンプル                                 |
-| 解析（物語）    | `crates/vr-engine/tests/engine.rs`          | 合成レース 1 本を通した周回・燃費・ギャップ・イベント            |
-| 解析（境界値）  | `crates/vr-engine/tests/scenarios.rs`       | 手組みのフレームによる練習走行・マルチクラス・時間制レース・閾値 |
-| テキスト整形    | `crates/vr-engine/src/render.rs`            | 構築したレポートに対する期待文字列                               |
-| 区間・今の差    | `crates/vr-engine/tests/timing.rs`          | 一定速度で走る車のフレームによる区間タイム・差・走行順・欠落     |
-| 定型の答え      | `crates/vr-engine/tests/speech.rs`          | 作ったレポートに対する文の完全一致                               |
-| 車・挙動        | `crates/vr-engine/tests/car.rs`             | 手組みのフレームによる挙動・警告・車内設定・セッション記録       |
-| セッション保存  | `crates/vr-server/tests/sessions.rs`        | 保存・検索・結合、無応答のゲームの開き直し                       |
-| 記録・再生      | `crates/vr-replay/tests/replay.rs`          | 往復、間引き、ペーシング、壊れた入力                             |
-| サーバー        | `crates/vr-server/tests/http.rs`            | コレクター・HTTP 全エンドポイント・SSE・discovery                |
-| CLI             | `crates/vr-cli/tests/cli.rs`                | 実バイナリを起動。`vr serve` 子プロセス経由も含む                |
-| 依存の向き      | `crates/vr-cli/tests/architecture.rs`       | `cargo metadata` の crate 間依存を許可表と照合                   |
-| 音声無線        | `crates/vr-radio/src/*.rs` 内の単体テスト   | 偽の HTTP サーバー、プロセス内の偽 ACP エージェント、偽デバイス  |
+| 対象            | 場所                                        | 方法                                                                    |
+| --------------- | ------------------------------------------- | ----------------------------------------------------------------------- |
+| iRacing 読取    | `crates/vr-iracing/src/*.rs` 内の単体テスト | ヘッダ・変数表・データバッファを合成したメモリイメージ                  |
+| セッション YAML | `crates/vr-iracing/src/session_info.rs`     | 不正なドライバー名を含むサンプル                                        |
+| AMS2 読取       | `crates/vr-ams2/src/*.rs` 内の単体テスト    | C の構造体と同じ配置で書いたメモリイメージ。オフセットは SDK の値と照合 |
+| AMS2 → 解析     | `crates/vr-ams2/src/race_tests.rs`          | 3 台が走るメモリイメージを `RaceState` に通した差・燃費・セクター       |
+| 解析（物語）    | `crates/vr-engine/tests/engine.rs`          | 合成レース 1 本を通した周回・燃費・ギャップ・イベント                   |
+| 解析（境界値）  | `crates/vr-engine/tests/scenarios.rs`       | 手組みのフレームによる練習走行・マルチクラス・時間制レース・閾値        |
+| テキスト整形    | `crates/vr-engine/src/render.rs`            | 構築したレポートに対する期待文字列                                      |
+| 区間・今の差    | `crates/vr-engine/tests/timing.rs`          | 一定速度で走る車のフレームによる区間タイム・差・走行順・欠落            |
+| 定型の答え      | `crates/vr-engine/tests/speech.rs`          | 作ったレポートに対する文の完全一致                                      |
+| 車・挙動        | `crates/vr-engine/tests/car.rs`             | 手組みのフレームによる挙動・警告・車内設定・セッション記録              |
+| セッション保存  | `crates/vr-server/tests/sessions.rs`        | 保存・検索・結合、無応答のゲームの開き直し                              |
+| 記録・再生      | `crates/vr-replay/tests/replay.rs`          | 往復、間引き、ペーシング、壊れた入力                                    |
+| サーバー        | `crates/vr-server/tests/http.rs`            | コレクター・HTTP 全エンドポイント・SSE・discovery                       |
+| CLI             | `crates/vr-cli/tests/cli.rs`                | 実バイナリを起動。`vr serve` 子プロセス経由も含む                       |
+| 依存の向き      | `crates/vr-cli/tests/architecture.rs`       | `cargo metadata` の crate 間依存を許可表と照合                          |
+| 音声無線        | `crates/vr-radio/src/*.rs` 内の単体テスト   | 偽の HTTP サーバー、プロセス内の偽 ACP エージェント、偽デバイス         |
 
 CLI テストは `VR_DISCOVERY` を一時ファイルに向け、手元の `vr serve` と干渉しない。
 
@@ -119,13 +121,13 @@ CLI テストは `VR_DISCOVERY` を一時ファイルに向け、手元の `vr s
 cargo llvm-cov --workspace --summary-only
 ```
 
-主な未到達: Win32 マッピング（`crates/vr-iracing/src/shm.rs`、`crates/vr-ac/src/pages.rs`）、音声デバイス（`crates/vr-radio/src/audio.rs`）、`vr-radio` の `main.rs`、Ctrl-C で終わる経路。
+主な未到達: Win32 マッピング（`crates/vr-iracing/src/shm.rs`、`crates/vr-ams2/src/shm.rs`、`crates/vr-ac/src/pages.rs`）、音声デバイス（`crates/vr-radio/src/audio.rs`）、`vr-radio` の `main.rs`、Ctrl-C で終わる経路。
 CI はこれらを除いた行カバレッジ 90% 未満で失敗する。
 
 ## ミューテーションテスト
 
 ```powershell
-cargo mutants -p vr-engine -p vr-iracing -p vr-replay -p vr-radio -j 6
+cargo mutants -p vr-engine -p vr-iracing -p vr-ams2 -p vr-replay -p vr-radio -j 6
 ```
 
 差分のみ:

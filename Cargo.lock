@@ -6796,6 +6796,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vr-ams2"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "vr-core",
+ "vr-engine",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "vr-cli"
 version = "0.1.0"
 dependencies = [
@@ -6810,6 +6820,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "vr-ac",
+ "vr-ams2",
  "vr-core",
  "vr-engine",
  "vr-iracing",

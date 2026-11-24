@@ -13,7 +13,8 @@ exclude_re = [
     # stub. Only testable against a running iRacing; the parsing it feeds is
     # covered through `MemoryImage`.
     'imp::',
-    # vr-iracing::open_live: opens the live mapping (see above).
+    # vr-iracing::open_live, vr-ams2::open_live: open the live mapping (see
+    # above).
     'replace open_live ',
     # Equivalent: the fuel baseline is only ever read for the player's car,
     # so also storing it for other cars is unobservable.

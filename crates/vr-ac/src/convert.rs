@@ -235,6 +235,7 @@ fn damage(p: &View<'_>, me: Option<&View<'_>>) -> Option<Damage> {
             me.and_then(|v| v.f64("engineLifeLeft"))
                 .map(|l| 1.0 - l / ENGINE_LIFE),
         ),
+        ..Default::default()
     })
 }
 
@@ -317,6 +318,8 @@ fn car_telemetry(snap: &Snapshot, tracker: &mut Tracker, time_s: f64) -> CarTele
             rf: tyre(&p, 1),
             lr: tyre(&p, 2),
             rr: tyre(&p, 3),
+            // The physics page is the tyres as they are.
+            live: true,
         },
         tyre_compound: g.text("tyreCompound"),
         pit: PitState {

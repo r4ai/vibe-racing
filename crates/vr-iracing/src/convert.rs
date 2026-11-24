@@ -299,6 +299,7 @@ fn car_telemetry(v: &VarView<'_>, si: &SessionInfo) -> CarTelemetry {
             rf: tyre(v, "RF"),
             lr: tyre(v, "LR"),
             rr: tyre(v, "RR"),
+            live: false,
         },
         tyre_compound: compound(si, v.i32("PlayerTireCompound"), true),
         tyre_sets_used: v.i32("TireSetsUsed"),
@@ -434,6 +435,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
                 flags: personal_flags(v.i32_at("CarIdxSessionFlags", i).unwrap_or(0) as u32),
                 gear: v.i32_at("CarIdxGear", i),
                 rpm: v.f64_at("CarIdxRPM", i).filter(|r| *r >= 0.0),
+                ..Default::default()
             },
         });
     }
@@ -850,6 +852,7 @@ DriverInfo:
             one("P2P_Count", 2),
             one("DRS_Status", 2),
             one("FastRepairAvailable", 2),
+            one("PitSvFuel", 4),
             one("LapDeltaToOptimalLap", 4),
             one("LapDeltaToSessionBestLap", 4),
             one("LapDeltaToSessionBestLap_OK", 1),
@@ -872,6 +875,7 @@ DriverInfo:
         img.set_i32("P2P_Count", 0, 138);
         img.set_i32("DRS_Status", 0, 3);
         img.set_i32("FastRepairAvailable", 0, 255);
+        img.set_f32("PitSvFuel", 0, 12.5);
         img.set_f32("LapDeltaToOptimalLap", 0, 1.0);
         img.set_f32("LapDeltaToSessionBestLap", 0, -0.5);
         img.set_bool("LapDeltaToSessionBestLap_OK", 0, true);
@@ -900,6 +904,7 @@ DriverInfo:
         assert_eq!(build(&img).player.unwrap().car.p2p_count, None);
         assert_eq!(c.drs_active, Some(true));
         assert_eq!(c.pit.fast_repairs_available, None);
+        assert_eq!(c.pit.requested_fuel_l, Some(12.5));
         assert_eq!(c.pit.open, Some(true));
         assert_eq!(c.delta_to_session_best_s, Some(-0.5));
         assert_eq!(c.delta_to_optimal_s, None, "not marked valid");
