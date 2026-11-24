@@ -254,7 +254,6 @@ fn compound(s: &Snapshot<'_>) -> Option<String> {
 
 fn wheels(s: &Snapshot<'_>, t: &mut Tracker, car_mps: f64, free: bool) -> Wheels {
     let mut w = std::array::from_fn::<Wheel, 4, _>(|i| Wheel {
-        speed_mps: None,
         pressure_kpa: kpa(s.f64_at("mAirPressure", i)),
         surface_c: across(
             i,
@@ -1188,6 +1187,7 @@ mod tests {
         assert_eq!(d.suspension, [Some(0.0), Some(0.0), Some(0.0), Some(0.5)]);
         assert_eq!(d.brakes[0].map(|b| (b * 1e6).round() / 1e6), Some(0.1));
         assert_eq!(d.worst(), Some(0.5));
+        assert_eq!(d.engine.map(|e| (e * 1e6).round() / 1e6), Some(0.05));
         img.set_f32("mSuspensionDamage", 3, 0.0);
 
         img.set_u32("mTyreFlags", 2, TYRE_ATTACHED);
@@ -1250,6 +1250,7 @@ mod tests {
         assert_eq!(r(w.rr.ride_height_m), Some(1.0), "1 is not over 1");
         assert_eq!(r(w.rr.shock_mps), Some(0.2));
         assert_eq!(w.lf.brake_temp_c, Some(450.0));
+        assert_eq!(w.rf.pressure_kpa, Some(180.0));
         assert_eq!(w.rr.brake_temp_c, Some(310.0));
         assert_eq!(w.rr.travel_m, Some(0.0));
         assert_eq!(w.lf.surface_c, [Some(80.0), Some(85.0), Some(90.0)]);
