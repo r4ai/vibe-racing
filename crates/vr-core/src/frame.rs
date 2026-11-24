@@ -66,11 +66,17 @@ pub enum SessionKind {
 #[serde(rename_all = "snake_case")]
 pub enum SessionPhase {
     Unknown,
+    /// Before the cars may drive.
     GetInCar,
+    /// On the grid or warming up, before the start.
     Warmup,
+    /// Formation or pace laps.
     ParadeLaps,
+    /// The session is running.
     Racing,
+    /// The chequered flag is out.
     Checkered,
+    /// After the session.
     CoolDown,
 }
 
@@ -120,13 +126,15 @@ pub enum TrackSurface {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CarState {
     pub idx: usize,
-    /// Car number as shown on the car, e.g. `"23"`.
+    /// Car number as shown on the car, e.g. `"23"`; the game's slot of the
+    /// car when it gives none.
     pub number: String,
     pub driver: String,
     pub team: Option<String>,
     pub car_name: Option<String>,
     pub class_name: Option<String>,
     pub class_id: Option<i32>,
+    /// The driver's skill rating on the game's own scale (iRating...).
     pub rating: Option<i32>,
     pub is_player: bool,
     /// Overall position (1-based). `None` before positions are assigned.
@@ -158,7 +166,7 @@ pub struct CarExtra {
     pub tyre_compound: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub best_lap_num: Option<i32>,
-    /// Push-to-pass left (or used, outside races; the unit is the game's).
+    /// Push-to-pass / overtake uses or seconds left (the unit is the game's).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p2p_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,6 +194,7 @@ pub struct PlayerTelemetry {
     pub fuel_capacity_l: Option<f64>,
     /// Instantaneous consumption in litres per hour.
     pub fuel_use_lph: Option<f64>,
+    /// Incident points, as the game counts them for its penalties.
     pub incidents: Option<i32>,
     pub current_lap_s: Option<f64>,
     pub delta_to_best_s: Option<f64>,
@@ -253,6 +262,67 @@ pub struct CarTelemetry {
     /// What each wheel does, where the game tells it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wheels: Option<Wheels>,
+    /// Damage to the body, where the game tells how much.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damage: Option<Damage>,
+    /// Seconds of time penalty not yet served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub penalty_s: Option<f64>,
+}
+
+/// How badly the car is hurt: each part from 0.0 (whole) to 1.0 (destroyed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Damage {
+    /// The body, which carries the aero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub front: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rear: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<f64>,
+    /// Each wheel's suspension: LF, RF, LR, RR.
+    #[serde(skip_serializing_if = "all_none")]
+    pub suspension: [Option<f64>; 4],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<f64>,
+}
+
+fn all_none(v: &[Option<f64>; 4]) -> bool {
+    v.iter().all(Option::is_none)
+}
+
+/// Lighter than this is a scratch, not damage.
+pub const DAMAGE_SCRATCH: f64 = 0.05;
+
+impl Damage {
+    pub fn parts(&self) -> [(&'static str, Option<f64>); 9] {
+        let [lf, rf, lr, rr] = self.suspension;
+        [
+            ("front", self.front),
+            ("rear", self.rear),
+            ("left", self.left),
+            ("right", self.right),
+            ("LF suspension", lf),
+            ("RF suspension", rf),
+            ("LR suspension", lr),
+            ("RR suspension", rr),
+            ("engine", self.engine),
+        ]
+    }
+
+    /// The parts that are more than scratched, the worst first.
+    pub fn hurt(&self) -> Vec<(&'static str, f64)> {
+        let mut v: Vec<(&'static str, f64)> = self
+            .parts()
+            .into_iter()
+            .filter_map(|(n, d)| Some((n, d.filter(|d| *d >= DAMAGE_SCRATCH)?)))
+            .collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        v
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -277,6 +347,16 @@ pub struct Wheel {
     /// Positive in bump.
     pub shock_mps: Option<f64>,
     pub brake_bar: Option<f64>,
+    /// Vertical load on the tyre.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_n: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camber_rad: Option<f64>,
+    /// How far the suspension is compressed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub travel_m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brake_temp_c: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -333,6 +413,13 @@ pub struct Tyre {
     /// Tread left, 0.0..1.0.
     pub tread: [Option<f64>; 3],
     pub distance_m: Option<f64>,
+    /// Inside the rubber, as it is now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core_c: Option<f64>,
+    /// The grip wear leaves, 0.0..1.0 of a new tyre's, where the game
+    /// models wear as lost grip rather than lost tread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grip: Option<f64>,
 }
 
 impl Tyre {
@@ -364,15 +451,39 @@ pub struct PitState {
     pub fast_repairs_used: Option<i32>,
     /// `None`: unlimited or unknown.
     pub fast_repairs_available: Option<i32>,
-    /// What the next stop will do, e.g. `["lf tyre", "fuel"]`.
+    /// What the next stop will do: `lf tyre`, `rf tyre`, `lr tyre`, `rr tyre`,
+    /// `fuel`, `windshield tearoff`, `fast repair`.
     pub requested: Vec<String>,
     pub requested_fuel_l: Option<f64>,
+    /// When the rules let the car stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<PitWindow>,
+    /// The stop the rules require has been made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mandatory_done: Option<bool>,
+}
+
+/// From and to, both included, in laps or in minutes of the session.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PitWindow {
+    pub from: f64,
+    pub to: f64,
+    pub unit: WindowUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowUnit {
+    Lap,
+    Minute,
 }
 
 /// One in-car adjustment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Control {
-    /// Stable id, e.g. `"brake_bias"`.
+    /// Stable id, the same in every game for the same adjustment:
+    /// `brake_bias` (% to the front), `traction_control`, `abs`,
+    /// `engine_brake`... The value is on the game's own scale.
     pub id: String,
     pub value: f64,
 }
@@ -424,8 +535,7 @@ pub struct Extras {
 pub struct Weather {
     pub air_temp_c: Option<f64>,
     pub track_temp_c: Option<f64>,
-    /// Free-form wetness description (e.g. `"dry"`, `"moderately wet"`).
-    pub wetness: Option<String>,
+    pub wetness: Option<Wetness>,
     /// 0.0..1.0
     pub precipitation: Option<f64>,
     /// The stewards allow rain tyres.
@@ -439,10 +549,117 @@ pub struct Weather {
     /// Where the wind comes from, degrees clockwise from north.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wind_dir_deg: Option<f64>,
-    /// E.g. `"overcast"`.
+    /// `clear`, `partly cloudy`, `mostly cloudy` or `overcast`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skies: Option<String>,
     /// 0.0..1.0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fog: Option<f64>,
+    /// Rubber laid down on the track, 0.0..1.0 (1 is fully grippy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_grip: Option<f64>,
+}
+
+/// How wet the track is, from dry to under water.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Wetness {
+    #[serde(rename = "dry")]
+    Dry,
+    #[serde(rename = "mostly dry")]
+    MostlyDry,
+    #[serde(rename = "very lightly wet")]
+    VeryLightlyWet,
+    #[serde(rename = "lightly wet")]
+    LightlyWet,
+    #[serde(rename = "moderately wet")]
+    ModeratelyWet,
+    #[serde(rename = "very wet")]
+    VeryWet,
+    #[serde(rename = "extremely wet")]
+    ExtremelyWet,
+}
+
+impl Wetness {
+    pub const ALL: [Self; 7] = [
+        Self::Dry,
+        Self::MostlyDry,
+        Self::VeryLightlyWet,
+        Self::LightlyWet,
+        Self::ModeratelyWet,
+        Self::VeryWet,
+        Self::ExtremelyWet,
+    ];
+
+    /// As it is written in JSON, e.g. `"mostly dry"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dry => "dry",
+            Self::MostlyDry => "mostly dry",
+            Self::VeryLightlyWet => "very lightly wet",
+            Self::LightlyWet => "lightly wet",
+            Self::ModeratelyWet => "moderately wet",
+            Self::VeryWet => "very wet",
+            Self::ExtremelyWet => "extremely wet",
+        }
+    }
+
+    /// Wet enough for rain tyres to be a question.
+    pub fn is_wet(self) -> bool {
+        self > Self::MostlyDry
+    }
+}
+
+impl std::fmt::Display for Wetness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wetness_is_written_as_before() {
+        for w in Wetness::ALL {
+            let json = serde_json::to_string(&w).unwrap();
+            assert_eq!(json, format!("\"{w}\""));
+            assert_eq!(serde_json::from_str::<Wetness>(&json).unwrap(), w);
+        }
+        let wet: Vec<bool> = Wetness::ALL.iter().map(|w| w.is_wet()).collect();
+        assert_eq!(wet, [false, false, true, true, true, true, true]);
+        assert!(serde_json::from_str::<Wetness>("\"damp\"").is_err());
+    }
+
+    #[test]
+    fn damage_tells_what_is_more_than_scratched() {
+        let d = Damage {
+            front: Some(0.25),
+            rear: Some(DAMAGE_SCRATCH),
+            left: Some(0.049),
+            right: None,
+            suspension: [None, Some(0.6), None, None],
+            engine: Some(0.0),
+        };
+        assert_eq!(
+            d.hurt(),
+            [
+                ("RF suspension", 0.6),
+                ("front", 0.25),
+                ("rear", DAMAGE_SCRATCH)
+            ]
+        );
+        assert!(Damage::default().hurt().is_empty());
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(
+            json["suspension"],
+            serde_json::json!([null, 0.6, null, null])
+        );
+        let whole = serde_json::to_value(Damage::default()).unwrap();
+        assert_eq!(
+            whole,
+            serde_json::json!({}),
+            "nothing told, nothing written"
+        );
+    }
 }

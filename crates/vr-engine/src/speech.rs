@@ -10,7 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use vr_core::{Flag, SessionKind, SessionPhase, Warning};
+use vr_core::{Flag, SessionKind, SessionPhase, Warning, Wetness};
 
 use crate::api::{ApiResult, LapsParams, RaceApi, SectorsParams};
 use crate::report::*;
@@ -822,9 +822,9 @@ impl Voice<'_> {
         let Some(w) = &self.b.weather else {
             return none.into();
         };
-        let wet = w.wetness.as_deref();
+        let wet = w.wetness;
         let track = w.track_temp_c.map(|t| format!("路面{t:.0}度。"));
-        if wet == Some("dry") && w.precipitation.is_some_and(|p| p <= 0.0) {
+        if wet == Some(Wetness::Dry) && w.precipitation.is_some_and(|p| p <= 0.0) {
             return join([Some("ドライ、雨は無い。".into()), track]);
         }
         let road = wet.map(|w| format!("路面は{}。", wetness(w)));
@@ -1001,16 +1001,15 @@ fn act_on(f: Flag) -> &'static str {
     }
 }
 
-fn wetness(w: &str) -> &str {
+fn wetness(w: Wetness) -> &'static str {
     match w {
-        "dry" => "ドライ",
-        "mostly dry" => "ほぼドライ",
-        "very lightly wet" => "わずかに濡れてる",
-        "lightly wet" => "少し濡れてる",
-        "moderately wet" => "濡れてる",
-        "very wet" => "かなり濡れてる",
-        "extremely wet" => "水浸し",
-        other => other,
+        Wetness::Dry => "ドライ",
+        Wetness::MostlyDry => "ほぼドライ",
+        Wetness::VeryLightlyWet => "わずかに濡れてる",
+        Wetness::LightlyWet => "少し濡れてる",
+        Wetness::ModeratelyWet => "濡れてる",
+        Wetness::VeryWet => "かなり濡れてる",
+        Wetness::ExtremelyWet => "水浸し",
     }
 }
 

@@ -59,7 +59,36 @@ fn tyre_line(name: &str, t: &Tyre) -> String {
     if let Some(d) = t.distance_m.filter(|d| *d > 0.0) {
         let _ = write!(s, " | {:.1}km", d / 1000.0);
     }
+    if let Some(c) = t.core_c {
+        let _ = write!(s, " | core {c:.0}C");
+    }
+    if let Some(g) = t.grip {
+        let _ = write!(s, " | grip {:.1}%", g * 100.0);
+    }
     s
+}
+
+/// `damage front 25%, RF suspension 10%`; `None` when nothing is more than
+/// scratched or the game does not tell.
+fn body_damage(d: Option<&vr_core::Damage>) -> Option<String> {
+    let hurt = d?.hurt();
+    (!hurt.is_empty()).then(|| {
+        let parts: Vec<String> = hurt
+            .iter()
+            .map(|(n, v)| format!("{n} {:.0}%", v * 100.0))
+            .collect();
+        format!("damage {}", parts.join(", "))
+    })
+}
+
+/// `brakes: LF 420C RF 430C LR 300C RR 310C`, where the game tells.
+fn brakes_line(c: &CarTelemetry) -> Option<String> {
+    let w = c.wheels.as_ref()?;
+    let parts: Vec<String> = [("LF", &w.lf), ("RF", &w.rf), ("LR", &w.lr), ("RR", &w.rr)]
+        .iter()
+        .filter_map(|(n, w)| Some(format!("{n} {:.0}C", w.brake_temp_c?)))
+        .collect();
+    (!parts.is_empty()).then(|| format!("brakes: {}", parts.join(" ")))
 }
 
 /// One line for the brief; `None` when there is nothing to say.
@@ -73,6 +102,12 @@ pub(crate) fn car_line(c: &CarTelemetry) -> Option<String> {
         .collect();
     if !damage.is_empty() {
         parts.push(format!("WARNING {}", damage.join(", ")));
+    }
+    if let Some(d) = body_damage(c.damage.as_ref()) {
+        parts.push(d);
+    }
+    if let Some(p) = c.penalty_s.filter(|p| *p > 0.0) {
+        parts.push(format!("PENALTY {p:.1}s"));
     }
     if let Some(s) = c.pit.repair_left_s.filter(|s| *s > 0.0) {
         parts.push(format!("repairs {s:.0}s"));
@@ -89,6 +124,16 @@ pub(crate) fn car_line(c: &CarTelemetry) -> Option<String> {
     if !tread.is_empty() {
         let name = c.tyre_compound.as_deref().unwrap_or("tyres");
         parts.push(format!("{name} {} (as of the last stop)", tread.join(" ")));
+    }
+    let grip: Vec<String> = c
+        .tyres
+        .all()
+        .iter()
+        .filter_map(|(n, t)| Some(format!("{n} {:.1}%", t.grip? * 100.0)))
+        .collect();
+    if !grip.is_empty() {
+        let name = c.tyre_compound.as_deref().unwrap_or("tyres");
+        parts.push(format!("{name} grip {}", grip.join(" ")));
     }
     if let Some(n) = c.p2p_count {
         let active = if c.p2p_active == Some(true) {
@@ -152,6 +197,18 @@ fn pit_line(p: &vr_core::PitState) -> String {
     if let Some(l) = p.requested_fuel_l.filter(|l| *l > 0.0) {
         let _ = write!(s, " ({l:.1}L)");
     }
+    if let Some(w) = &p.window {
+        let unit = match w.unit {
+            vr_core::WindowUnit::Lap => "lap",
+            vr_core::WindowUnit::Minute => "min",
+        };
+        let _ = write!(s, " | window {unit} {:.0}-{:.0}", w.from, w.to);
+    }
+    match p.mandatory_done {
+        Some(true) => s.push_str(" | mandatory stop done"),
+        Some(false) => s.push_str(" | mandatory stop NOT done"),
+        None => {}
+    }
     s
 }
 
@@ -207,8 +264,17 @@ impl CarReport {
         for (name, t) in c.tyres.all() {
             let _ = writeln!(out, "{}", tyre_line(name, t));
         }
+        if let Some(b) = brakes_line(c) {
+            let _ = writeln!(out, "{b}");
+        }
         let _ = writeln!(out, "{}", pit_line(&c.pit));
         let _ = writeln!(out, "{}", damage_line(&c.pit));
+        if let Some(d) = body_damage(c.damage.as_ref()) {
+            let _ = writeln!(out, "{d}");
+        }
+        if let Some(p) = c.penalty_s.filter(|p| *p > 0.0) {
+            let _ = writeln!(out, "penalty: {p:.1}s");
+        }
         if let Some(n) = c.p2p_count {
             let active = if c.p2p_active == Some(true) {
                 " (ACTIVE)"
@@ -890,5 +956,109 @@ impl SessionRecord {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SourceKind;
+    use vr_core::{Capabilities, Damage, PitState, PitWindow, Wheel, Wheels, WindowUnit};
+
+    fn report(c: CarTelemetry) -> CarReport {
+        CarReport {
+            meta: Meta {
+                game: "ac".into(),
+                source: SourceKind::Live,
+                connected: true,
+                age_ms: Some(0),
+                history: true,
+                session_time_s: Some(10.0),
+                capabilities: Capabilities::ALL,
+            },
+            car_name: Some("ks_bmw_m3_e30".into()),
+            car: Some(c),
+            water_temp_c: None,
+            oil_temp_c: None,
+            incidents: None,
+            adjustments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn brakes_body_damage_penalty_and_pit_rules_are_told() {
+        let brake = |t: Option<f64>| Wheel {
+            brake_temp_c: t,
+            ..Default::default()
+        };
+        let mut c = CarTelemetry {
+            wheels: Some(Wheels {
+                lf: brake(Some(420.4)),
+                rf: brake(Some(431.0)),
+                lr: brake(None),
+                rr: brake(Some(300.0)),
+            }),
+            damage: Some(Damage {
+                front: Some(0.05),
+                rear: Some(0.0),
+                left: Some(0.125),
+                right: None,
+                suspension: [None, Some(0.5), None, None],
+                ..Default::default()
+            }),
+            penalty_s: Some(5.0),
+            pit: PitState {
+                window: Some(PitWindow {
+                    from: 10.0,
+                    to: 20.0,
+                    unit: WindowUnit::Lap,
+                }),
+                mandatory_done: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        c.tyres.lf.core_c = Some(85.4);
+        c.tyres.rr.grip = Some(0.9649);
+        let text = report(c.clone()).to_text();
+        assert!(text.contains("brakes: LF 420C RF 431C RR 300C\n"), "{text}");
+        assert!(
+            text.contains("damage RF suspension 50%, left 12%, front 5%\n"),
+            "{text}"
+        );
+        assert!(text.contains("penalty: 5.0s\n"), "{text}");
+        assert!(
+            text.contains("| window lap 10-20 | mandatory stop NOT done\n"),
+            "{text}"
+        );
+        assert!(text.contains(" | core 85C\n"), "{text}");
+        assert!(text.contains(" | grip 96.5%\n"), "{text}");
+        let line = car_line(&c).unwrap();
+        assert!(
+            line.contains("damage RF suspension 50%, left 12%, front 5% | PENALTY 5.0s"),
+            "{line}"
+        );
+        assert!(line.contains("tyres grip RR 96.5%"), "{line}");
+
+        // Whole, clean, no rules: nothing said.
+        c.damage = Some(Damage::default());
+        c.penalty_s = Some(0.0);
+        c.wheels = None;
+        c.pit.window = Some(PitWindow {
+            from: 5.0,
+            to: 25.0,
+            unit: WindowUnit::Minute,
+        });
+        c.pit.mandatory_done = Some(true);
+        let text = report(c.clone()).to_text();
+        assert!(!text.contains("brakes:"), "{text}");
+        assert!(!text.contains("damage RF"), "{text}");
+        assert!(!text.contains("penalty"), "{text}");
+        assert!(
+            text.contains("| window min 5-25 | mandatory stop done\n"),
+            "{text}"
+        );
+        c.tyres.rr.grip = None;
+        assert_eq!(car_line(&c), None);
     }
 }

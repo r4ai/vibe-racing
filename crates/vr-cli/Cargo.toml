@@ -16,6 +16,7 @@ vr-core.workspace = true
 vr-engine.workspace = true
 vr-replay.workspace = true
 vr-iracing.workspace = true
+vr-ac.workspace = true
 vr-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true

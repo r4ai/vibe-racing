@@ -85,7 +85,7 @@ impl Sim {
             }),
             cars: vec![car(1)],
             weather: Some(Weather {
-                wetness: Some("dry".into()),
+                wetness: Some(vr_core::Wetness::Dry),
                 ..Default::default()
             }),
         };
@@ -460,7 +460,7 @@ fn weather_changes_are_events() {
     s.frame.weather = None;
     s.run(0.1, |_, _| {});
     s.frame.weather = Some(Weather {
-        wetness: Some("lightly wet".into()),
+        wetness: Some(vr_core::Wetness::LightlyWet),
         ..Default::default()
     });
     s.run(0.1, |_, _| {});

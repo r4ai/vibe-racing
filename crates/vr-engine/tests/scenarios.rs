@@ -1423,7 +1423,7 @@ fn rainy(st: &mut RaceState, until: f64, rain: impl Fn(f64) -> f64) {
         let mut f = frame(SessionKind::Race, t, vec![car(0, 1, 1, 0.5)], 0);
         f.weather = Some(vr_core::Weather {
             precipitation: Some(rain(t)),
-            wetness: Some("lightly wet".into()),
+            wetness: Some(vr_core::Wetness::LightlyWet),
             ..Default::default()
         });
         st.ingest_at(f, 0);

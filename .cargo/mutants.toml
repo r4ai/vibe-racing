@@ -86,6 +86,11 @@ exclude_re = [
     'replace App::boot',
     'replace (main|ask_once) ',
     'in (main|ask_once)$',
+    # vr-ac: the live Win32 mapping (`imp::`) and `open_live` are matched by
+    # the vr-iracing patterns above; the parsing is covered through
+    # `MemoryPages`.
+    # Equality boundary on a wall-clock silence (`elapsed() > SILENT`).
+    'replace > with >= in <impl TelemetrySource for UdpSource>::poll',
     # Equivalent: NoMic::stop already returns the default recording.
     'replace <impl Recorder for NoMic>::stop -> Recording with Default::default\(\)',
 ]
