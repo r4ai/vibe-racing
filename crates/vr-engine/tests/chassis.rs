@@ -13,6 +13,7 @@ fn wheel(speed: f64) -> Wheel {
         ride_height_m: Some(0.010),
         shock_mps: Some(0.02),
         brake_bar: Some(10.0),
+        ..Default::default()
     }
 }
 

@@ -2,17 +2,18 @@
 
 ## 共通オプション
 
-| オプション                                         | 内容                                                   |
-| -------------------------------------------------- | ------------------------------------------------------ |
-| `-f, --format text\|json`                          | 既定 `text`（簡潔テキスト）。`json` は 1 オブジェクト  |
-| `--server <URL>` / `VR_SERVER`                     | 問い合わせ先の `vr serve`。既定は自動検出              |
-| `--game iracing\|ams2\|replay\|synthetic`          | データソースを明示（サーバーを使わずプロセス内で処理） |
-| `--file <ndjson>` / `--speed <x>` / `--until <秒>` | 記録の再生、再生速度、停止するセッション時刻           |
+| オプション                                            | 内容                                                   |
+| ----------------------------------------------------- | ------------------------------------------------------ |
+| `-f, --format text\|json`                             | 既定 `text`（簡潔テキスト）。`json` は 1 オブジェクト  |
+| `--server <URL>` / `VR_SERVER`                        | 問い合わせ先の `vr serve`。既定は自動検出              |
+| `--game iracing\|ams2\|ac\|ac-udp\|replay\|synthetic` | データソースを明示（サーバーを使わずプロセス内で処理） |
+| `--host <PC[:port]>`                                  | `ac-udp` の読み先。既定 `127.0.0.1`（9996 番）         |
+| `--file <ndjson>` / `--speed <x>` / `--until <秒>`    | 記録の再生、再生速度、停止するセッション時刻           |
 
 ## データの取り方
 
 1. `--game` / `--file` 指定なし: 起動中の `vr serve`（履歴あり）
-2. サーバー無し: iRacing、Automobilista 2 の順に、セッション中のゲームの共有メモリを 1 回読む（`history=unavailable`）
+2. サーバー無し: iRacing、Automobilista 2、Assetto Corsa の順に、セッション中のゲームの共有メモリを 1 回読む（`history=unavailable`）
 3. `--file` / `--game synthetic`: 記録・デモレースを最後（または `--until`）まで流して回答
 
 ## コマンド
@@ -35,7 +36,7 @@
 | `vr setup`                                                           | ガレージのセットアップ全項目、走行中に変えられる設定                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `vr handling [--last 3]`                                             | アンダー・オーバー・空転・ロックの傾向（秒/周）、場所（既知のコースはコーナー名）、変更案                                                                                                                                                                                                                                                                                                                                                                                 |
 | `vr channels [語...]`                                                | ゲームが出す全変数（名前・値・単位・説明）。語は名前・単位・説明の部分一致（AND）                                                                                                                                                                                                                                                                                                                                                                                         |
-| `vr info [パス]`                                                     | ゲーム自身のセッション情報。例 `WeekendInfo/TrackNumTurns`、`DriverInfo/Drivers/0`                                                                                                                                                                                                                                                                                                                                                                                        |
+| `vr info [パス]`                                                     | ゲーム自身のセッション情報。例 `WeekendInfo/TrackNumTurns`、`DriverInfo/Drivers/0`（iRacing）、`static/carModel`・`results/sessions/0`（Assetto Corsa）                                                                                                                                                                                                                                                                                                                   |
 | `vr sessions list [--limit N] [--track 語] [--car 語] [--kind 種別]` | 過去のセッション（新しい順）                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `vr sessions show\|setup <指定>`                                     | 結果・ラップ・イベント／セットアップ。指定は ID、ID の先頭、`last`、番号（1 が最新）                                                                                                                                                                                                                                                                                                                                                                                      |
 | `vr query "SQL"` / `vr query --schema`                               | 保存した全セッションに SQL（DuckDB）で何でも聞く。表は sessions・laps（全車）・events・corners（周ごとのコーナー）・telemetry（自車の毎フレーム）・cars（全車 10 Hz）・car_corners（全車のコーナータイム）・brakes（自車の 60 Hz のブレーキ位置）。他車との比較は corner_field（コーナーごとの最速との差と誰か）。まず集計済みの lap_stats（車ごとのベスト・安定度・終盤の落ち）と corner_stats（コーナーごとのロス合計・ベスト・全開か）を使う。読み取り専用、200 行まで |
@@ -70,8 +71,8 @@
 - `recent_events[]`: `seq`, `session_time_s`, `type`, `text`
 - `car`: 自車の詳細（`vr car` の `car` と同じ）
 
-`car`: `car{tyres{lf,rf,lr,rr}{cold_kpa,hot_kpa,temp_c[外,中,内],tread[外,中,内],carcass_c,brake_c},live,tyre_compound,warnings[],pit{...,planned,mandatory_lap},controls[]{id,value},p2p_count,p2p_active,drs_active,drs_available,tc_active,battery_pct,damage{aero,engine,suspension[4],brakes[4]},...}`, `water_temp_c`, `oil_temp_c`, `adjustments[]`。
-`tyres.live` が真なら溝と温度は今の値（AMS2）、偽ならピットで止まった時点の値（iRacing）。`damage` は 0〜1（LF・RF・LR・RR の順）。
+`car`: `car{tyres{lf,rf,lr,rr}{cold_kpa,hot_kpa,temp_c[外,中,内],tread[外,中,内],core_c,grip},live,tyre_compound,warnings[],pit{...,planned,window,mandatory_done},controls[]{id,value},p2p_count,p2p_active,drs_active,drs_available,tc_active,battery_pct,damage{front,rear,left,right,aero,engine,suspension[4],brakes[4]},penalty_s,...}`, `water_temp_c`, `oil_temp_c`, `adjustments[]`。
+`tyres.live` が真なら溝と温度は今の値（AMS2・Assetto Corsa）、偽ならピットで止まった時点の値（iRacing）。`damage` は 0〜1（四輪は LF・RF・LR・RR の順）。
 
 `handling`: `ready`, `laps_sampled`, `mean{understeer{entry,mid,exit},oversteer{...},wheelspin_s,rear_lock_s,abs_s,max_slip_deg}`, `laps[]`, `zones[]`, `controls[]`, `adjustments[]`, `advice[]{place(in_car|pit|garage),target,current,change,reason,risk}`。
 

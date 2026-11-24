@@ -2,8 +2,8 @@
 
 use vr_core::{
     CarExtra, CarState, CarTelemetry, Control, Flag, Frame, PitState, PlayerTelemetry, SessionKind,
-    SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather, Wheel,
-    Wheels,
+    SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning, Weather, Wetness,
+    Wheel, Wheels,
 };
 
 use crate::layout::VarView;
@@ -72,20 +72,10 @@ fn surface(v: Option<i32>) -> TrackSurface {
     }
 }
 
-fn wetness(v: Option<i32>) -> Option<String> {
-    Some(
-        match v? {
-            1 => "dry",
-            2 => "mostly dry",
-            3 => "very lightly wet",
-            4 => "lightly wet",
-            5 => "moderately wet",
-            6 => "very wet",
-            7 => "extremely wet",
-            _ => return None,
-        }
-        .to_string(),
-    )
+/// irsdk_TrackWetness: 1 dry .. 7 extremely wet.
+fn wetness(v: Option<i32>) -> Option<Wetness> {
+    let i = usize::try_from(v?.checked_sub(1)?).ok()?;
+    Wetness::ALL.get(i).copied()
 }
 
 /// Values iRacing uses for "unlimited" / "not set".
@@ -246,7 +236,8 @@ fn tyre(v: &VarView<'_>, corner: &str) -> Tyre {
         temp_c: across("tempC"),
         tread: across("wear"),
         distance_m: v.f64(&format!("{corner}odometer")),
-        ..Default::default()
+        core_c: None,
+        grip: None,
     }
 }
 
@@ -266,6 +257,7 @@ fn wheel(v: &VarView<'_>, corner: &str) -> Wheel {
         // Some cars have third springs ("SH") instead.
         shock_mps: of("shockVel").or_else(|| of("SHshockVel")),
         brake_bar: of("brakeLinePress"),
+        ..Default::default()
     }
 }
 
@@ -434,7 +426,10 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
                     d.car_name == player_car_name,
                 ),
                 best_lap_num: v.i32_at("CarIdxBestLapNum", i).filter(|l| *l > 0),
-                p2p_count: v.i32_at("CarIdxP2P_Count", i),
+                // Outside races iRacing counts the uses, not what is left.
+                p2p_count: v
+                    .i32_at("CarIdxP2P_Count", i)
+                    .filter(|_| kind == SessionKind::Race),
                 p2p_active: v.bool_at("CarIdxP2P_Status", i),
                 fast_repairs_used: v.i32_at("CarIdxFastRepairsUsed", i),
                 flags: personal_flags(v.i32_at("CarIdxSessionFlags", i).unwrap_or(0) as u32),
@@ -446,6 +441,10 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
     }
 
     let kg_per_l = si.fuel_kg_per_l.filter(|d| *d > 0.0);
+    let mut car = car_telemetry(v, si);
+    if kind != SessionKind::Race {
+        car.p2p_count = None;
+    }
     let player = PlayerTelemetry {
         on_track: v.bool("IsOnTrack").unwrap_or(false),
         speed_mps: v.f64("Speed"),
@@ -469,7 +468,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
             .flatten(),
         water_temp_c: v.f64("WaterTemp"),
         oil_temp_c: v.f64("OilTemp"),
-        car: car_telemetry(v, si),
+        car,
     };
 
     Frame {
@@ -509,6 +508,7 @@ pub fn build_frame(v: &VarView<'_>, si: &SessionInfo, tick: u64, timestamp_ms: i
             wind_dir_deg: v.f64("WindDir").map(|r| r.to_degrees().rem_euclid(360.0)),
             skies: skies(v.i32("Skies")),
             fog: v.f64("FogLevel"),
+            track_grip: None,
         }),
     }
 }
@@ -553,7 +553,7 @@ mod tests {
             "extremely wet",
         ];
         for (i, w) in wet.iter().enumerate() {
-            assert_eq!(wetness(Some(i as i32 + 1)).as_deref(), Some(*w));
+            assert_eq!(wetness(Some(i as i32 + 1)).map(Wetness::as_str), Some(*w));
         }
         assert_eq!(wetness(Some(0)), None);
         assert_eq!(wetness(Some(8)), None);
@@ -775,6 +775,8 @@ DriverInfo:
             arr("CarIdxLastLapTime", 4),
             arr("CarIdxBestLapTime", 4),
             arr("CarIdxF2Time", 4),
+            arr("CarIdxBestLapNum", 2),
+            arr("CarIdxP2P_Count", 2),
         ];
         if with_player_idx {
             v.push(one("PlayerCarIdx", 2));
@@ -834,7 +836,9 @@ DriverInfo:
         let one = |name, ty| Var { name, ty, count: 1 };
         let vars = [
             one("PlayerCarIdx", 2),
+            one("SessionNum", 2),
             one("SessionUniqueID", 2),
+            one("PitsOpen", 1),
             one("LFtempCL", 4),
             one("LFtempCR", 4),
             one("RFtempCL", 4),
@@ -858,6 +862,7 @@ DriverInfo:
         let mut img = Image::new(&vars, YAML);
         img.set_i32("PlayerCarIdx", 0, 1);
         img.set_i32("SessionUniqueID", 0, 3);
+        img.set_bool("PitsOpen", 0, true);
         img.set_f32("LFtempCL", 0, 88.5);
         img.set_f32("LFtempCR", 0, 97.5);
         img.set_f32("RFtempCL", 0, 99.5);
@@ -894,9 +899,13 @@ DriverInfo:
             .collect();
         assert_eq!(controls, [("brake_bias", 57.25), ("traction_control", 2.0)]);
         assert_eq!(c.p2p_count, Some(138));
+        // Outside races the count is of uses: not told as what is left.
+        img.set_i32("SessionNum", 0, 1);
+        assert_eq!(build(&img).player.unwrap().car.p2p_count, None);
         assert_eq!(c.drs_active, Some(true));
         assert_eq!(c.pit.fast_repairs_available, None);
         assert_eq!(c.pit.requested_fuel_l, Some(12.5));
+        assert_eq!(c.pit.open, Some(true));
         assert_eq!(c.delta_to_session_best_s, Some(-0.5));
         assert_eq!(c.delta_to_optimal_s, None, "not marked valid");
         let w = f.weather.unwrap();
@@ -954,6 +963,8 @@ DriverInfo:
         img.set_f32("CarIdxLastLapTime", 1, 0.001);
         img.set_f32("CarIdxBestLapTime", 1, 0.001);
         img.set_f32("CarIdxF2Time", 1, 0.0);
+        img.set_i32("CarIdxBestLapNum", 1, 1);
+        img.set_i32("CarIdxP2P_Count", 1, 12);
         // Car 3: invalid sentinels.
         img.set_i32("CarIdxPosition", 3, -1);
         img.set_i32("CarIdxClassPosition", 3, -1);
@@ -976,6 +987,15 @@ DriverInfo:
         assert_eq!(a.lap_dist_pct, Some(1.0));
         assert!(a.last_lap_s.unwrap() > 0.0 && a.best_lap_s.unwrap() > 0.0);
         assert_eq!(a.gap_to_leader_s, Some(0.0), "leader gap 0 is valid");
+        assert_eq!(
+            (a.extra.best_lap_num, a.extra.p2p_count),
+            (Some(1), Some(12))
+        );
+        assert_eq!(
+            f.car(3).unwrap().extra.best_lap_num,
+            None,
+            "0: no best lap yet"
+        );
         let b = f.car(3).unwrap();
         assert_eq!(
             (b.position, b.class_position, b.lap, b.laps_completed),
@@ -1001,6 +1021,7 @@ DriverInfo:
         let a = f.car(1).unwrap();
         assert_eq!(a.lap_dist_pct, None);
         assert_eq!(a.gap_to_leader_s, None);
+        assert_eq!(a.extra.p2p_count, None, "uses, not what is left");
 
         // Delta is reported when valid.
         img.set_bool("LapDeltaToBestLap_OK", 0, true);

@@ -16,9 +16,6 @@ exclude_re = [
     # vr-iracing::open_live, vr-ams2::open_live: open the live mapping (see
     # above).
     'replace open_live ',
-    # Reads the user's documents folder, which CI does not have; what is
-    # found there is decided (and tested) in SourceArgs::recordings_in.
-    'replace SourceArgs::recordings -> ',
     # Equivalent: the fuel baseline is only ever read for the player's car,
     # so also storing it for other cars is unobservable.
     'replace match guard is_player with true in RaceState::track_laps',
@@ -90,6 +87,11 @@ exclude_re = [
     'replace App::boot',
     'replace (main|ask_once) ',
     'in (main|ask_once)$',
+    # vr-ac: the live Win32 mapping (`imp::`) and `open_live` are matched by
+    # the vr-iracing patterns above; the parsing is covered through
+    # `MemoryPages`.
+    # Equality boundary on a wall-clock silence (`elapsed() > SILENT`).
+    'replace > with >= in <impl TelemetrySource for UdpSource>::poll',
     # Equivalent: NoMic::stop already returns the default recording.
     'replace <impl Recorder for NoMic>::stop -> Recording with Default::default\(\)',
 ]

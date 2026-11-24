@@ -120,6 +120,8 @@ fn gap(number: &str, pos: u32, s: f64, trend: Option<f64>) -> GapInfo {
         live_s: Some(s),
         live_change_s: trend,
         live_ahead: None,
+        p2p_left: None,
+        p2p_active: None,
     }
 }
 
@@ -547,7 +549,7 @@ fn sector_times_and_where_time_is_lost() {
         position: None,
         session_time_s: 0.0,
     };
-    let pit = "ピットか黄旗の周は比べられない、次の周で伝える。";
+    let pit = "ピットかイエローの周は比べられない、次の周で伝える。";
     m.laps = vec![("".into(), lap(true))];
     assert_eq!(say(&m, SpeechTopic::Losing), pit);
     let them = m.sectors.as_ref().unwrap().versus.clone().unwrap().number;
@@ -724,11 +726,11 @@ fn flags_and_weather() {
     m.brief.session.as_mut().unwrap().flags = vec![Flag::Green, Flag::Blue, Flag::Debris];
     assert_eq!(
         say(&m, SpeechTopic::Flags),
-        "青旗、後ろに譲ろう。落下物に注意。"
+        "ブルーフラッグ、後ろに譲ろう。デブリに注意。"
     );
     assert_eq!(say(&m, SpeechTopic::Weather), "天気は取れていない。");
     m.brief.weather = Some(Weather {
-        wetness: Some("lightly wet".into()),
+        wetness: Some(vr_core::Wetness::LightlyWet),
         precipitation: Some(0.31),
         ..Default::default()
     });
@@ -753,15 +755,19 @@ fn flags_and_weather() {
     let w = m.brief.weather.as_mut().unwrap();
     w.precipitation = Some(0.0);
     assert!(say(&m, SpeechTopic::Weather).ends_with("濡れてる。雨は無い。"));
-    m.brief.weather.as_mut().unwrap().wetness = Some("dry".into());
+    m.brief.weather.as_mut().unwrap().wetness = Some(vr_core::Wetness::Dry);
     assert_eq!(say(&m, SpeechTopic::Weather), "ドライ、雨は無い。");
     m.brief.weather.as_mut().unwrap().track_temp_c = Some(31.4);
     assert_eq!(
         say(&m, SpeechTopic::Weather),
         "ドライ、雨は無い。路面31度。"
     );
-    m.brief.weather.as_mut().unwrap().wetness = Some("damp".into());
-    assert!(say(&m, SpeechTopic::Weather).ends_with("雨は無い。路面31度。"));
+    m.brief.weather.as_mut().unwrap().wetness = Some(vr_core::Wetness::ExtremelyWet);
+    assert!(
+        say(&m, SpeechTopic::Weather).starts_with("路面は水浸し。"),
+        "{}",
+        say(&m, SpeechTopic::Weather)
+    );
     m.brief.weather = Some(Weather::default());
     assert_eq!(say(&m, SpeechTopic::Weather), "天気は取れていない。");
 }
@@ -784,10 +790,31 @@ fn damage_is_a_verdict() {
         m.brief.player.as_mut().unwrap().last_lap_s = last;
         say(m, SpeechTopic::Damage)
     };
-    let slow = "ダメージでペースが落ちてる、ピットで直そう。";
     assert_eq!(lap(&mut m, Some(115.83)), light);
-    assert_eq!(lap(&mut m, Some(115.85)), slow);
-    assert_eq!(lap(&mut m, None), "ダメージがある、1周様子を見よう。");
+    // 1.0 s a lap over the 5.2 laps of 605 s left is less than a stop.
+    assert_eq!(
+        lap(&mut m, Some(115.85)),
+        "ダメージで毎周1.0秒落ち。残り6周なら直さない方が速い、このまま行こう。"
+    );
+    // Over 40 laps it is more.
+    m.brief.session.as_mut().unwrap().laps_remaining = Some(40);
+    assert_eq!(
+        lap(&mut m, Some(115.85)),
+        "ダメージで毎周1.0秒落ちてる。直した方が速い、ピットで直そう。"
+    );
+    // 1.01 s over 24 laps is 24.2 s, less than the 25 s stop; over 25 it is more.
+    m.brief.session.as_mut().unwrap().laps_remaining = Some(24);
+    assert_eq!(
+        lap(&mut m, Some(115.85)),
+        "ダメージで毎周1.0秒落ち。残り24周なら直さない方が速い、このまま行こう。"
+    );
+    m.brief.session.as_mut().unwrap().laps_remaining = Some(25);
+    assert!(lap(&mut m, Some(115.85)).ends_with("ピットで直そう。"));
+    m.brief.session.as_mut().unwrap().laps_remaining = None;
+    assert_eq!(
+        lap(&mut m, None),
+        "ダメージがある。まだ周のタイムが無い、次の周で影響を伝える。"
+    );
     m.car.car.as_mut().unwrap().warnings.clear();
     assert_eq!(lap(&mut m, None), fine);
     m.car.car.as_mut().unwrap().pit.optional_repair_left_s = Some(0.5);

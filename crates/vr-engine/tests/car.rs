@@ -85,7 +85,7 @@ impl Sim {
             }),
             cars: vec![car(1)],
             weather: Some(Weather {
-                wetness: Some("dry".into()),
+                wetness: Some(vr_core::Wetness::Dry),
                 ..Default::default()
             }),
         };
@@ -461,7 +461,7 @@ fn weather_changes_are_events() {
     s.frame.weather = None;
     s.run(0.1, |_, _| {});
     s.frame.weather = Some(Weather {
-        wetness: Some("lightly wet".into()),
+        wetness: Some(vr_core::Wetness::LightlyWet),
         ..Default::default()
     });
     s.run(0.1, |_, _| {});
@@ -870,16 +870,27 @@ fn live_tyres_damage_and_what_ams2_adds() {
     c.tyres.live = true;
     c.tyres.lf.tread = [None, Some(0.75), None];
     c.tyres.lf.temp_c = [Some(80.0), Some(85.0), Some(90.0)];
-    c.tyres.lf.carcass_c = Some(95.4);
-    c.tyres.lf.brake_c = Some(452.6);
+    c.tyres.lf.core_c = Some(95.4);
+    c.wheels = Some(Wheels {
+        lf: Wheel {
+            brake_temp_c: Some(452.6),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
     c.damage = Some(Damage {
         aero: Some(0.25),
         engine: Some(0.0),
         suspension: [Some(0.0), None, None, Some(0.6)],
         brakes: [Some(0.1), Some(0.0), None, None],
+        ..Default::default()
     });
     c.pit.planned = Some("drive through".into());
-    c.pit.mandatory_lap = Some(12);
+    c.pit.window = Some(PitWindow {
+        from: 12.0,
+        to: 12.0,
+        unit: WindowUnit::Lap,
+    });
     c.drs_active = Some(false);
     c.drs_available = Some(true);
     c.tc_active = Some(true);
@@ -887,14 +898,15 @@ fn live_tyres_damage_and_what_ams2_adds() {
     s.run(DT, |_, _| {});
 
     let brief = s.st.brief().unwrap().to_text();
-    let want = "car: damage aero 25% | RR suspension 60% | LF brake 10% | Soft LF 75% (now)\n";
+    let want = "car: damage RR suspension 60%, aero 25%, LF brake 10% | Soft LF 75% (now)\n";
     assert!(brief.contains(want), "{brief}");
     let text = s.st.car().unwrap().to_text();
     for want in [
         "tyres: Soft (tread and temperatures are now)\n",
-        "  LF: tread --/75/--% | 80/85/90C (outer/middle/inner) | carcass 95C | brake 453C\n",
-        "pit: -- | due in: drive through | mandatory stop on lap 12\n",
-        "damage to the car: aero 25% | RR suspension 60% | LF brake 10%\n",
+        "  LF: tread --/75/--% | 80/85/90C (outer/middle/inner) | core 95C\n",
+        "brakes: LF 453C\n",
+        "pit: -- | due in: drive through | window lap 12-12\n",
+        "damage RR suspension 60%, aero 25%, LF brake 10%\n",
         "DRS closed (available) | battery --\n",
     ] {
         assert!(text.contains(want), "{want}\n{text}");
@@ -915,7 +927,7 @@ fn live_tyres_damage_and_what_ams2_adds() {
     c.drs_available = Some(false);
     s.run(DT, |_, _| {});
     let text = s.st.car().unwrap().to_text();
-    assert!(text.contains("damage to the car: none\n"), "{text}");
+    assert!(!text.contains("damage RR"), "{text}");
     assert!(text.contains("DRS closed | battery --\n"), "{text}");
     let brief = s.st.brief().unwrap().to_text();
     assert!(!brief.contains("damage"), "{brief}");
@@ -930,7 +942,5 @@ fn live_tyres_damage_and_what_ams2_adds() {
     );
     s.p().car.damage = None;
     s.run(DT, |_, _| {});
-    let text = s.st.car().unwrap().to_text();
-    assert!(!text.contains("damage to the car"), "{text}");
     assert_eq!(s.st.live().unwrap().values.get("damage"), None);
 }

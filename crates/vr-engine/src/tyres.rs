@@ -31,10 +31,7 @@ pub(crate) fn field_tyres(state: &RaceState, f: &Frame) -> Vec<TyreGroup> {
 }
 
 fn wet(w: &vr_core::Weather) -> bool {
-    w.declared_wet == Some(true)
-        || w.wetness
-            .as_deref()
-            .is_some_and(|s| s != "dry" && s != "mostly dry")
+    w.declared_wet == Some(true) || w.wetness.is_some_and(vr_core::Wetness::is_wet)
 }
 
 /// A car's pace on the tyres it is on: its clean laps since the last stop.
@@ -105,6 +102,21 @@ fn groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wet_when_declared_or_wet_enough() {
+        use vr_core::{Weather, Wetness};
+        let w = |declared, wetness| Weather {
+            declared_wet: declared,
+            wetness,
+            ..Default::default()
+        };
+        assert!(!wet(&Weather::default()));
+        assert!(wet(&w(Some(true), None)));
+        assert!(!wet(&w(Some(false), Some(Wetness::MostlyDry))));
+        assert!(wet(&w(Some(false), Some(Wetness::VeryLightlyWet))));
+        assert!(wet(&w(None, Some(Wetness::LightlyWet))));
+    }
 
     fn lap(lap: i32, t: f64, pit: bool) -> LapRecord {
         LapRecord {

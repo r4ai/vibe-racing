@@ -127,7 +127,7 @@ UDP にだけある値は、各車の今の周のタイムと最後のセクタ�
 | `mFastestSector1〜3Time`（セッション最速）                          | channel                                                                                                                                                               |
 | `mPitMode`                                                          | `pit.in_stall`・`pit.service_active`（停止中）                                                                                                                        |
 | `mPitSchedule`                                                      | `pit.planned`（自分・エンジニア・損傷・義務・ドライブスルー・ストップ＆ゴー・枠の空き待ち）                                                                           |
-| `mEnforcedPitStopLap`                                               | `pit.mandatory_lap`                                                                                                                                                   |
+| `mEnforcedPitStopLap`                                               | `pit.window`（その周だけの窓）                                                                                                                                        |
 | `mCarFlags`                                                         | ABS → `abs_active`、TCS → `tc_active`、リミッター → `pit_limiter`、エンジン警告 → `engine`、エンジン停止（走行中）→ `stalled`。ライト・サイドブレーキ・SCS は channel |
 | `mOilTempCelsius`・`mWaterTempCelsius`                              | `oil_temp_c`・`water_temp_c`                                                                                                                                          |
 | `mOilPressureKPa`・`mFuelPressureKPa`                               | `oil_press_bar`・`fuel_press_bar`                                                                                                                                     |
@@ -164,31 +164,32 @@ UDP にだけある値は、各車の今の周のタイムと最後のセクタ�
 
 AMS2 のタイヤの値は走行中も変わる（`Tyres.live`）。
 
-| 項目                                                                            | 扱い                                                         |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `mTyreTempLeft`・`Center`・`Right`                                              | `temp_c`（外・中・内。右のタイヤは左右を入れ替え）           |
-| `mTyreTemp`                                                                     | 上が未設定（0）のときの `temp_c` の中                        |
-| `mTyreTreadTemp`・`mTyreLayerTemp`・`mTyreRimTemp`・`mTyreInternalAirTemp`      | channel（ケルビン）                                          |
-| `mTyreCarcassTemp`                                                              | `Tyre.carcass_c`                                             |
-| `mTyreWear`                                                                     | `tread` の中（1 − 摩耗）                                     |
-| `mAirPressure`                                                                  | `hot_kpa`・車輪の `pressure_kpa`（70 未満は PSI として換算） |
-| `mBrakeTempCelsius`                                                             | `Tyre.brake_c`                                               |
-| `mTyreCompound`                                                                 | `tyre_compound`（前後で違えば「前/後」）                     |
-| `mTyreFlags`                                                                    | 外れた・空気の抜けたタイヤは警告 `flat_tyre`、channel        |
-| `mTerrain`                                                                      | 4 輪とも舗装外なら自車の `surface=off_track`、channel        |
-| `mTyreRPS`                                                                      | 車輪の `speed_mps`（上記）、channel                          |
-| `mRideHeight`                                                                   | 車輪の `ride_height_m`（1 を超える値は cm として換算）       |
-| `mSuspensionVelocity`                                                           | 車輪の `shock_mps`                                           |
-| `mSuspensionTravel`・`mWheelLocalPositionY`・`mTyreY`・`mTyreHeightAboveGround` | channel                                                      |
-| `mTyreSlipSpeed`・`mTyreGrip`・`mTyreLateralStiffness`                          | 廃止された項目。channel にも出さない                         |
+| 項目                                                                       | 扱い                                                         |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `mTyreTempLeft`・`Center`・`Right`                                         | `temp_c`（外・中・内。右のタイヤは左右を入れ替え）           |
+| `mTyreTemp`                                                                | 上が未設定（0）のときの `temp_c` の中                        |
+| `mTyreTreadTemp`・`mTyreLayerTemp`・`mTyreRimTemp`・`mTyreInternalAirTemp` | channel（ケルビン）                                          |
+| `mTyreCarcassTemp`                                                         | `Tyre.core_c`                                                |
+| `mTyreWear`                                                                | `tread` の中（1 − 摩耗）                                     |
+| `mAirPressure`                                                             | `hot_kpa`・車輪の `pressure_kpa`（70 未満は PSI として換算） |
+| `mBrakeTempCelsius`                                                        | 車輪の `brake_temp_c`                                        |
+| `mTyreCompound`                                                            | `tyre_compound`（前後で違えば「前/後」）                     |
+| `mTyreFlags`                                                               | 外れた・空気の抜けたタイヤは警告 `flat_tyre`、channel        |
+| `mTerrain`                                                                 | 4 輪とも舗装外なら自車の `surface=off_track`、channel        |
+| `mTyreRPS`                                                                 | 車輪の `speed_mps`（上記）、channel                          |
+| `mRideHeight`                                                              | 車輪の `ride_height_m`（1 を超える値は cm として換算）       |
+| `mSuspensionVelocity`                                                      | 車輪の `shock_mps`                                           |
+| `mSuspensionTravel`                                                        | 車輪の `travel_m`                                            |
+| `mWheelLocalPositionY`・`mTyreY`・`mTyreHeightAboveGround`                 | channel                                                      |
+| `mTyreSlipSpeed`・`mTyreGrip`・`mTyreLateralStiffness`                     | 廃止された項目。channel にも出さない                         |
 
 ### 損傷
 
-| 項目                                | 扱い                                                               |
-| ----------------------------------- | ------------------------------------------------------------------ |
-| `mAeroDamage`・`mEngineDamage`      | `CarTelemetry.damage`（0〜1）。どれかが 0 を超えると警告 `damage`  |
-| `mBrakeDamage`・`mSuspensionDamage` | `damage.brakes`・`damage.suspension`（LF・RF・LR・RR）             |
-| `mCrashState`                       | コース外（`CRASH_DAMAGE_OFFTRACK`）は `surface=off_track`、channel |
+| 項目                                | 扱い                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------ |
+| `mAeroDamage`・`mEngineDamage`      | `damage.aero`・`damage.engine`（0〜1）。どこかが 0.2 以上で警告 `damage` |
+| `mBrakeDamage`・`mSuspensionDamage` | `damage.brakes`・`damage.suspension`（LF・RF・LR・RR）                   |
+| `mCrashState`                       | コース外（`CRASH_DAMAGE_OFFTRACK`）は `surface=off_track`、channel       |
 
 ### 天候
 

@@ -16,9 +16,11 @@ pub enum Game {
     /// Automobilista 2 via its shared memory in "Project CARS 2" mode
     /// (Windows).
     Ams2,
-    /// Whichever live game is in a session (the default).
-    #[value(skip)]
-    Auto,
+    /// Assetto Corsa via its shared memory (Windows), with every car when
+    /// CrewChief's in-game app runs.
+    Ac,
+    /// Assetto Corsa's UDP telemetry from the game's PC (`--host`), from any OS.
+    AcUdp,
     /// Replay an NDJSON file recorded with `vr record` / `vr serve --record`.
     Replay,
     /// A generated demo race (no game needed).
@@ -28,9 +30,13 @@ pub enum Game {
 #[derive(Debug, Clone, Args)]
 pub struct SourceArgs {
     /// Telemetry source. Without it, query commands use a running `vr serve`
-    /// and fall back to a one-shot read of whichever live game is running.
+    /// and fall back to a one-shot read of the game in a session: iRacing,
+    /// Automobilista 2 or Assetto Corsa.
     #[arg(long, value_enum, global = true)]
     pub game: Option<Game>,
+    /// The game's PC for `--game ac-udp` (port 9996 unless given).
+    #[arg(long, global = true, default_value = "127.0.0.1")]
+    pub host: String,
     /// Recording to replay (implies `--game replay`).
     #[arg(long, global = true)]
     pub file: Option<PathBuf>,
@@ -51,33 +57,48 @@ impl SourceArgs {
         match (self.game, &self.file) {
             (Some(g), _) => g,
             (None, Some(_)) => Game::Replay,
-            (None, None) => Game::Auto,
+            (None, None) => Game::Iracing,
         }
     }
 
-    /// Where the game leaves telemetry files behind.
-    pub fn recordings(&self) -> Option<PathBuf> {
-        self.recordings_in(&dirs::document_dir()?)
-    }
-
-    fn recordings_in(&self, documents: &std::path::Path) -> Option<PathBuf> {
+    /// Where the game leaves telemetry files behind, in the user's documents.
+    pub fn recordings(&self, documents: Option<&std::path::Path>) -> Option<PathBuf> {
         match self.game() {
-            Game::Iracing | Game::Auto => Some(vr_iracing::telemetry_dir(documents)),
-            // Automobilista 2 leaves no telemetry files.
-            Game::Ams2 | Game::Replay | Game::Synthetic => None,
+            Game::Iracing => Some(vr_iracing::telemetry_dir(documents?)),
+            // Automobilista 2 and Assetto Corsa leave no telemetry files.
+            Game::Ams2 | Game::Ac | Game::AcUdp | Game::Replay | Game::Synthetic => None,
         }
     }
 
-    /// Whether `vr serve` keeps the sessions: those of live games, unless
-    /// told not to. Demo races are not the driver's.
+    /// The game's recordings that `vr serve` reads in after driving: only
+    /// when it keeps the sessions and is told to import.
+    pub fn inbox(
+        &self,
+        keep: bool,
+        import: bool,
+        documents: Option<&std::path::Path>,
+    ) -> Option<PathBuf> {
+        self.recordings(documents).filter(|_| keep && import)
+    }
+
+    /// Whether `vr serve` keeps the sessions: those of real games, not the
+    /// demo or a replay, unless told not to.
     pub fn keeps_sessions(&self, no_sessions: bool) -> bool {
         !no_sessions && self.live_game()
     }
 
+    /// A game being driven, as opposed to a recording or a demo race.
+    pub fn live_game(&self) -> bool {
+        matches!(
+            self.game(),
+            Game::Iracing | Game::Ams2 | Game::Ac | Game::AcUdp
+        )
+    }
+
     pub fn source_kind(&self, live: bool) -> SourceKind {
         match self.game() {
-            Game::Iracing | Game::Ams2 | Game::Auto if live => SourceKind::Live,
-            Game::Iracing | Game::Ams2 | Game::Auto => SourceKind::Oneshot,
+            Game::Iracing | Game::Ams2 | Game::Ac | Game::AcUdp if live => SourceKind::Live,
+            Game::Iracing | Game::Ams2 | Game::Ac | Game::AcUdp => SourceKind::Oneshot,
             Game::Replay => SourceKind::Replay,
             Game::Synthetic => SourceKind::Synthetic,
         }
@@ -87,7 +108,7 @@ impl SourceArgs {
         match self.game() {
             Game::Iracing => "iracing",
             Game::Ams2 => "ams2",
-            Game::Auto => "auto",
+            Game::Ac | Game::AcUdp => vr_ac::GAME,
             Game::Replay => "replay",
             Game::Synthetic => "synthetic",
         }
@@ -97,9 +118,16 @@ impl SourceArgs {
     pub fn factory(&self, default_speed: f64) -> anyhow::Result<SourceFactory> {
         let speed = self.speed.unwrap_or(default_speed);
         Ok(match self.game() {
+            Game::Iracing if !self.explicit() => Box::new(open_any_live),
             Game::Iracing => Box::new(open_iracing),
             Game::Ams2 => Box::new(open_ams2),
-            Game::Auto => Box::new(open_any),
+            Game::Ac => Box::new(open_ac),
+            Game::AcUdp => {
+                let host = self.host.clone();
+                Box::new(move || {
+                    vr_ac::open_udp(&host).map(|s| Box::new(s) as Box<dyn TelemetrySource>)
+                })
+            }
             Game::Replay => {
                 let file = self.file.clone().ok_or_else(|| {
                     anyhow::anyhow!("--game replay needs --file <recording.ndjson>")
@@ -116,11 +144,12 @@ impl SourceArgs {
             }
         })
     }
+}
 
-    /// A live game, as opposed to a recording or a demo race.
-    pub fn live_game(&self) -> bool {
-        matches!(self.game(), Game::Iracing | Game::Ams2 | Game::Auto)
-    }
+/// A user writes the results of their sessions in their documents.
+fn open_ac() -> Result<Box<dyn TelemetrySource>, SourceError> {
+    let docs = dirs::document_dir();
+    vr_ac::open_live(docs.as_deref()).map(|s| Box::new(s) as Box<dyn TelemetrySource>)
 }
 
 fn open_iracing() -> Result<Box<dyn TelemetrySource>, SourceError> {
@@ -135,10 +164,13 @@ fn open_ams2() -> Result<Box<dyn TelemetrySource>, SourceError> {
 /// session.
 const PROBE: Duration = Duration::from_millis(100);
 
-/// The first live game that is in a session; else one that is running; else
-/// why none could be opened.
-fn open_any() -> Result<Box<dyn TelemetrySource>, SourceError> {
-    first_live(&mut [&mut open_iracing, &mut open_ams2], PROBE)
+/// The first game that is in a session (iRacing, Automobilista 2, Assetto
+/// Corsa); else one that is running; else why none could be opened.
+fn open_any_live() -> Result<Box<dyn TelemetrySource>, SourceError> {
+    first_live(
+        &mut [&mut open_iracing, &mut open_ams2, &mut open_ac],
+        PROBE,
+    )
 }
 
 type Opener<'a> = &'a mut dyn FnMut() -> Result<Box<dyn TelemetrySource>, SourceError>;
@@ -224,6 +256,96 @@ impl TelemetrySource for Primed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use std::path::Path;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        src: SourceArgs,
+    }
+
+    fn parse(args: &[&str]) -> SourceArgs {
+        Cli::parse_from(std::iter::once("vr").chain(args.iter().copied())).src
+    }
+
+    #[test]
+    fn assetto_corsa_is_a_live_game() {
+        let s = parse(&["--game", "ac"]);
+        assert_eq!(s.game(), Game::Ac);
+        assert_eq!(s.game_id(), "ac");
+        assert_eq!(s.source_kind(true), SourceKind::Live);
+        assert_eq!(s.source_kind(false), SourceKind::Oneshot);
+        assert_eq!(s.recordings(Some(Path::new("docs"))), None);
+        assert!(s.keeps_sessions(false));
+        assert!(!s.keeps_sessions(true), "--no-sessions");
+        let s = parse(&["--game", "ac-udp", "--host", "gamepc:9000"]);
+        assert_eq!((s.game(), s.host.as_str()), (Game::AcUdp, "gamepc:9000"));
+        assert_eq!(s.source_kind(true), SourceKind::Live);
+        assert!(s.keeps_sessions(false));
+        let s = parse(&[]);
+        assert_eq!(
+            s.recordings(Some(Path::new("docs"))),
+            Some(Path::new("docs").join("iRacing").join("telemetry"))
+        );
+        assert_eq!(s.recordings(None), None, "no documents");
+        let docs = Some(Path::new("docs"));
+        assert!(s.inbox(true, true, docs).is_some());
+        assert_eq!(s.inbox(false, true, docs), None, "sessions not kept");
+        assert_eq!(s.inbox(true, false, docs), None, "--no-import");
+        assert!(s.keeps_sessions(false));
+        for demo in [&["--game", "synthetic"][..], &["--file", "x.ndjson"]] {
+            let s = parse(demo);
+            assert!(!s.keeps_sessions(false), "{demo:?}");
+            assert_eq!(s.recordings(Some(Path::new("docs"))), None);
+        }
+        assert_eq!(
+            (s.game(), s.host.as_str(), s.explicit()),
+            (Game::Iracing, "127.0.0.1", false)
+        );
+    }
+
+    #[test]
+    fn neither_game_running() {
+        #[cfg(not(windows))]
+        {
+            let message = |args: &[&str]| match parse(args).factory(1.0).unwrap()() {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("a game here"),
+            };
+            // Without --game every game is looked for; with it, only one.
+            let any = message(&[]);
+            assert!(
+                any.contains("iRacing")
+                    && any.contains("Automobilista 2")
+                    && any.contains("Assetto Corsa"),
+                "{any}"
+            );
+            let one = message(&["--game", "ams2"]);
+            assert!(
+                one.contains("Automobilista 2") && !one.contains("iRacing"),
+                "{one}"
+            );
+            let one = message(&["--game", "iracing"]);
+            assert!(one.contains("iRacing") && !one.contains("Assetto"), "{one}");
+            let one = message(&["--game", "ac"]);
+            assert!(one.contains("Assetto") && !one.contains("iRacing"), "{one}");
+        }
+    }
+
+    #[test]
+    fn automobilista_2_is_a_live_game() {
+        let s = parse(&["--game", "ams2"]);
+        assert_eq!(s.game(), Game::Ams2);
+        assert_eq!(s.game_id(), "ams2");
+        assert_eq!(s.source_kind(true), SourceKind::Live);
+        assert_eq!(s.source_kind(false), SourceKind::Oneshot);
+        assert_eq!(s.recordings(Some(Path::new("docs"))), None, "no files");
+        assert!(s.keeps_sessions(false));
+        assert!(!s.keeps_sessions(true));
+        assert!(s.live_game());
+        assert!(!parse(&["--game", "synthetic"]).live_game());
+    }
 
     /// A game that answers the first poll with `first`.
     struct Fake {
@@ -349,49 +471,5 @@ mod tests {
             matches!(&e, SourceError::NotRunning(m) if m.contains("torn")),
             "{e}"
         );
-    }
-
-    #[test]
-    fn games_and_kinds() {
-        let args = |game: Option<Game>| SourceArgs {
-            game,
-            file: None,
-            speed: None,
-            until: None,
-        };
-        assert_eq!(args(None).game(), Game::Auto);
-        assert_eq!(args(None).game_id(), "auto");
-        assert_eq!(args(Some(Game::Ams2)).game_id(), "ams2");
-        assert_eq!(args(Some(Game::Ams2)).source_kind(true), SourceKind::Live);
-        assert_eq!(
-            args(Some(Game::Ams2)).source_kind(false),
-            SourceKind::Oneshot
-        );
-        assert_eq!(args(None).source_kind(true), SourceKind::Live);
-        assert_eq!(
-            args(Some(Game::Ams2)).recordings(),
-            None,
-            "AMS2 leaves no files"
-        );
-        let docs = std::path::Path::new("docs");
-        assert_eq!(
-            args(None).recordings_in(docs),
-            Some(vr_iracing::telemetry_dir(docs))
-        );
-        assert_eq!(
-            args(Some(Game::Iracing)).recordings_in(docs),
-            Some(vr_iracing::telemetry_dir(docs))
-        );
-        assert_eq!(args(Some(Game::Synthetic)).recordings_in(docs), None);
-        assert!(args(None).keeps_sessions(false));
-        assert!(args(Some(Game::Ams2)).keeps_sessions(false));
-        assert!(!args(Some(Game::Ams2)).keeps_sessions(true));
-        assert!(!args(Some(Game::Synthetic)).keeps_sessions(false));
-        assert!(args(Some(Game::Ams2)).live_game());
-        assert!(args(None).live_game());
-        assert!(!args(Some(Game::Synthetic)).live_game());
-        assert!(!args(Some(Game::Replay)).live_game());
-        assert!(Game::from_str("ams2", true).is_ok());
-        assert!(Game::from_str("auto", true).is_err(), "not offered");
     }
 }

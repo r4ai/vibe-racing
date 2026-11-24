@@ -38,7 +38,7 @@ enum Format {
 #[command(
     name = "vr",
     version,
-    about = "Race-engineer telemetry for AI agents (iRacing, Automobilista 2 and more)"
+    about = "Race-engineer telemetry for AI agents (iRacing and more)"
 )]
 #[command(
     long_about = "Reads live race telemetry and answers the questions a race engineer gets on the radio.\n\n\
@@ -324,6 +324,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 eprintln!("already served by {}", c.base());
                 return Ok(ExitCode::SUCCESS);
             }
+            // Demo races are not the driver's.
             let keep = cli.src.keeps_sessions(no_sessions);
             let record = record.map(|p| (p, record_hz));
             serve(&cli.src, port, record, keep, !no_import)
@@ -426,7 +427,7 @@ fn serve(
     };
     let collector =
         vr_server::spawn_collector(factory, state.clone(), tx.clone(), cfg, stop.clone())?;
-    if let Some(dir) = src.recordings().filter(|_| keep && import) {
+    if let Some(dir) = src.inbox(keep, import, dirs::document_dir().as_deref()) {
         inbox::spawn(dir, store.clone(), state.clone(), stop.clone());
     }
 

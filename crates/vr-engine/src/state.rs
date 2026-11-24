@@ -137,7 +137,7 @@ pub struct RaceState {
     /// Settings being turned: value and since when.
     turning: BTreeMap<String, (f64, f64)>,
     damage: BTreeSet<Warning>,
-    wetness: Option<String>,
+    wetness: Option<vr_core::Wetness>,
     fuel_warned: Option<u32>,
     fuel_checked_s: Option<f64>,
     /// Sessions that ended and were not taken away yet.
@@ -440,11 +440,11 @@ impl RaceState {
     fn detect_car_events(&mut self, frame: &Frame) {
         let t = frame.session.time_s;
         let ts = frame.timestamp_ms;
-        let wet = frame.weather.as_ref().and_then(|w| w.wetness.clone());
-        if let (Some(from), Some(to)) = (&self.wetness, &wet)
+        let wet = frame.weather.as_ref().and_then(|w| w.wetness);
+        if let (Some(from), Some(to)) = (self.wetness, wet)
             && from != to
         {
-            let (from, to) = (from.clone(), to.clone());
+            let (from, to) = (from.to_string(), to.to_string());
             let text = format!("track now {to} (was {from})");
             self.events
                 .push(t, ts, EventKind::WeatherChanged { from, to }, text);
@@ -1087,6 +1087,8 @@ impl RaceState {
             live_s: live.map(|l| l.0),
             live_change_s: live.and_then(|l| l.1),
             live_ahead: live.map(|l| l.2),
+            p2p_left: other.extra.p2p_count,
+            p2p_active: other.extra.p2p_active,
         }
     }
 

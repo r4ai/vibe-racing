@@ -124,6 +124,12 @@ pub struct GapInfo {
     /// Whether the car runs ahead at this moment, whatever the places say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_ahead: Option<bool>,
+    /// Its push-to-pass (OTS) left, and whether it is on now, where the car
+    /// has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p2p_left: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p2p_active: Option<bool>,
 }
 
 /// A car physically near the player on track (regardless of position).

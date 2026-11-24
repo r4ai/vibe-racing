@@ -16,6 +16,7 @@ struct Report {
     platform: String,
     iracing: Check,
     ams2: Check,
+    ac: Check,
     server: Check,
     skills: Vec<String>,
     hints: Vec<String>,
@@ -36,6 +37,42 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
 
     r.iracing = check(vr_iracing::open_live());
     r.ams2 = check(vr_ams2::open_live());
+
+    r.ac = match vr_ac::open_live(None) {
+        Err(e) => Check {
+            ok: false,
+            detail: e.to_string(),
+        },
+        Ok(mut s) => match s.poll(Duration::from_secs(1)) {
+            Ok(Poll::Frame(f)) => Check {
+                ok: true,
+                detail: format!(
+                    "connected: {} | session {:?} {:?} | {} cars{}",
+                    f.session.track.as_ref().map_or("?", |t| t.name.as_str()),
+                    f.session.kind,
+                    f.session.phase,
+                    f.cars.len(),
+                    if s.capabilities().multi_car {
+                        " (CrewChief app running)"
+                    } else {
+                        " (start CrewChief's in-game app for the other cars)"
+                    }
+                ),
+            },
+            Ok(Poll::Idle) => Check {
+                ok: false,
+                detail: "shared memory present but paused, replaying or idle within 1s".into(),
+            },
+            Ok(Poll::Disconnected) => Check {
+                ok: false,
+                detail: "game running but not on track".into(),
+            },
+            Err(e) => Check {
+                ok: false,
+                detail: format!("read error: {e}"),
+            },
+        },
+    };
 
     r.server = match client::server_url(server) {
         None => Check {
@@ -83,6 +120,7 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
             println!("vr {} ({})", r.version, r.platform);
             println!("{}iracing: {}", mark(&r.iracing), r.iracing.detail);
             println!("{}ams2:    {}", mark(&r.ams2), r.ams2.detail);
+            println!("{}ac:      {}", mark(&r.ac), r.ac.detail);
             println!("{}server:  {}", mark(&r.server), r.server.detail);
             if r.skills.is_empty() {
                 println!("-- skill:   not installed");
@@ -98,15 +136,15 @@ pub fn run(server: Option<&str>, fmt: Format) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// What to do about what does not work.
+/// What to do about what is not working.
 fn hints(r: &Report) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+    let mut out = Vec::new();
     if !r.server.ok {
         out.push("run `vr serve` in a separate terminal while racing for lap history, fuel averages and gap trends".into());
     }
-    if !r.iracing.ok && !r.ams2.ok {
+    if !r.iracing.ok && !r.ams2.ok && !r.ac.ok {
         out.push(
-            "no live iRacing or Automobilista 2 session; `vr serve --game synthetic --speed 10` gives a demo race"
+            "no live iRacing, Automobilista 2 or Assetto Corsa session; `vr serve --game synthetic --speed 10` gives a demo race"
                 .into(),
         );
     }
@@ -162,7 +200,47 @@ fn check<S: TelemetrySource>(opened: Result<S, SourceError>) -> Check {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vr_core::{Capabilities, SourceError};
+    use vr_core::Capabilities;
+
+    #[test]
+    fn hints_for_what_is_missing() {
+        let ok = || Check {
+            ok: true,
+            detail: String::new(),
+        };
+        let all = Report {
+            iracing: ok(),
+            ams2: ok(),
+            ac: ok(),
+            server: ok(),
+            skills: vec!["claude: x".into()],
+            ..Default::default()
+        };
+        assert!(hints(&all).is_empty());
+        let game = |iracing: bool, ams2: bool, ac: bool| {
+            let r = Report {
+                iracing: Check {
+                    ok: iracing,
+                    ..ok()
+                },
+                ams2: Check { ok: ams2, ..ok() },
+                ac: Check { ok: ac, ..ok() },
+                server: ok(),
+                skills: vec!["x".into()],
+                ..Default::default()
+            };
+            hints(&r)
+                .iter()
+                .any(|h| h.contains("no live iRacing, Automobilista 2 or Assetto Corsa"))
+        };
+        assert!(!game(true, false, false), "iRacing is enough");
+        assert!(!game(false, true, false), "Automobilista 2 is enough");
+        assert!(!game(false, false, true), "Assetto Corsa is enough");
+        assert!(game(false, false, false));
+        let none = hints(&Report::default());
+        assert_eq!(none.len(), 3, "{none:?}");
+        assert!(none[0].contains("vr serve") && none[2].contains("vr skill install"));
+    }
 
     struct Once(Option<Result<Poll, SourceError>>);
 
@@ -183,38 +261,31 @@ mod tests {
     }
 
     #[test]
-    fn hints_for_what_does_not_work() {
-        let ok = |detail: &str| Check {
-            ok: true,
-            detail: detail.into(),
-        };
-        let down = |detail: &str| Check {
-            ok: false,
-            detail: detail.into(),
-        };
-        let mut r = Report {
-            iracing: ok(""),
-            ams2: down("Automobilista 2 telemetry not found (... \"Project CARS 2\"?)"),
-            server: ok(""),
-            skills: vec!["claude".into()],
+    fn says_how_to_turn_on_the_ams2_memory() {
+        let r = Report {
+            ams2: Check {
+                ok: false,
+                detail: "Automobilista 2 telemetry not found (... \"Project CARS 2\"?)".into(),
+            },
             ..Default::default()
         };
-        let starts = |r: &Report| -> Vec<String> {
-            hints(r)
+        assert!(
+            hints(&r)
                 .iter()
-                .map(|h| h.chars().take(12).collect())
-                .collect()
+                .any(|h| h.starts_with("in Automobilista 2, set"))
+        );
+        let r = Report {
+            ams2: Check {
+                ok: false,
+                detail: "only on Windows".into(),
+            },
+            ..Default::default()
         };
-        assert_eq!(starts(&r), ["in Automobil"], "one game is enough");
-        r.ams2 = ok("");
-        assert!(hints(&r).is_empty());
-        r.iracing = down("");
-        r.ams2 = down("unsupported");
-        r.server = down("");
-        r.skills.clear();
-        assert_eq!(starts(&r), ["run `vr serv", "no live iRac", "install the "]);
-        r.iracing = ok("");
-        assert_eq!(starts(&r), ["run `vr serv", "install the "]);
+        assert!(
+            !hints(&r)
+                .iter()
+                .any(|h| h.starts_with("in Automobilista 2"))
+        );
     }
 
     #[test]

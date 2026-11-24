@@ -1,9 +1,9 @@
 //! Automobilista 2 shared memory → normalized [`vr_core::Frame`].
 
 use vr_core::{
-    CarExtra, CarState, CarTelemetry, Control, Damage, Flag, Frame, PitState, PlayerTelemetry,
-    SessionKind, SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres, Warning,
-    Weather, Wheel, Wheels,
+    CarExtra, CarState, CarTelemetry, Control, Damage, Flag, Frame, PitState, PitWindow,
+    PlayerTelemetry, SessionKind, SessionPhase, SessionState, TrackInfo, TrackSurface, Tyre, Tyres,
+    Warning, Weather, Wheel, Wheels, WindowUnit,
 };
 
 use crate::layout::{PARTICIPANTS, Snapshot};
@@ -235,8 +235,8 @@ fn tyre(s: &Snapshot<'_>, i: usize) -> Tyre {
             None,
         ],
         distance_m: None,
-        carcass_c: celsius(s.f64_at("mTyreCarcassTemp", i)),
-        brake_c: s.f64_at("mBrakeTempCelsius", i),
+        core_c: celsius(s.f64_at("mTyreCarcassTemp", i)),
+        grip: None,
     }
 }
 
@@ -264,7 +264,9 @@ fn wheels(s: &Snapshot<'_>, t: &mut Tracker, car_mps: f64, free: bool) -> Wheels
         ),
         ride_height_m: metres(s.f64_at("mRideHeight", i)),
         shock_mps: s.f64_at("mSuspensionVelocity", i),
-        brake_bar: None,
+        travel_m: s.f64_at("mSuspensionTravel", i),
+        brake_temp_c: s.f64_at("mBrakeTempCelsius", i),
+        ..Default::default()
     });
     for (i, wheel) in w.iter_mut().enumerate() {
         if let Some(rps) = s.f64_at("mTyreRPS", i) {
@@ -281,6 +283,7 @@ fn damage(s: &Snapshot<'_>) -> Damage {
         engine: s.f64("mEngineDamage"),
         suspension: s.tyres("mSuspensionDamage"),
         brakes: s.tyres("mBrakeDamage"),
+        ..Default::default()
     }
 }
 
@@ -581,7 +584,14 @@ pub fn build_frame(
             in_stall: pit_mode.map(|p| p == PIT_MODE_IN_PIT),
             service_active: pit_mode.map(|p| p == PIT_MODE_IN_PIT),
             planned: planned(schedule),
-            mandatory_lap: s.i32("mEnforcedPitStopLap").filter(|l| *l > 0),
+            window: s
+                .i32("mEnforcedPitStopLap")
+                .filter(|l| *l > 0)
+                .map(|l| PitWindow {
+                    from: f64::from(l),
+                    to: f64::from(l),
+                    unit: WindowUnit::Lap,
+                }),
             ..Default::default()
         },
         controls: controls(s),
@@ -1102,7 +1112,14 @@ mod tests {
         assert_eq!(c.pit.in_stall, Some(true));
         assert_eq!(c.pit.service_active, Some(true));
         assert_eq!(c.pit.planned.as_deref(), Some("player requested"));
-        assert_eq!(c.pit.mandatory_lap, Some(12));
+        assert_eq!(
+            c.pit.window,
+            Some(PitWindow {
+                from: 12.0,
+                to: 12.0,
+                unit: WindowUnit::Lap
+            })
+        );
         assert_eq!(c.drs_active, Some(false));
         assert_eq!(c.drs_available, Some(true));
         assert_eq!((c.p2p_count, c.p2p_active), (Some(42), Some(true)));
@@ -1222,9 +1239,8 @@ mod tests {
         assert_eq!(c.tyres.rf.hot_kpa, Some(180.0), "kPa");
         assert_eq!(c.tyres.lr.hot_kpa, None);
         assert_eq!(r(c.tyres.rr.hot_kpa), Some(481.944), "69.9 is psi");
-        assert_eq!(r(c.tyres.lf.carcass_c), Some(100.0));
-        assert_eq!(c.tyres.rf.carcass_c, None);
-        assert_eq!(c.tyres.lf.brake_c, Some(450.0));
+        assert_eq!(r(c.tyres.lf.core_c), Some(100.0));
+        assert_eq!(c.tyres.rf.core_c, None);
         assert_eq!(c.tyre_compound.as_deref(), Some("Soft"));
         assert_eq!(me(&f).extra.tyre_compound.as_deref(), Some("Soft"));
         let w = c.wheels.as_ref().unwrap();
@@ -1233,6 +1249,9 @@ mod tests {
         assert_eq!(r(w.lr.ride_height_m), Some(-0.02));
         assert_eq!(r(w.rr.ride_height_m), Some(1.0), "1 is not over 1");
         assert_eq!(r(w.rr.shock_mps), Some(0.2));
+        assert_eq!(w.lf.brake_temp_c, Some(450.0));
+        assert_eq!(w.rr.brake_temp_c, Some(310.0));
+        assert_eq!(w.rr.travel_m, Some(0.0));
         assert_eq!(w.lf.surface_c, [Some(80.0), Some(85.0), Some(90.0)]);
         assert_eq!(w.lf.speed_mps, None, "radius not learnt");
 
@@ -1436,7 +1455,7 @@ mod tests {
         assert_eq!(c.fuel_press_bar, Some(3.5));
         assert_eq!(c.abs_active, Some(false));
         assert_eq!((c.p2p_count, c.p2p_active), (Some(42), Some(false)));
-        assert_eq!(c.pit.mandatory_lap, None);
+        assert_eq!(c.pit.window, None);
         assert_eq!((c.drs_active, c.drs_available), (Some(false), Some(false)));
         img.set_u32("mDrsState", 0, DRS_INSTALLED | 0x04 | DRS_ACTIVE);
         img.set_u32("mCarFlags", 0, 0);

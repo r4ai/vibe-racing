@@ -124,6 +124,16 @@ fn gap_line(label: &str, g: &GapInfo, ahead: bool) -> String {
     if g.on_pit_road {
         s.push_str(" | ON PIT ROAD");
     }
+    match (g.p2p_left, g.p2p_active) {
+        (Some(n), Some(true)) => {
+            let _ = write!(s, " | P2P/OTS {n} left, ON now");
+        }
+        (Some(n), _) => {
+            let _ = write!(s, " | P2P/OTS {n} left");
+        }
+        (None, Some(true)) => s.push_str(" | P2P/OTS ON now"),
+        _ => {}
+    }
     s
 }
 
@@ -174,8 +184,8 @@ fn event_line(e: &Event) -> String {
 /// when the game says nothing about it.
 fn weather_line(w: &vr_core::Weather, trend: Option<&RainTrend>) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(wet) = &w.wetness {
-        let mut p = wet.clone();
+    if let Some(wet) = w.wetness {
+        let mut p = wet.to_string();
         let rain = w.precipitation.filter(|r| *r > 0.0);
         // When it stops, if it eases on as it does: no forecast comes from the game.
         let stops = match (rain, trend) {
@@ -211,6 +221,9 @@ fn weather_line(w: &vr_core::Weather, trend: Option<&RainTrend>) -> Option<Strin
     }
     if let Some(t) = w.track_temp_c {
         parts.push(format!("track {t:.1}C"));
+    }
+    if let Some(g) = w.track_grip {
+        parts.push(format!("grip {:.1}%", g * 100.0));
     }
     (!parts.is_empty()).then(|| format!("weather: {}", parts.join(" | ")))
 }
@@ -753,6 +766,8 @@ mod tests {
             live_s: None,
             live_change_s: None,
             live_ahead: None,
+            p2p_left: None,
+            p2p_active: None,
         }
     }
 
@@ -840,12 +855,15 @@ mod tests {
 
     #[test]
     fn weather_line_says_only_what_is_known() {
-        let w = |wetness: Option<&str>, rain: Option<f64>, air: Option<f64>, track: Option<f64>| {
+        let w = |wetness: Option<vr_core::Wetness>,
+                 rain: Option<f64>,
+                 air: Option<f64>,
+                 track: Option<f64>| {
             weather_line(
                 &vr_core::Weather {
                     air_temp_c: air,
                     track_temp_c: track,
-                    wetness: wetness.map(String::from),
+                    wetness,
                     precipitation: rain,
                     ..Default::default()
                 },
@@ -854,7 +872,7 @@ mod tests {
         };
         let trend = |per_min, direction| RainTrend { per_min, direction };
         let wet = vr_core::Weather {
-            wetness: Some("lightly wet".into()),
+            wetness: Some(vr_core::Wetness::LightlyWet),
             precipitation: Some(0.3),
             ..Default::default()
         };
@@ -869,7 +887,7 @@ mod tests {
             )
         );
         let dry = vr_core::Weather {
-            wetness: Some("dry".into()),
+            wetness: Some(vr_core::Wetness::Dry),
             precipitation: Some(0.0),
             ..Default::default()
         };
@@ -882,14 +900,29 @@ mod tests {
             Some("weather: dry (rain easing 2%/min)")
         );
         assert_eq!(
-            w(Some("lightly wet"), Some(0.2), Some(21.44), Some(29.4)).as_deref(),
+            w(
+                Some(vr_core::Wetness::LightlyWet),
+                Some(0.2),
+                Some(21.44),
+                Some(29.4)
+            )
+            .as_deref(),
             Some("weather: lightly wet (rain 20%) | air 21.4C | track 29.4C")
         );
         assert_eq!(
-            w(Some("dry"), Some(0.0), None, None).as_deref(),
+            w(Some(vr_core::Wetness::Dry), Some(0.0), None, None).as_deref(),
             Some("weather: dry")
         );
         assert_eq!(w(None, Some(0.5), None, None), None);
+        let grippy = vr_core::Weather {
+            air_temp_c: Some(20.0),
+            track_grip: Some(0.985),
+            ..Default::default()
+        };
+        assert_eq!(
+            weather_line(&grippy, None).as_deref(),
+            Some("weather: air 20.0C | grip 98.5%")
+        );
         let mut b = brief();
         assert!(!b.to_text().contains("weather"));
         b.weather = Some(vr_core::Weather {
@@ -918,6 +951,28 @@ mod tests {
                 None => assert_eq!(line, "ahead: P3 #7 D +1.23s"),
             }
         }
+    }
+
+    #[test]
+    fn the_push_to_pass_of_a_rival_is_told() {
+        let mut g = gap(None);
+        g.p2p_left = Some(64);
+        assert_eq!(
+            gap_line("ahead", &g, true),
+            "ahead: P3 #7 D +1.23s | P2P/OTS 64 left"
+        );
+        g.p2p_active = Some(true);
+        assert_eq!(
+            gap_line("ahead", &g, true),
+            "ahead: P3 #7 D +1.23s | P2P/OTS 64 left, ON now"
+        );
+        g.p2p_left = None;
+        assert_eq!(
+            gap_line("ahead", &g, true),
+            "ahead: P3 #7 D +1.23s | P2P/OTS ON now"
+        );
+        g.p2p_active = Some(false);
+        assert_eq!(gap_line("ahead", &g, true), "ahead: P3 #7 D +1.23s");
     }
 
     #[test]

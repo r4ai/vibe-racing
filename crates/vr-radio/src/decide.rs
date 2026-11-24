@@ -23,8 +23,30 @@ pub trait Decide: Send + Sync + 'static {
     /// Blocking.
     fn decide(&self, text: &str) -> Result<Found>;
 
+    /// Whether a ready-made report that tells `report` answers the call.
+    /// Blocking.
+    fn fits(&self, _text: &str, _report: &str) -> Result<bool> {
+        Ok(true)
+    }
+
     /// Opens the connection, so that the next question does not. Blocking.
     fn warm_up(&self) {}
+}
+
+/// The question whether a report answers a call.
+fn fits_question(report: &str) -> Value {
+    json!({
+        "fits": {
+            "type": "noul",
+            "instructions": format!(
+                "The race engineer would reply to this radio call with only a short ready-made report that tells {report}. Does that report answer everything the driver asks? It does not when the driver asks where, when, why, with whom or what effect something had, asks about someone else's best lap, refers back to an earlier answer, asks for a judgement, or says something the report does not cover."
+            ),
+            "criteria": {
+                "true": "The report alone answers the call",
+                "false": "The call asks for something the report does not tell",
+            },
+        },
+    })
 }
 
 /// OpenRouter's Decisions API (alpha).
@@ -120,6 +142,21 @@ impl Decide for Decisions {
         found(&http::check(resp, "decisions")?.body_mut().read_json()?)
     }
 
+    fn fits(&self, text: &str, report: &str) -> Result<bool> {
+        let resp = self
+            .agent
+            .post(format!("{}/decisions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.key))
+            .send_json(json!({
+                "model": self.model,
+                "state": { "radio_call": text },
+                "questions": fits_question(report),
+            }))?;
+        let v: Value = http::check(resp, "decisions")?.body_mut().read_json()?;
+        let p = v["answers"]["fits"]["noul"].as_f64().context("no answer")?;
+        Ok(p >= LIKELY)
+    }
+
     fn warm_up(&self) {
         // Any answer will do, it only has to be read to the end.
         if let Ok(mut resp) = self.agent.head(&self.base_url).call() {
@@ -165,6 +202,26 @@ mod tests {
         assert_eq!(body["state"]["radio_call"], "ケツが出る");
         let names: Vec<_> = body["questions"].as_object().unwrap().keys().collect();
         assert_eq!(names.len(), 5);
+    }
+
+    #[test]
+    fn asks_whether_a_report_answers_the_call() {
+        let server = fake::serve(|r| {
+            let body: Value = serde_json::from_slice(&r.body).unwrap();
+            let yes = body["state"]["radio_call"] == "ダメージは";
+            fake::Response::json(&format!(
+                r#"{{"answers":{{"fits":{{"type":"noul","noul":{}}}}}}}"#,
+                if yes { 0.9 } else { 0.1 }
+            ))
+        });
+        let d = Decisions::new(format!("{}/api/alpha", server.url), "k", "m");
+        let damage = crate::quick::about("damage");
+        assert!(d.fits("ダメージは", damage).unwrap());
+        assert!(!d.fits("どこでダメージ食らったの", damage).unwrap());
+        let reqs = server.requests.lock().unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let ask = body["questions"]["fits"]["instructions"].as_str().unwrap();
+        assert!(ask.contains("whether the car is damaged now"), "{ask}");
     }
 
     #[test]
