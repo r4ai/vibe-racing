@@ -303,6 +303,55 @@ pub struct LapsReport {
     pub laps: Vec<LapRecord>,
     pub best_lap_s: Option<f64>,
     pub avg_clean_lap_s: Option<f64>,
+    /// The pace at the start of the race against the latest, of all laps
+    /// (not only those shown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trend: Option<LapTrend>,
+}
+
+/// Clean laps at the start against the latest ones: not the first lap, not
+/// the ones a mistake made slow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LapTrend {
+    pub early_laps: (i32, i32),
+    pub early_s: f64,
+    pub recent_laps: (i32, i32),
+    pub recent_s: f64,
+}
+
+/// Laps averaged at each end.
+const TREND_LAPS: usize = 3;
+/// Slower than the median by more than this is a mistake, not the pace.
+const TREND_SLOW: f64 = 1.015;
+
+impl LapTrend {
+    /// `None` until there are enough laps for both ends.
+    pub fn of(laps: &[LapRecord]) -> Option<Self> {
+        let clean: Vec<(i32, f64)> = laps
+            .iter()
+            .filter(|l| l.is_clean() && l.lap > 1)
+            .filter_map(|l| Some((l.lap, l.time_s?)))
+            .collect();
+        let mut times: Vec<f64> = clean.iter().map(|c| c.1).collect();
+        times.sort_by(f64::total_cmp);
+        let median = *times.get(times.len() / 2)?;
+        let pace: Vec<(i32, f64)> = clean
+            .into_iter()
+            .filter(|c| c.1 <= median * TREND_SLOW)
+            .collect();
+        if pace.len() < 2 * TREND_LAPS {
+            return None;
+        }
+        let avg = |part: &[(i32, f64)]| part.iter().map(|c| c.1).sum::<f64>() / part.len() as f64;
+        let early = &pace[..TREND_LAPS];
+        let recent = &pace[pace.len() - TREND_LAPS..];
+        Some(Self {
+            early_laps: (early[0].0, early[TREND_LAPS - 1].0),
+            early_s: avg(early),
+            recent_laps: (recent[0].0, recent[TREND_LAPS - 1].0),
+            recent_s: avg(recent),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,4 +505,58 @@ pub struct HandlingReport {
 pub struct SnapshotReport {
     pub meta: Meta,
     pub frame: Option<Frame>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lap(lap: i32, time_s: f64) -> LapRecord {
+        LapRecord {
+            lap,
+            time_s: Some(time_s),
+            fuel_used_l: None,
+            pit: false,
+            caution: false,
+            position: None,
+            session_time_s: 0.0,
+        }
+    }
+
+    #[test]
+    fn the_trend_leaves_out_the_start_stops_and_mistakes() {
+        let mut laps: Vec<LapRecord> = [
+            (1, 95.0),
+            (2, 90.0),
+            (3, 90.3),
+            (4, 90.6),
+            (5, 90.6),
+            (6, 93.0),
+            (7, 90.9),
+            (8, 91.2),
+            (9, 91.0),
+        ]
+        .into_iter()
+        .map(|(l, t)| lap(l, t))
+        .collect();
+        laps[4].pit = true;
+        // The median of the clean laps is 90.9: 93.0 is a mistake.
+        let t = LapTrend::of(&laps).unwrap();
+        assert_eq!((t.early_laps, t.recent_laps), ((2, 4), (7, 9)));
+        assert!((t.early_s - 90.3).abs() < 1e-9, "{t:?}");
+        assert!((t.recent_s - 273.1 / 3.0).abs() < 1e-9, "{t:?}");
+        // One clean lap fewer, and no trend.
+        assert_eq!(LapTrend::of(&laps[..8]), None);
+        // At the limit the lap still counts, above it not.
+        let with = |slow: f64| -> Vec<LapRecord> {
+            [90.0, 90.0, 90.0, 90.0, 90.0, slow, 90.0]
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| lap(i as i32 + 2, t))
+                .collect()
+        };
+        let at = 90.0 * TREND_SLOW;
+        assert_eq!(LapTrend::of(&with(at)).unwrap().recent_laps, (6, 8));
+        assert_eq!(LapTrend::of(&with(at + 0.01)).unwrap().recent_laps, (5, 8));
+    }
 }

@@ -17,15 +17,19 @@ pub enum Topic {
     Strategy,
     /// How the laps are driven: corners, brake points, lines, time lost.
     Driving,
+    /// The whole race: every car, the laps since the start, what if. Told by
+    /// the words only, like `Driving`.
+    Race,
 }
 
 impl Topic {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Handling,
         Self::Car,
         Self::Past,
         Self::Strategy,
         Self::Driving,
+        Self::Race,
     ];
 
     fn commands(self) -> &'static [&'static str] {
@@ -42,6 +46,13 @@ impl Topic {
             Self::Strategy => &["vr strategy"],
             // The laps of the session being driven, corner by corner.
             Self::Driving => &["vr sessions corners", "vr sectors"],
+            // Every car, every lap and what happened, and where it all goes.
+            Self::Race => &[
+                "vr standings",
+                "vr laps --last 30",
+                "vr events --limit 100",
+                "vr forecast",
+            ],
         }
     }
 
@@ -54,6 +65,7 @@ impl Topic {
             Self::Past => PAST,
             Self::Strategy => STRATEGY,
             Self::Driving => DRIVING,
+            Self::Race => RACE,
         }
     }
 }
@@ -341,6 +353,58 @@ const STRATEGY: &[&str] = &[
     "ウインドウ",
 ];
 
+/// Beyond the cars around and the last laps: what goes with every question
+/// does not answer these.
+const RACE: &[&str] = &[
+    // The whole field.
+    "一番速",
+    "一番ペース",
+    "一番遅",
+    "最速",
+    "ファステスト",
+    "ファストラップ",
+    "何台",
+    "周回遅れ",
+    "全員",
+    "みんな",
+    "他の車",
+    "後ろの後ろ",
+    "前の前",
+    "その前",
+    "その後ろ",
+    "3位",
+    "三位",
+    "4位",
+    "5位",
+    "誰が",
+    // Since the start.
+    "スタート",
+    "序盤",
+    "何周目",
+    "周前",
+    "平均",
+    "これまで",
+    "今まで",
+    "上げた",
+    "下げた",
+    "何個",
+    "広が",
+    "何回出",
+    "何回入",
+    "何回あ",
+    "何回目",
+    "回数",
+    // What if, and where it goes.
+    "もし",
+    "仮に",
+    "計算",
+    "半分",
+    "捕まえ",
+    "ゴールまで",
+    "最後まで",
+    "チェッカー",
+];
+
 /// What the desk looks at, whatever it was asked: the race, the pace of
 /// everyone, where time is lost, how the car behaves.
 pub const STUDY: &[&str] = &[
@@ -540,6 +604,34 @@ mod tests {
         read(text)
             .unwrap_or_else(|| panic!("unclear: {text}"))
             .topics
+    }
+
+    #[test]
+    fn the_whole_race_comes_with_its_questions() {
+        for q in [
+            "今このレースで一番ペースいいのって誰？",
+            "後ろの後ろの車って何秒後ろ？",
+            "スタートから何個順位上げた？",
+            "俺の自己ベストって何周目に出したっけ？",
+            "毎周0.5秒速く走れたら、ゴールまでに前の車捕まえられる？",
+            "今のレース何台走ってる？周回遅れいる？",
+            "このレース、イエロー何回出た？",
+        ] {
+            assert!(topics(q).contains(&Topic::Race), "{q}");
+        }
+        assert_eq!(
+            commands(&read("トップとの差、半分になるのいつ").unwrap(), ""),
+            [
+                "vr standings",
+                "vr laps --last 30",
+                "vr events --limit 100",
+                "vr forecast"
+            ]
+        );
+        // What goes with every question answers these.
+        for q in ["前との差は", "今何位", "あと何周"] {
+            assert!(!topics(q).contains(&Topic::Race), "{q}");
+        }
     }
 
     #[test]

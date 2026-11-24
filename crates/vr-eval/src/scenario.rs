@@ -347,6 +347,8 @@ mod tests {
             "features-heldout.yaml",
             "rules.yaml",
             "strategy.yaml",
+            "complex.yaml",
+            "complex-heldout.yaml",
         ] {
             let stints = load(&dir().join(name)).unwrap();
             assert!(stints.len() >= 3, "{name}");
@@ -358,6 +360,7 @@ mod tests {
     fn held_out_words_and_voices_are_new() {
         new_to("dev.yaml", "heldout.yaml");
         new_to("features.yaml", "features-heldout.yaml");
+        new_to("complex.yaml", "complex-heldout.yaml");
     }
 
     fn new_to(known: &str, held_out: &str) {

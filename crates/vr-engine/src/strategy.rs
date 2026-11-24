@@ -102,6 +102,9 @@ pub struct Rejoin {
     pub behind_s: Option<f64>,
     /// Someone within a few seconds.
     pub traffic: bool,
+    /// Nobody stopped yet: the cost of the stop is the one the plans assume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumed_loss_s: Option<f64>,
 }
 
 /// A car near the player, and what stops could change.
@@ -720,6 +723,7 @@ fn rejoin(frame: &Frame, player: &CarState, loss: f64) -> Option<Rejoin> {
         behind: behind.map(|b| car_ref(b.1)),
         behind_s,
         traffic: [ahead_s, behind_s].iter().flatten().any(|s| *s < TRAFFIC_S),
+        assumed_loss_s: None,
     })
 }
 
@@ -892,8 +896,12 @@ pub(crate) fn strategy(state: &RaceState, prior_loss: Option<f64>) -> StrategyRe
             }
         }
     }
-    if let Some(loss) = loss {
-        report.rejoin_now = rejoin(frame, player, loss);
+    // A stop to be made: where it comes out, at the cost the plans assume.
+    if let Some(cost) = assumed {
+        report.rejoin_now = rejoin(frame, player, cost).map(|r| Rejoin {
+            assumed_loss_s: loss.is_none().then_some(cost),
+            ..r
+        });
     }
     report.rivals = rivals(frame, player, &all, mine, &pace_of, &report);
     report.calls = calls(&report, frame, lap);

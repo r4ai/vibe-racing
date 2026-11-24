@@ -1044,10 +1044,30 @@ impl RaceState {
 
         // Gap trend from samples taken at the line (seconds `other` is ahead).
         let trend_s_per_lap = self.cars.get(&other.idx).and_then(|t| {
+            // A stop of either car is no change of pace: only the samples
+            // since the lap on which the later stop was over.
+            let mine = self.cars.get(&player.idx);
+            let stop_over = |c: &CarTracker| {
+                c.laps
+                    .iter()
+                    .filter(|l| l.pit)
+                    .map(|l| l.session_time_s)
+                    .max_by(f64::total_cmp)
+            };
+            let since = match [mine, Some(t)]
+                .into_iter()
+                .flatten()
+                .filter_map(stop_over)
+                .max_by(f64::total_cmp)
+            {
+                Some(end) => Some(mine?.laps.iter().find(|l| l.session_time_s >= end)?.lap),
+                None => None,
+            };
             let s: Vec<&(i32, f64)> = t
                 .gap_samples
                 .iter()
                 .rev()
+                .take_while(|g| since.is_none_or(|lap| g.0 >= lap))
                 .take(TREND_LAPS_WINDOW + 1)
                 .collect();
             let (newest, oldest) = (s.first()?, s.last()?);

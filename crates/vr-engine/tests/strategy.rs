@@ -134,6 +134,42 @@ fn a_stop_is_placed_among_the_others() {
 }
 
 #[test]
+fn before_anyone_stopped_a_stop_is_placed_at_the_assumed_cost() {
+    // Short of fuel, and nobody stopped yet.
+    let cfg = SynthConfig {
+        fuel_start_l: 32.0,
+        fuel_capacity_l: 51.0,
+        stops: Vec::new(),
+        ..race()
+    };
+    let st = at(cfg, 8);
+    let r = st.strategy().unwrap();
+    assert_eq!(r.pit_loss.seconds, None);
+    let j = r.rejoin_now.clone().unwrap();
+    assert_eq!(j.assumed_loss_s, Some(30.0));
+    let me = st.standings(&StandingsParams::default()).unwrap();
+    let mine = me.rows.iter().find(|r| r.is_player).unwrap();
+    let after = mine.gap_to_leader_s.unwrap() + 30.0;
+    let place = me
+        .rows
+        .iter()
+        .filter(|r| !r.is_player && r.gap_to_leader_s.unwrap() <= after)
+        .count() as u32
+        + 1;
+    assert_eq!(j.position, place);
+    assert!(
+        r.to_text()
+            .contains(&format!("stopping now rejoins P{place} |")),
+        "{}",
+        r.to_text()
+    );
+    assert!(r.to_text().contains("| if the stop costs 30s (assumed)"));
+    // Measured, it says nothing of an assumption.
+    let measured = at(race(), 12).strategy().unwrap().rejoin_now.unwrap();
+    assert_eq!(measured.assumed_loss_s, None);
+}
+
+#[test]
 fn rivals_show_what_their_stops_would_do() {
     let r = at(race(), 14).strategy().unwrap();
     let behind = r.rivals.iter().find(|c| c.net_gap_s < 0.0).unwrap();

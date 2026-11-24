@@ -219,3 +219,25 @@ fn reports_roundtrip_through_json() {
     let old: Brief = serde_json::from_value(old).unwrap();
     assert_eq!(old.ahead.unwrap().live_s, None);
 }
+
+/// A stop is no change of pace: the trend of the gaps leaves it out.
+#[test]
+fn gap_trends_leave_out_the_stops() {
+    let cfg = || SynthConfig {
+        yellow: None,
+        incident_at: None,
+        rival_pit_lap: None,
+        ..SynthConfig::default()
+    };
+    // The player stops on lap 9 (about 12 to 14 minutes in) and the leader
+    // never: on the lap after, the gap to the leader has grown by the stop.
+    let leader = |until: f64| run(cfg(), Some(until)).brief().unwrap().leader.unwrap();
+    let after_stop = leader(1000.0);
+    assert_eq!(after_stop.trend_s_per_lap, None, "{after_stop:?}");
+    // A clean lap later the pace counts again: the leader is faster by tenths,
+    // not by the 25 s of the stop.
+    let later = leader(1200.0).trend_s_per_lap.unwrap();
+    assert!((0.0..1.5).contains(&later), "{later}");
+    // Before the stop there is a trend as always.
+    assert!(leader(700.0).trend_s_per_lap.is_some());
+}

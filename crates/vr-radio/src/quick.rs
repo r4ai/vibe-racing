@@ -172,6 +172,53 @@ const MORE: &[&str] = &[
     "発言",
     "全部",
     "詳しく",
+    "そいつ",
+    "あいつ",
+    "こいつ",
+    "同じ",
+    // What if: a sum to work out, not the report of now.
+    "もし",
+    "仮に",
+    "計算",
+    // How things changed over the race, or the whole field: no report of now.
+    "スタート",
+    "序盤",
+    "何個",
+    "上げた",
+    "下げた",
+    "何周目",
+    "周前",
+    "半分",
+    "平均",
+    "一番",
+    "何台",
+    "メートル",
+    // Counted over the race, or a choice between two.
+    "何回出",
+    "何回入",
+    "何回あ",
+    "何回目",
+    "回数",
+    "どっち",
+    "どちら",
+];
+
+/// Another car, or the cars: their tyres, fuel and damage are not ours.
+const OTHERS: &[&str] = &[
+    "前の車",
+    "前のやつ",
+    "前の人",
+    "後ろの車",
+    "後ろのやつ",
+    "後ろの人",
+    "トップの",
+    "1位の",
+    "一位の",
+    "首位の",
+    "相手",
+    "他の車",
+    "他車",
+    "みんな",
 ];
 
 const LEADER: &[&str] = &["トップ", "1位", "一位", "首位", "リーダー", "先頭"];
@@ -327,11 +374,51 @@ pub fn correct(text: &str) -> String {
     s
 }
 
+/// Whether `s` asks about more than one topic (「前との差は？後ろは？」): one
+/// report answers only one of them.
+fn several(s: &str) -> bool {
+    let mut found: Vec<&str> = s
+        .split(['？', '?', '。', '、', ' ', '!', '！'])
+        .filter_map(|part| fuel_lasts(part).or_else(|| topic(part)))
+        // 「今どう」 only asks for more of the same.
+        .filter(|t| *t != "status")
+        // 「前のラップは、前の車の」 is about one car.
+        .map(|t| match t {
+            "ahead-lap" => "ahead",
+            "leader-lap" => "leader",
+            "fuel-laps" => "fuel",
+            "tyre-temps" => "tyres",
+            "pace" => "lap",
+            t => t,
+        })
+        .collect();
+    found.dedup();
+    found.len() > 1
+}
+
+/// Whether the fuel lasts, asked in words that otherwise are about a stop.
+fn fuel_lasts(s: &str) -> Option<&'static str> {
+    let any = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    let ours = !any(OTHERS);
+    (ours && any(&["燃料", "ガソリン"]) && any(LASTS) || matches!(s, "完走できる" | "完走できそう"))
+        .then_some("fuel")
+}
+
+/// A span of laps (「この10周で」「5周の間」): how it changed, not how it is.
+fn over_laps(s: &str) -> bool {
+    let span = ["周で", "周間", "周の間"].iter().any(|w| s.contains(w));
+    let count = |c: char| c.is_ascii_digit() || "二三四五六七八九十".contains(c);
+    span && !s.contains("何周で") && s.chars().any(count)
+}
+
 /// What `text` is, if no model is needed for it.
 pub fn read(text: &str) -> Option<Quick> {
     let s = correct(text);
     let chars = s.chars().count();
     if chars == 0 {
+        return None;
+    }
+    if several(&s) || over_laps(&s) {
         return None;
     }
     if ACK.contains(&s.as_str()) {
@@ -348,10 +435,8 @@ pub fn read(text: &str) -> Option<Quick> {
         if any(END) {
             return Some(Quick::Say("forecast"));
         }
-        if any(&["燃料", "ガソリン"]) && any(LASTS)
-            || matches!(s.as_str(), "完走できる" | "完走できそう")
-        {
-            return Some(Quick::Say("fuel"));
+        if let Some(fuel) = fuel_lasts(&s) {
+            return Some(Quick::Say(fuel));
         }
     }
     let again = |a: &&str| s == **a || (a.chars().count() > 3 && chars <= 24 && s.contains(*a));
@@ -427,17 +512,20 @@ fn topic(s: &str) -> Option<&'static str> {
     }
     // Where, when, with whom or what it does: the state of the car is no answer.
     let cause = why || any(&["いつ", "誰", "影響", "せい", "原因", "どれだけ遅"]);
+    // The tyres, fuel or damage of another car: the reports are of ours.
+    let theirs = any(OTHERS);
     Some(if losing {
         "losing"
     } else if sectors && !why {
         "sectors"
     } else if hurt {
-        if cause {
+        if cause || theirs {
             return None;
         }
         "damage"
     } else if any(&["タイヤ"]) {
-        if !any(&["温度", "摩耗", "減り", "減って", "状態", "どう", "タイヤは"]) {
+        if theirs || !any(&["温度", "摩耗", "減り", "減って", "状態", "どう", "タイヤは"])
+        {
             return None;
         }
         if s.contains("温度") {
@@ -446,6 +534,9 @@ fn topic(s: &str) -> Option<&'static str> {
             "tyres"
         }
     } else if any(&["燃料", "ガソリン", "燃費", "フューエル"]) {
+        if theirs {
+            return None;
+        }
         if any(&[
             "何周",
             "何リッタ",
@@ -633,6 +724,48 @@ mod tests {
         assert_eq!(say("どこで失ってんの。"), Some("losing"));
         assert_eq!(say("トップ何秒。"), Some("leader"));
         assert!(TOPICS.iter().all(|t| about(t) != "something else"));
+    }
+
+    /// Calls no rule was written for: one report would answer only part of
+    /// them, or something else.
+    #[test]
+    fn complex_calls_are_for_the_agent() {
+        for q in [
+            // Two questions at once.
+            "前との差は？後ろは？",
+            "燃料あと何周で、タイヤは？",
+            "残り何周？燃料もつ？",
+            // Another car's tyres, fuel or damage.
+            "前の車のタイヤどう？",
+            "トップのタイヤは？",
+            "後ろの車、ダメージある？",
+            "前のやつ燃料もつの？",
+            // How it changed, or a sum to work out.
+            "スタートから何個順位上げた？",
+            "この10周でトップとの差どれくらい広がった？",
+            "トップとの差、半分になるのいつ？",
+            "後ろとの差、何周前から縮んでる？",
+            "トップとの差、何メートルくらい？",
+            "もし今入ったら何位？",
+            "ここ5周の平均ってどのくらい？",
+            "今一番速いの誰？",
+            // Follow-ups to the call before.
+            "後ろも同じ感じ？",
+            "そいつのベストは？",
+            // Counted, or a choice.
+            "このレース、イエロー何回出た？",
+            "前と後ろ、どっち優先？",
+        ] {
+            assert_eq!(read(q), None, "{q}");
+        }
+        // The same topic said twice, or with a word of no topic, is one question.
+        assert_eq!(say("前との差、縮まってる？"), Some("ahead"));
+        assert_eq!(say("前との差、今どう？"), Some("ahead"));
+        assert_eq!(say("トップとの差、何秒？"), Some("leader"));
+        assert_eq!(say("何周で追いつく？"), Some("ahead"));
+        assert_eq!(say("タイヤどう？"), Some("tyres"));
+        assert_eq!(say("燃料もつ？"), Some("fuel"));
+        assert_eq!(say("前の周のタイムは？"), Some("lap"));
     }
 
     fn say(text: &str) -> Option<&'static str> {

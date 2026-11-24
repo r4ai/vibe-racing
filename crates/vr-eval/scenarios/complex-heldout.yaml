@@ -1,0 +1,115 @@
+# Held-out complex set: the same kinds of calls as complex.yaml in other words
+# and voices. Not looked at while changing the radio.
+
+- id: tangle
+  world:
+    {
+      start_s: 900,
+      laps: 22,
+      tyre_deg_s: 0.09,
+      lap_noise_s: 0.4,
+      mistake_one_in: 12,
+      stops: [[0, 9], [6, 10]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: gap-both
+      say: 前との差は？後ろは？
+      voice: vv:8
+      facts: [gap_ahead, gap_behind]
+      points: [前の車との差（秒）, 後ろの車との差（秒）]
+    - id: fuel-and-tyres
+      say: 燃料あと何周で、タイヤは？
+      voice: vv:8
+      facts: [fuel_laps]
+      points: [燃料があと何周もつか, タイヤの状態（摩耗か温度）]
+    - id: leader-tyres
+      say: トップのタイヤは？
+      voice: vv:8
+      points:
+        - トップの車のタイヤについて（自分のタイヤではない）。データに無いことは作らず、ラップの落ち方などから見立てるか、分からないと言う
+    - id: third-place-gap
+      say: 3位のやつとは何秒離れてる？
+      voice: vv:8
+      points: [3 位の車との差（秒）。standings の gap から求めた値]
+
+- id: suppose
+  world:
+    {
+      start_s: 760,
+      laps: 24,
+      fuel_start_l: 38,
+      player_pit_lap: 15,
+      rival_pit_lap: 11,
+      tyre_deg_s: 0.1,
+      lap_noise_s: 0.4,
+      stops: [[1, 12], [7, 13]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: stop-now-place
+      say: 仮に次の周ボックスしたら、戻ったとき前に誰がいる？
+      voice: gemini:Puck
+      points:
+        - 今止まったときに戻る位置（strategy の rejoin と矛盾しない順位か、前に来る車）
+    - id: gap-halved
+      say: トップとの差、半分になるのいつ？
+      voice: gemini:Puck
+      facts: [gap_leader]
+      points:
+        - トップとの差が今の半分になるまでの周数の見通し（差の毎周の変化から。縮んでいなければならないこと）
+    - id: start-positions
+      say: スタートの時って何番手だった？
+      voice: gemini:Puck
+      points: [スタート時の順位（記録と矛盾しない）]
+
+- id: chain
+  world: { start_s: 700, tyre_deg_s: 0.05, lap_noise_s: 0.4, incident_at: null, yellow: null }
+  calls:
+    - id: behind-name
+      say: 後ろにいるの誰？
+      voice: vv:3
+      points: [後ろの車のドライバー名か号車]
+    - id: their-last
+      say: あいつのラップ、俺と比べてどう？
+      voice: vv:3
+      points:
+        - 後ろの車（直前の交信の車）の直近ラップと、自分の直近ラップとの比較
+    - id: same-for-leader
+      say: トップだとどう？
+      voice: vv:3
+      points:
+        - トップの車について、直前と同じ比較（ラップの比較）。トップとの差だけで終えない
+
+- id: tally
+  world:
+    {
+      start_s: 1300,
+      laps: 25,
+      fuel_start_l: 45,
+      player_pit_lap: null,
+      tyre_deg_s: 0.12,
+      lap_noise_s: 0.4,
+      mistake_one_in: 9,
+      stops: [[2, 9]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: avg-last-five
+      say: ここ5周の平均ってどのくらい？
+      voice: gemini:Fenrir
+      points: [直近 5 周の平均ラップ（laps の記録と矛盾しない）]
+    - id: since-gap
+      say: 後ろとの差、何周前から縮んでる？
+      voice: gemini:Fenrir
+      facts: [gap_behind]
+      points:
+        - 後ろとの差が縮み始めた時期か、縮んでいるかどうかと今の差。データに無い周を作らない
+    - id: rival-pit-when
+      say: 前の車のピットいつ？
+      voice: gemini:Fenrir
+      points:
+        - 前の車がピットに入ったか（入った周）、まだなら入っていないこと。events と矛盾しない

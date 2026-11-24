@@ -514,11 +514,15 @@ impl StrategyReport {
             };
             let _ = writeln!(
                 out,
-                "stopping now rejoins P{} | ahead {} | behind {}{}",
+                "stopping now rejoins P{} | ahead {} | behind {}{}{}",
                 r.position,
                 car(&r.ahead, r.ahead_s),
                 car(&r.behind, r.behind_s),
-                if r.traffic { " | TRAFFIC" } else { "" }
+                if r.traffic { " | TRAFFIC" } else { "" },
+                match r.assumed_loss_s {
+                    Some(s) => format!(" | if the stop costs {s:.0}s (assumed)"),
+                    None => String::new(),
+                }
             );
         }
         if !self.rivals.is_empty() {
