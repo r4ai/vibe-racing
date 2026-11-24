@@ -526,7 +526,8 @@ mod tests {
     #[test]
     fn the_trend_leaves_out_the_start_stops_and_mistakes() {
         let mut laps: Vec<LapRecord> = [
-            (1, 95.0),
+            // As fast as the others, but a start: never counted.
+            (1, 90.5),
             (2, 90.0),
             (3, 90.3),
             (4, 90.6),
@@ -535,16 +536,18 @@ mod tests {
             (7, 90.9),
             (8, 91.2),
             (9, 91.0),
+            // Within 1.5 % of the median of 91.0, not of the slower half.
+            (10, 92.0),
         ]
         .into_iter()
         .map(|(l, t)| lap(l, t))
         .collect();
         laps[4].pit = true;
-        // The median of the clean laps is 90.9: 93.0 is a mistake.
+        // The median of the clean laps is 91.0: 93.0 is a mistake, 92.0 not.
         let t = LapTrend::of(&laps).unwrap();
-        assert_eq!((t.early_laps, t.recent_laps), ((2, 4), (7, 9)));
+        assert_eq!((t.early_laps, t.recent_laps), ((2, 4), (8, 10)));
         assert!((t.early_s - 90.3).abs() < 1e-9, "{t:?}");
-        assert!((t.recent_s - 273.1 / 3.0).abs() < 1e-9, "{t:?}");
+        assert!((t.recent_s - 274.2 / 3.0).abs() < 1e-9, "{t:?}");
         // One clean lap fewer, and no trend.
         assert_eq!(LapTrend::of(&laps[..8]), None);
         // At the limit the lap still counts, above it not.
