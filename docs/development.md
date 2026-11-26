@@ -143,13 +143,13 @@ git diff main > mutants.diff; cargo mutants --in-diff mutants.diff -j 6
 
 `.github/workflows/ci.yml`。
 
-| ジョブ         | 内容                                                            |
-| -------------- | --------------------------------------------------------------- |
-| `test`         | fmt・clippy・テスト（Windows と Linux）                         |
-| `architecture` | crate 間依存の向き                                              |
-| `coverage`     | `cargo llvm-cov`、行 90% 未満で失敗。`lcov.info` を成果物に保存 |
-| `mutants`      | PR は差分のみ、毎週の定期実行と手動実行は全体。生存で失敗       |
-| `format`       | oxfmt                                                           |
+| ジョブ         | 内容                                                                                   |
+| -------------- | -------------------------------------------------------------------------------------- |
+| `test`         | fmt・clippy・テスト（Windows と Linux）                                                |
+| `architecture` | crate 間依存の向き                                                                     |
+| `coverage`     | `cargo llvm-cov`、行 90% 未満で失敗。`lcov.info` を成果物に保存                        |
+| `mutants`      | PR は差分のみ、毎週の定期実行と手動実行は全体。8 分割で並列、各 6 時間まで。生存で失敗 |
+| `format`       | oxfmt                                                                                  |
 
 ## 記録データ
 
