@@ -23,6 +23,9 @@ const UNDERSTEER_S: f64 = 0.9;
 const OVERSTEER_S: f64 = 0.5;
 /// One side of the balance outweighs the other by this factor.
 const CLEARLY: f64 = 1.5;
+/// Locking this many times as long on one axle: a full step of bias, not half.
+const FAR_APART: f64 = 3.0;
+const FAR_APART_S: f64 = 0.5;
 /// Across a loaded tyre, in °C: the inner edge should be a little hotter.
 const INNER_MORE_C: f64 = 9.0;
 const INNER_LESS_C: f64 = -1.0;
@@ -260,11 +263,27 @@ fn brakes(c: &Chassis, setup: Option<&Setup>) -> Option<Finding> {
         ))
     );
     let (front_first, other) = (front >= rear * CLEARLY, rear >= front * CLEARLY);
+    // The axle that locks has more brake than grip; the further apart the
+    // two axles lock, the further the share of the pressure is off.
+    let by = |more: f64, less: f64| {
+        // Far apart, and by enough to be more than a moment of locking.
+        if more >= less * FAR_APART && more - less >= FAR_APART_S {
+            "1.0"
+        } else {
+            "0.5"
+        }
+    };
+    let now = c.front_brake.map_or(String::new(), |s| {
+        format!(" from {:.1}% at the front", s * 100.0)
+    });
     let options = if front_first {
         vec![change(
             setup,
             &[Part::BrakeBias],
-            "bias rearward 0.5-1.0 % (the fronts lock first)",
+            &format!(
+                "bias rearward {} %{now} (the fronts lock first)",
+                by(front, rear)
+            ),
             "rear instability on the brakes",
         )]
     } else if other {
@@ -272,7 +291,10 @@ fn brakes(c: &Chassis, setup: Option<&Setup>) -> Option<Finding> {
             change(
                 setup,
                 &[Part::BrakeBias],
-                "bias forward 0.5-1.0 % (the rears lock first)",
+                &format!(
+                    "bias forward {} %{now} (the rears lock first)",
+                    by(rear, front)
+                ),
                 "front locking, entry understeer",
             ),
             change(
@@ -683,6 +705,14 @@ pub struct Experiment {
     pub oversteer_s: Option<f64>,
     pub wheelspin_s: Option<f64>,
     pub rear_lock_s: Option<f64>,
+    /// Oversteer and understeer on the brakes only.
+    #[serde(default)]
+    pub entry_oversteer_s: Option<f64>,
+    #[serde(default)]
+    pub entry_understeer_s: Option<f64>,
+    /// Oversteer on the throttle only.
+    #[serde(default)]
+    pub exit_oversteer_s: Option<f64>,
 }
 
 /// Laps compared on either side of a change.
@@ -769,6 +799,9 @@ pub fn experiments(
             oversteer_s: delta(&|b| b.oversteer.total()),
             wheelspin_s: delta(&|b| b.wheelspin_s),
             rear_lock_s: delta(&|b| b.rear_lock_s),
+            entry_oversteer_s: delta(&|b| b.oversteer.entry),
+            entry_understeer_s: delta(&|b| b.understeer.entry),
+            exit_oversteer_s: delta(&|b| b.oversteer.exit),
         });
     }
     out

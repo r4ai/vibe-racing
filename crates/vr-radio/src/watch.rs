@@ -251,7 +251,10 @@ impl RaceEvent {
     pub fn urgent(&self) -> bool {
         match self.kind.as_str() {
             "incident" | "damage" | "fuel_low" | WATCH => true,
-            "strategy" => matches!(self.advice(), "box_this_lap" | "answer" | "fuel_stop"),
+            "strategy" => matches!(
+                self.advice(),
+                "box_this_lap" | "stay_out" | "answer" | "fuel_stop"
+            ),
             "flag_raised" => matches!(
                 self.flag.as_deref(),
                 Some(

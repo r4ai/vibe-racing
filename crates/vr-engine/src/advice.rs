@@ -1,13 +1,140 @@
 //! Adjustments worth trying, from how the car behaves.
 //!
 //! Rules of thumb with their evidence; the engineer decides and says why.
-//! Nothing is suggested that the car cannot adjust, and only one step at a
-//! time, so that the next laps tell whether it helped.
+//! Nothing is suggested that the car cannot adjust. How far to turn a control
+//! comes from this car: the steps the driver turns it in, and what the changes
+//! made so far did to the same tendency. Without either, one step, so that the
+//! next laps tell whether it helped.
 
 use serde::{Deserialize, Serialize};
 use vr_core::{CarTelemetry, Setup};
 
+use crate::garage::Experiment;
 use crate::handling::Behaviour;
+use crate::report::Adjustment;
+
+/// What the driver changed in this car this session, and what came of it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Past<'a> {
+    pub experiments: &'a [Experiment],
+    pub adjustments: &'a [Adjustment],
+}
+
+/// Steps turned at most at once: past that, the car is another car.
+const MAX_STEPS: f64 = 3.0;
+
+/// The tendency a change is to take off, and how much of it is too much.
+struct Aim {
+    excess_s: f64,
+    effect: fn(&Experiment) -> Option<f64>,
+    what: &'static str,
+}
+
+impl Past<'_> {
+    /// The smallest turn the driver made of a control: its step.
+    fn step(&self, id: &str) -> Option<f64> {
+        self.adjustments
+            .iter()
+            .filter(|a| a.control == id)
+            .map(|a| (a.to - a.from).abs())
+            .filter(|d| *d > 1e-6)
+            .min_by(f64::total_cmp)
+    }
+
+    /// Changes of the control with what they did to the aim: value turned,
+    /// change of the tendency (negative: less of it), lap.
+    fn tried(&self, id: &str, aim: &Aim) -> Vec<(f64, f64, i32)> {
+        self.experiments
+            .iter()
+            .filter(|e| e.control == id)
+            .filter_map(|e| Some((e.to - e.from, (aim.effect)(e)?, e.lap)))
+            .filter(|(d, _, _)| d.abs() > 1e-6)
+            .collect()
+    }
+}
+
+/// `57.25`, `2`, `0.5`.
+fn fmt_fine(v: f64) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Where to turn `c` to, and why that far: `dir` is the way the value goes
+/// for the aim when it is known (+1 up), else what helped before tells.
+fn sized(
+    c: &vr_core::Control,
+    dir: Option<f64>,
+    aim: &Aim,
+    past: &Past,
+) -> Option<(String, String)> {
+    let tried = past.tried(&c.id, aim);
+    let helped: Vec<&(f64, f64, i32)> = tried.iter().filter(|t| t.1 < 0.0).collect();
+    let dir = dir.or_else(|| helped.first().map(|t| t.0.signum()))?;
+    let step = past.step(&c.id)?;
+    let mut rates: Vec<(f64, &(f64, f64, i32))> = helped
+        .iter()
+        .filter(|t| t.0.signum() == dir)
+        .map(|t| (-t.1 / t.0.abs(), *t))
+        .collect();
+    rates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // The latest change this way decides; earlier ones that disagree with
+    // each other leave one step to try, not a size to work out.
+    let this_way = tried.iter().filter(|t| t.0.signum() == dir);
+    let latest = this_way.clone().max_by_key(|t| t.2);
+    let worse = latest.filter(|t| t.1 > 0.0);
+    let mixed = this_way.clone().any(|t| t.1 > 0.0) && !rates.is_empty();
+    if mixed && worse.is_none() {
+        return Some((
+            format!("to {}", fmt_fine(c.value + dir * step)),
+            format!(
+                "the changes this way so far disagree about {}: one step of {}, and compare",
+                aim.what,
+                fmt_fine(step)
+            ),
+        ));
+    }
+    let (steps, why) = match (rates.get(rates.len() / 2), worse) {
+        (_, Some(w)) => {
+            return Some((
+                "leave it".into(),
+                format!(
+                    "turning it {} at lap {} gave {:+.1}s/lap more {}",
+                    fmt_fine(w.0),
+                    w.2,
+                    w.1,
+                    aim.what
+                ),
+            ));
+        }
+        (Some((rate, t)), _) => {
+            let steps = (aim.excess_s / rate / step).round().clamp(1.0, MAX_STEPS);
+            (
+                steps,
+                format!(
+                    "turning it {} at lap {} took {:.1}s/lap of {} off; {:.1}s/lap too much is {} step(s) of {}; a first guess, check it after 2-3 laps",
+                    fmt_fine(t.0),
+                    t.2,
+                    -t.1,
+                    aim.what,
+                    aim.excess_s,
+                    steps,
+                    fmt_fine(step)
+                ),
+            )
+        }
+        _ => (
+            1.0,
+            format!(
+                "one step of {}, as the driver turns it; nothing measured yet",
+                fmt_fine(step)
+            ),
+        ),
+    };
+    Some((
+        format!("to {}", fmt_fine(c.value + dir * steps * step)),
+        why,
+    ))
+}
 
 /// Seconds per lap from which a tendency is worth a change. Some of each is
 /// normal in a car driven at the limit.
@@ -77,11 +204,12 @@ pub fn advise(
     laps: usize,
     car: &CarTelemetry,
     setup: Option<&Setup>,
+    past: &Past,
 ) -> Vec<Advice> {
     let mut out = Vec::new();
     if laps >= MIN_LAPS {
-        brakes(b, car, &mut out);
-        traction(b, car, &mut out);
+        brakes(b, car, past, &mut out);
+        traction(b, car, past, &mut out);
         balance(b, setup, &mut out);
     }
     tyres(car, &mut out);
@@ -92,37 +220,107 @@ fn in_car(c: &vr_core::Control, change: &str, reason: String, risk: &str) -> Adv
     Advice {
         place: Place::InCar,
         target: c.id.clone(),
-        current: Some(fmt_value(c.value)),
+        current: Some(fmt_fine(c.value)),
         change: change.into(),
         reason,
         risk: risk.into(),
     }
 }
 
-fn brakes(b: &Behaviour, car: &CarTelemetry, out: &mut Vec<Advice>) {
+/// The same, sized from the car where it can be.
+fn in_car_sized(
+    c: &vr_core::Control,
+    change: &str,
+    reason: String,
+    risk: &str,
+    sizing: (Option<f64>, Aim, &Past),
+) -> Advice {
+    let (dir, aim, past) = sizing;
+    match sized(c, dir, &aim, past) {
+        Some((to, why)) => in_car(
+            c,
+            &format!("{change}: {to}"),
+            format!("{reason}; {why}"),
+            risk,
+        ),
+        None => in_car(c, &format!("one step {change}"), reason, risk),
+    }
+}
+
+fn brakes(b: &Behaviour, car: &CarTelemetry, past: &Past, out: &mut Vec<Advice>) {
+    let rear_locks = b.rear_lock_s >= REAR_LOCK_S;
+    // Entry oversteer with no locking is the engine holding the rear back
+    // where the car lets that be turned: one cause, one change at a time.
+    let engine = !rear_locks
+        && b.oversteer.entry >= ENTRY_OVERSTEER_S
+        && control(car, &["engine_brake"]).is_some();
     if let Some(c) = control(car, &["brake_bias", "brake_bias_fine"]) {
-        let locks = b.rear_lock_s >= REAR_LOCK_S || b.oversteer.entry >= ENTRY_OVERSTEER_S;
-        if locks {
-            out.push(in_car(
+        // Braking moves the load forward: the rear has the less of it the
+        // harder the car stops, and locks first when the bias is too far back.
+        if rear_locks || (b.oversteer.entry >= ENTRY_OVERSTEER_S && !engine) {
+            let aim = if rear_locks {
+                Aim {
+                    excess_s: b.rear_lock_s - REAR_LOCK_S * 0.5,
+                    effect: |e| e.rear_lock_s,
+                    what: "rear locking",
+                }
+            } else {
+                Aim {
+                    excess_s: b.oversteer.entry - ENTRY_OVERSTEER_S * 0.5,
+                    effect: |e| e.entry_oversteer_s,
+                    what: "entry oversteer",
+                }
+            };
+            out.push(in_car_sized(
                 c,
-                "forward 0.5-1.0 % (higher number)",
+                "forward (higher number)",
                 format!(
                     "rear locking {:.1}s and entry oversteer {:.1}s per lap",
                     b.rear_lock_s, b.oversteer.entry
                 ),
                 "more entry understeer, front locking",
+                (Some(1.0), aim, past),
             ));
         } else if b.understeer.entry >= ENTRY_UNDERSTEER_S {
-            out.push(in_car(
+            out.push(in_car_sized(
                 c,
-                "rearward 0.5 % (lower number)",
+                "rearward (lower number)",
                 format!(
                     "entry understeer {:.1}s per lap, no rear locking",
                     b.understeer.entry
                 ),
                 "rear instability on the brakes",
+                (
+                    Some(-1.0),
+                    Aim {
+                        excess_s: b.understeer.entry - ENTRY_UNDERSTEER_S * 0.5,
+                        effect: |e| e.entry_understeer_s,
+                        what: "entry understeer",
+                    },
+                    past,
+                ),
             ));
         }
+    }
+    if engine && let Some(c) = control(car, &["engine_brake"]) {
+        out.push(in_car_sized(
+            c,
+            "less engine braking",
+            format!(
+                "entry oversteer {:.1}s per lap without rear locking; a test, not a diagnosis: changes down, trail braking and the rear suspension do the same",
+                b.oversteer.entry
+            ),
+            "less help slowing down, the brakes work harder",
+            (
+                None,
+                Aim {
+                    excess_s: b.oversteer.entry - ENTRY_OVERSTEER_S * 0.5,
+                    effect: |e| e.entry_oversteer_s,
+                    what: "entry oversteer",
+                },
+                past,
+            ),
+        ));
     }
     if b.abs_s >= ABS_S
         && let Some(c) = control(car, &["abs"])
@@ -136,8 +334,11 @@ fn brakes(b: &Behaviour, car: &CarTelemetry, out: &mut Vec<Advice>) {
     }
 }
 
-fn traction(b: &Behaviour, car: &CarTelemetry, out: &mut Vec<Advice>) {
-    let spins = b.wheelspin_s >= WHEELSPIN_S || b.oversteer.exit >= EXIT_OVERSTEER_S;
+fn traction(b: &Behaviour, car: &CarTelemetry, past: &Past, out: &mut Vec<Advice>) {
+    // Traction control acts on wheelspin: a slide with the wheels gripping is
+    // the throttle or the balance, not a matter for it.
+    let spins = b.wheelspin_s >= WHEELSPIN_S
+        || b.oversteer.exit >= EXIT_OVERSTEER_S && b.wheelspin_s >= WHEELSPIN_S * 0.5;
     let tc = control(car, &["traction_control", "traction_control2"]);
     if spins {
         let reason = format!(
@@ -145,11 +346,29 @@ fn traction(b: &Behaviour, car: &CarTelemetry, out: &mut Vec<Advice>) {
             b.wheelspin_s, b.oversteer.exit
         );
         match (tc, control(car, &["throttle_shape"])) {
-            (Some(c), _) => out.push(in_car(
+            (Some(c), _) => out.push(in_car_sized(
                 c,
-                "one step more intervention",
+                "more intervention",
                 reason,
                 "slower exits when the grip is there",
+                (
+                    None,
+                    // What is too much decides what the change is measured by.
+                    if b.wheelspin_s >= WHEELSPIN_S {
+                        Aim {
+                            excess_s: b.wheelspin_s - WHEELSPIN_S * 0.5,
+                            effect: |e| e.wheelspin_s,
+                            what: "wheelspin",
+                        }
+                    } else {
+                        Aim {
+                            excess_s: b.oversteer.exit - EXIT_OVERSTEER_S * 0.5,
+                            effect: |e| e.exit_oversteer_s,
+                            what: "exit oversteer",
+                        }
+                    },
+                    past,
+                ),
             )),
             (None, Some(c)) => out.push(in_car(
                 c,
@@ -159,19 +378,6 @@ fn traction(b: &Behaviour, car: &CarTelemetry, out: &mut Vec<Advice>) {
             )),
             (None, None) => {}
         }
-    } else if b.understeer.exit >= UNDERSTEER_S
-        && b.wheelspin_s < 0.1
-        && let Some(c) = tc
-    {
-        out.push(in_car(
-            c,
-            "one step less intervention",
-            format!(
-                "exit understeer {:.1}s per lap with almost no wheelspin",
-                b.understeer.exit
-            ),
-            "wheelspin as the tyres wear",
-        ));
     }
     // The anti-roll bars some cars adjust from the cockpit.
     let under = b.understeer.mid + b.understeer.exit;
@@ -283,5 +489,200 @@ fn tyres(car: &CarTelemetry, out: &mut Vec<Advice>) {
                 risk: "grip in the corner against tyre life".into(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vr_core::Control;
+
+    fn tried(control: &str, from: f64, to: f64, lap: i32, rear_lock_s: f64) -> Experiment {
+        Experiment {
+            control: control.into(),
+            from,
+            to,
+            lap,
+            laps_before: 3,
+            laps_after: 3,
+            lap_time_s: None,
+            understeer_s: None,
+            oversteer_s: Some(0.0),
+            wheelspin_s: None,
+            rear_lock_s: Some(rear_lock_s),
+            entry_oversteer_s: Some(0.0),
+            entry_understeer_s: None,
+            exit_oversteer_s: None,
+        }
+    }
+
+    fn turned(control: &str, from: f64, to: f64) -> Adjustment {
+        Adjustment {
+            session_time_s: 0.0,
+            lap: Some(3),
+            control: control.into(),
+            from,
+            to,
+        }
+    }
+
+    fn bias_advice(past: &Past) -> Advice {
+        let b = Behaviour {
+            rear_lock_s: 1.0,
+            ..Default::default()
+        };
+        let car = CarTelemetry {
+            controls: vec![Control {
+                id: "brake_bias".into(),
+                value: 56.0,
+            }],
+            ..Default::default()
+        };
+        advise(&b, 3, &car, None, past).remove(0)
+    }
+
+    #[test]
+    fn how_far_comes_from_what_the_car_did() {
+        // Nothing turned yet: one step, of a size nobody knows.
+        let a = bias_advice(&Past::default());
+        assert_eq!(a.change, "one step forward (higher number)");
+        // The driver turns it in quarters: one quarter, nothing measured.
+        let adjustments = [
+            turned("brake_bias", 55.5, 55.75),
+            turned("brake_bias", 55.75, 56.0),
+        ];
+        let past = Past {
+            experiments: &[],
+            adjustments: &adjustments,
+        };
+        let a = bias_advice(&past);
+        assert_eq!(a.change, "forward (higher number): to 56.25");
+        assert!(
+            a.reason
+                .ends_with("one step of 0.25, as the driver turns it; nothing measured yet")
+        );
+        // A quarter took 0.1 s of locking off: 0.8 s too much is three steps at most.
+        let experiments = [tried("brake_bias", 55.75, 56.0, 4, -0.1)];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        let a = bias_advice(&past);
+        assert_eq!(a.change, "forward (higher number): to 56.75");
+        assert!(
+            a.reason.ends_with(
+                "turning it 0.25 at lap 4 took 0.1s/lap of rear locking off; 0.8s/lap too much is 3 step(s) of 0.25; a first guess, check it after 2-3 laps"
+            ),
+            "{}",
+            a.reason
+        );
+        // A half that took 0.8 s off: 0.8 s is two quarters.
+        let experiments = [tried("brake_bias", 55.5, 56.0, 4, -0.8)];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        assert_eq!(
+            bias_advice(&past).change,
+            "forward (higher number): to 56.5"
+        );
+        // One helped, a later one made it worse: the later one decides.
+        let experiments = [
+            tried("brake_bias", 55.5, 55.75, 4, -0.3),
+            tried("brake_bias", 55.75, 56.0, 7, 0.2),
+        ];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        assert_eq!(
+            bias_advice(&past).change,
+            "forward (higher number): leave it"
+        );
+        // A later one helped after one that did not: one step, and compare.
+        let experiments = [
+            tried("brake_bias", 55.5, 55.75, 4, 0.2),
+            tried("brake_bias", 55.75, 56.0, 7, -0.3),
+        ];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        let a = bias_advice(&past);
+        assert_eq!(a.change, "forward (higher number): to 56.25");
+        assert!(a.reason.ends_with("the changes this way so far disagree about rear locking: one step of 0.25, and compare"), "{}", a.reason);
+        // Forward made it worse: not again.
+        let experiments = [tried("brake_bias", 55.5, 56.0, 4, 0.3)];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        let a = bias_advice(&past);
+        assert_eq!(a.change, "forward (higher number): leave it");
+        assert!(
+            a.reason
+                .ends_with("turning it 0.5 at lap 4 gave +0.3s/lap more rear locking")
+        );
+    }
+
+    #[test]
+    fn entry_oversteer_without_locking_is_one_change() {
+        let b = Behaviour {
+            oversteer: crate::handling::Phases {
+                entry: 0.6,
+                mid: 0.0,
+                exit: 0.0,
+            },
+            ..Default::default()
+        };
+        let control = |id: &str| Control {
+            id: id.into(),
+            value: 3.0,
+        };
+        let mut car = CarTelemetry {
+            controls: vec![control("brake_bias"), control("engine_brake")],
+            ..Default::default()
+        };
+        let a = advise(&b, 3, &car, None, &Past::default());
+        let targets: Vec<&str> = a.iter().map(|a| a.target.as_str()).collect();
+        assert_eq!(targets, ["engine_brake"]);
+        assert_eq!(a[0].change, "one step less engine braking");
+        // Without engine braking to turn, the bias.
+        car.controls.pop();
+        let a = advise(&b, 3, &car, None, &Past::default());
+        let targets: Vec<&str> = a.iter().map(|a| a.target.as_str()).collect();
+        assert_eq!(targets, ["brake_bias"]);
+    }
+
+    #[test]
+    fn traction_control_is_for_wheelspin() {
+        let tc = |wheelspin_s: f64, exit: f64| {
+            let b = Behaviour {
+                wheelspin_s,
+                oversteer: crate::handling::Phases {
+                    entry: 0.0,
+                    mid: 0.0,
+                    exit,
+                },
+                ..Default::default()
+            };
+            let car = CarTelemetry {
+                controls: vec![Control {
+                    id: "traction_control".into(),
+                    value: 2.0,
+                }],
+                ..Default::default()
+            };
+            advise(&b, 3, &car, None, &Past::default())
+                .into_iter()
+                .map(|a| a.change)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(tc(0.8, 0.0), ["one step more intervention"]);
+        // A slide with some spin is the spin's.
+        assert_eq!(tc(0.4, 0.8), ["one step more intervention"]);
+        // A slide with the wheels gripping is not.
+        assert!(tc(0.39, 2.0).is_empty());
+        assert!(tc(0.79, 0.0).is_empty());
     }
 }

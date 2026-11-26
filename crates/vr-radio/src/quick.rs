@@ -18,7 +18,7 @@ pub enum Quick {
 }
 
 /// The topics of `vr say`.
-pub const TOPICS: [&str; 20] = [
+pub const TOPICS: [&str; 21] = [
     "status",
     "position",
     "ahead",
@@ -39,6 +39,7 @@ pub const TOPICS: [&str; 20] = [
     "losing",
     "fuel-laps",
     "tyre-temps",
+    "box",
 ];
 
 /// Longer questions are about more than one thing.
@@ -72,6 +73,7 @@ const PART: &[(&str, &str)] = &[
     ("1との", "1位との"),
     ("お前との", "前との"),
     ("前回の前のやつ", "前の車"),
+    ("追い付", "追いつ"),
 ];
 
 /// Where the words begin or end with nothing.
@@ -268,6 +270,68 @@ const AGAIN: &[&str] = &[
     "リピート",
 ];
 
+/// Whether to come in now: 「ピット？」「入る？」「ボックス？」.
+const PIT_ASK: &[&str] = &[
+    "ピット",
+    "ボックス",
+    "ステイアウト",
+    "入る",
+    "入ろう",
+    "入った方",
+    "入ったほう",
+    "入っていい",
+    "入るべき",
+];
+/// About the stop, but not whether to make it now.
+const PIT_ELSE: &[&str] = &[
+    "ロス",
+    "何秒",
+    "誰",
+    "なんで",
+    "なぜ",
+    "アンダーカット",
+    "オーバーカット",
+    "タイヤ",
+    "燃料",
+    "ガソリン",
+    "給油",
+    "修理",
+    "作業",
+    "速度",
+    "リミッター",
+    "何位",
+    "順位",
+    "戻",
+    "出た",
+    "入った？",
+    "入ってる",
+    "曲が",
+    "フロント",
+    "リア",
+    "ブレーキ",
+    // Another stop than the one planned.
+    "もう一回",
+    "もう1回",
+    "もう一度",
+];
+/// Short enough to be the question alone.
+const PIT_CHARS: usize = 12;
+
+/// Complaints that something does not work: the driver wants a way out of it,
+/// not the report of how things are.
+const STUCK: &[&str] = &[
+    "追いつかない",
+    "追いつけない",
+    "追いつかん",
+    "追いつかね",
+    "追いつけね",
+    "抜けない",
+    "抜けね",
+    "抜けん",
+    "届かない",
+    "速すぎ",
+];
+
 /// Full-width letters and digits to ASCII, lower case, no spaces at the ends
 /// and no punctuation.
 fn plain(text: &str) -> String {
@@ -428,6 +492,19 @@ pub fn read(text: &str) -> Option<Quick> {
         return Some(Quick::Here(text));
     }
     let any = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    if any(STUCK) {
+        return None;
+    }
+    // Asked at speed in a word or two: box or stay out, at once.
+    if chars <= PIT_CHARS
+        && any(PIT_ASK)
+        && !any(PIT_ELSE)
+        && !any(OTHERS)
+        && topic(&s).is_none()
+        && fuel_lasts(&s).is_none()
+    {
+        return Some(Quick::Say("box"));
+    }
     if chars <= MAX_CHARS && !any(LOOK) {
         if any(HIT) && chars <= HIT_CHARS {
             return Some(Quick::Say("damage"));
@@ -695,6 +772,9 @@ pub fn about(topic: &str) -> &'static str {
         "losing" => "the corner where the driver loses most time and what to do there",
         "fuel-laps" => "how many laps the fuel lasts",
         "tyre-temps" => "the tyre temperatures",
+        "box" => {
+            "whether to come into the pits on this lap or stay out, and the lap of the planned stop"
+        }
         _ => "something else",
     }
 }
@@ -984,7 +1064,6 @@ mod tests {
             "タイヤ何周もつ",
             "それって適正温度に入ってる",
             "12号車との差は",
-            "ピットいつ入る",
             "なんでイエロー",
             "温度を上げて。",
             "調べて。",
@@ -994,6 +1073,57 @@ mod tests {
         ] {
             assert_eq!(read(q), None, "{q}");
         }
+    }
+
+    /// Asked at speed: box or stay out, nothing else.
+    #[test]
+    fn whether_to_box_is_answered_at_once() {
+        for q in [
+            "ピット？",
+            "ボックス？",
+            "入る？",
+            "今入る？",
+            "ピットいつ入る",
+            "この周入った方がいい？",
+            "ステイアウト？",
+            "ボックス、ボックス？",
+        ] {
+            assert_eq!(read(q), Some(Quick::Say("box")), "{q}");
+        }
+        for q in [
+            // Something else about the stop.
+            "ピットロスは何秒？",
+            "ピットでタイヤ替える？",
+            "前の車ピット入った？",
+            "なんでピット？",
+            "アンダーカットできる？",
+            "ピット出たら何位？",
+            "燃料、ピット入らずにもつ？",
+            "もう一回ピット入る",
+            // A complaint, not a question of the stop.
+            "フロント入らない",
+            // Longer: more than the call.
+            "次のピットでフロントウイング直せる？",
+        ] {
+            assert_ne!(read(q), Some(Quick::Say("box")), "{q}");
+        }
+    }
+
+    /// The driver is stuck: a way out is wanted, from the engineer.
+    #[test]
+    fn complaints_are_for_the_agent() {
+        for q in [
+            "追いつかない！",
+            "追い付かない",
+            "前に全然追いつけない",
+            "抜けない！",
+            "前の車速すぎ",
+            "届かない",
+        ] {
+            assert_eq!(read(q), None, "{q}");
+        }
+        // The plain question still is the gap.
+        assert_eq!(read("追いつける？"), Some(Quick::Say("ahead")));
     }
 
     #[test]

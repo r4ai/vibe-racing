@@ -74,10 +74,12 @@ pub fn tell(e: &RaceEvent, v: &Values) -> Told {
     let say = |s: &str| Told::Say(s.to_string());
     match e.kind.as_str() {
         "flag_raised" => match e.flag.as_deref().unwrap_or_default() {
-            "yellow" => say("イエロー。"),
-            "yellow_waving" => say("近くでイエロー、抑えて。"),
-            "caution" => say("フルコースコーション、追い抜き禁止。"),
-            "red" => say("レッドフラッグ、減速。"),
+            // What is to be acted on at once is said twice, as on a real radio:
+            // once may be lost in the engine noise.
+            "yellow" => say("イエロー、イエロー。"),
+            "yellow_waving" => say("イエロー、イエロー。近くだ、抑えて。"),
+            "caution" => say("コーション、コーション。追い抜き禁止。"),
+            "red" => say("レッドフラッグ、レッドフラッグ。減速。"),
             "blue" => say("ブルーフラッグ、後ろに譲ろう。"),
             "white" if close(v, "gap_behind") => say("ファイナルラップ。後ろを抑えよう。"),
             "white" if close(v, "gap_ahead") => say("ファイナルラップ。前を狙おう。"),
@@ -85,8 +87,10 @@ pub fn tell(e: &RaceEvent, v: &Values) -> Told {
             // Out for the leader; told once the driver is over the line too.
             "checkered" if v.get("lap_pct").is_none_or(|p| *p < JUST_OVER) => finished(v),
             "checkered" => Told::Nothing,
-            "black" => say("ブラックフラッグ、ペナルティだ。"),
-            "repair" => say("ミートボールフラッグ、修理が要る。この周ピットに入ろう。"),
+            "black" => {
+                say("ブラックフラッグ、ブラックフラッグ。ペナルティだ、ピットで消化しよう。")
+            }
+            "repair" => say("ミートボールフラッグ。修理だ、ボックス、ボックス。"),
             "disqualify" => say("失格だ。"),
             "debris" => say("デブリに注意。"),
             "slow_car" => say("前に遅い車、注意。"),
@@ -164,7 +168,14 @@ fn advice(call: &str, a: &Value) -> Told {
     let count = |key: &str| number(a, key).unwrap_or(0.0);
     Told::Say(match call {
         "fuel_stop" => format!("燃料のため、{:.0}周目までにピット。", count("by_lap")),
-        "box_this_lap" => "ボックス、この周ピット。".into(),
+        // Told ahead; the box call itself comes before pit road (`BoxCall`).
+        "box_this_lap" => "この周ボックスだ。入口の手前でもう一度呼ぶ。".into(),
+        "stay_out" => match number(a, "next") {
+            Some(n) => {
+                format!("ステイアウト、ステイアウト。この周は入らない、ピットは{n:.0}周目。")
+            }
+            None => "ステイアウト、ステイアウト。この周は入らない。".into(),
+        },
         "window_open" => format!("{:.0}周目までならいつ入ってもいい。", count("until_lap")),
         "undercut_threat" => format!("後ろの{}に先に入られると抜かれる、先に入ろう。", car()),
         "answer" => format!(
@@ -194,6 +205,74 @@ fn advice(call: &str, a: &Value) -> Told {
             }
         }
         _ => return Told::Ask,
+    })
+}
+
+/// Where the box call is made: this much of the lap before pit road begins,
+/// and no later than this.
+const BOX_FROM_PCT: f64 = 12.0;
+const BOX_TO_PCT: f64 = 2.0;
+/// Where pit road begins is not known yet: half way round, so that it is
+/// never too late; the words say when to come in, not that it is now.
+const BOX_LAP_PCT: f64 = 50.0;
+
+/// The call to come in, made where the driver can act on it: on the way to
+/// pit road on the lap of the stop, once.
+#[derive(Debug, Default)]
+pub struct BoxCall {
+    told_lap: Option<f64>,
+}
+
+impl BoxCall {
+    pub fn check(&mut self, v: &Values) -> Option<&'static str> {
+        let stop_now = v.get("stop_in").is_some_and(|s| s.abs() < 0.5);
+        if !(stop_now && is(v, "racing") && is(v, "on_track")) || is(v, "on_pit") {
+            return None;
+        }
+        let lap = *v.get("lap")?;
+        let (near, text) = match v.get("to_pit") {
+            Some(d) => (
+                (BOX_TO_PCT..=BOX_FROM_PCT).contains(d),
+                "ボックス、ボックス。",
+            ),
+            None => (
+                v.get("lap_pct").is_some_and(|p| *p >= BOX_LAP_PCT),
+                "ボックス、ボックス。この周の終わりに入る。",
+            ),
+        };
+        if !near || self.told_lap == Some(lap) {
+            return None;
+        }
+        self.told_lap = Some(lap);
+        Some(text)
+    }
+}
+
+/// Closer than this, the car is fought with at every corner.
+const BATTLE_S: f64 = 1.0;
+
+/// What the agent is to know of the moment a call comes in: wheel to wheel,
+/// the driver has room for a few words only.
+pub fn pressure(v: &Values) -> Option<String> {
+    if !(is(v, "racing") && is(v, "on_track")) || is(v, "on_pit") {
+        return None;
+    }
+    let near = |k: &str| v.get(k).copied().filter(|s| (0.0..BATTLE_S).contains(s));
+    let mut fight = Vec::new();
+    if is(v, "alongside") {
+        fight.push("横に車".to_string());
+    }
+    if let Some(s) = near("gap_ahead") {
+        fight.push(format!("前と{s:.1}秒"));
+    }
+    if let Some(s) = near("gap_behind") {
+        fight.push(format!("後ろと{s:.1}秒"));
+    }
+    (!fight.is_empty()).then(|| {
+        format!(
+            "いま接近戦（{}）。1 文、30 字までで、すぐ動ける一言だけ。命令は 2 回繰り返していい。",
+            fight.join("・")
+        )
     })
 }
 
@@ -276,17 +355,20 @@ mod tests {
     fn flags_are_said_as_they_are() {
         let v = racing();
         for (name, want) in [
-            ("yellow", "イエロー。"),
-            ("yellow_waving", "近くでイエロー、抑えて。"),
-            ("caution", "フルコースコーション、追い抜き禁止。"),
-            ("red", "レッドフラッグ、減速。"),
+            ("yellow", "イエロー、イエロー。"),
+            ("yellow_waving", "イエロー、イエロー。近くだ、抑えて。"),
+            ("caution", "コーション、コーション。追い抜き禁止。"),
+            ("red", "レッドフラッグ、レッドフラッグ。減速。"),
             ("blue", "ブルーフラッグ、後ろに譲ろう。"),
             ("white", "ファイナルラップ。後ろを抑えよう。"),
             ("checkered", "チェッカー。4位だ、お疲れさま。"),
-            ("black", "ブラックフラッグ、ペナルティだ。"),
+            (
+                "black",
+                "ブラックフラッグ、ブラックフラッグ。ペナルティだ、ピットで消化しよう。",
+            ),
             (
                 "repair",
-                "ミートボールフラッグ、修理が要る。この周ピットに入ろう。",
+                "ミートボールフラッグ。修理だ、ボックス、ボックス。",
             ),
             ("disqualify", "失格だ。"),
             ("debris", "デブリに注意。"),
@@ -431,7 +513,15 @@ mod tests {
             ),
             (
                 r#"{"call":"box_this_lap","lap":8}"#.into(),
-                "ボックス、この周ピット。",
+                "この周ボックスだ。入口の手前でもう一度呼ぶ。",
+            ),
+            (
+                r#"{"call":"stay_out","next":15}"#.into(),
+                "ステイアウト、ステイアウト。この周は入らない、ピットは15周目。",
+            ),
+            (
+                r#"{"call":"stay_out","next":null}"#.into(),
+                "ステイアウト、ステイアウト。この周は入らない。",
             ),
             (
                 r#"{"call":"window_open","until_lap":9}"#.into(),
@@ -471,6 +561,85 @@ mod tests {
         assert_eq!(tell(&event(&a(r#"{"call":"new"}"#)), &v), Told::Ask);
         assert_eq!(tell(&RaceEvent::planned("t".into()), &v), Told::Ask);
         assert_eq!(tell(&RaceEvent::watch("t".into()), &v), Told::Ask);
+    }
+
+    #[test]
+    fn the_box_call_comes_once_on_the_way_to_pit_road() {
+        let at = |stop_in: f64, to_pit: Option<f64>, lap_pct: f64, lap: f64| {
+            let mut v = racing();
+            v.insert("stop_in".into(), stop_in);
+            v.insert("lap".into(), lap);
+            v.insert("lap_pct".into(), lap_pct);
+            if let Some(d) = to_pit {
+                v.insert("to_pit".into(), d);
+            }
+            v
+        };
+        let mut b = BoxCall::default();
+        // Not the lap of the stop, or too far from pit road.
+        assert_eq!(b.check(&at(1.0, Some(5.0), 90.0, 7.0)), None);
+        assert_eq!(b.check(&at(0.0, Some(12.1), 80.0, 8.0)), None);
+        // Too late to act on.
+        assert_eq!(b.check(&at(0.0, Some(1.9), 90.0, 8.0)), None);
+        assert_eq!(
+            b.check(&at(0.0, Some(12.0), 80.0, 8.0)),
+            Some("ボックス、ボックス。")
+        );
+        // Once a lap.
+        assert_eq!(b.check(&at(0.0, Some(2.0), 90.0, 8.0)), None);
+        assert_eq!(
+            b.check(&at(0.0, Some(2.0), 90.0, 9.0)),
+            Some("ボックス、ボックス。")
+        );
+        // Where pit road begins is not known: half way round, saying when.
+        let mut b = BoxCall::default();
+        assert_eq!(b.check(&at(0.0, None, 49.9, 8.0)), None);
+        assert_eq!(
+            b.check(&at(0.0, None, 50.0, 8.0)),
+            Some("ボックス、ボックス。この周の終わりに入る。")
+        );
+        // In the pits already, or not racing.
+        let mut b = BoxCall::default();
+        let mut pitting = at(0.0, Some(5.0), 90.0, 8.0);
+        pitting.insert("on_pit".into(), 1.0);
+        assert_eq!(b.check(&pitting), None);
+        let mut slow = at(0.0, Some(5.0), 90.0, 8.0);
+        slow.insert("racing".into(), 0.0);
+        assert_eq!(b.check(&slow), None);
+        let mut stop = at(0.0, Some(5.0), 90.0, 8.0);
+        stop.remove("stop_in");
+        assert_eq!(b.check(&stop), None);
+    }
+
+    #[test]
+    fn wheel_to_wheel_the_answers_are_short() {
+        let mut v = racing();
+        // 0.62 ahead, 1.24 behind.
+        assert_eq!(
+            pressure(&v).as_deref(),
+            Some(
+                "いま接近戦（前と0.6秒）。1 文、30 字までで、すぐ動ける一言だけ。命令は 2 回繰り返していい。"
+            )
+        );
+        v.insert("gap_ahead".into(), 1.0);
+        v.insert("gap_behind".into(), 0.99);
+        v.insert("alongside".into(), 1.0);
+        assert_eq!(
+            pressure(&v).as_deref(),
+            Some(
+                "いま接近戦（横に車・後ろと1.0秒）。1 文、30 字までで、すぐ動ける一言だけ。命令は 2 回繰り返していい。"
+            )
+        );
+        v.insert("gap_behind".into(), 1.0);
+        v.insert("alongside".into(), 0.0);
+        assert_eq!(pressure(&v), None);
+        // Not in the pits, nor outside the race.
+        let mut pits = racing();
+        pits.insert("on_pit".into(), 1.0);
+        assert_eq!(pressure(&pits), None);
+        let mut slow = racing();
+        slow.insert("racing".into(), 0.0);
+        assert_eq!(pressure(&slow), None);
     }
 
     #[test]
