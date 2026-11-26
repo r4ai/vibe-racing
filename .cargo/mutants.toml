@@ -92,6 +92,10 @@ exclude_re = [
     # `MemoryPages`.
     # Equality boundary on a wall-clock silence (`elapsed() > SILENT`).
     'replace > with >= in <impl TelemetrySource for UdpSource>::poll',
+    # Equivalent: a cut cannot begin where the one before it ends, the revs and
+    # the speed being flat over the points before it, so skipping that point too
+    # changes nothing.
+    'replace < with <= in clips',
     # Equivalent: NoMic::stop already returns the default recording.
     'replace <impl Recorder for NoMic>::stop -> Recording with Default::default\(\)',
 ]

@@ -688,6 +688,10 @@ mod tests {
         let mut off = a.clone();
         off.throttle[1] = 50;
         assert_eq!(samples(&off, 2)[0].0, 102.5);
+        // Two points at the same time tell no pull.
+        let mut same = a.clone();
+        same.t_ms[1] = same.t_ms[0];
+        assert_eq!(samples(&same, 2)[0].0, 101.5);
         // Without the times of the points, nothing.
         let mut timeless = a.clone();
         timeless.t_ms.clear();
@@ -701,6 +705,9 @@ mod tests {
         assert!((se - spread).abs() < 1e-9, "{se}");
         // One lap alone tells nothing.
         assert!(pull(&[&a], 2).is_empty());
+        // Three samples from two laps are enough: 101 and 103, and 102.5.
+        let p = pull(&[&by(2.0), &by(5.0)], 2);
+        assert_eq!(p[0].0, 20, "{p:?}");
         // Two laps, but one sample each in 100-105.
         let p = pull(&[&by(5.0), &by(6.0)], 2);
         assert!(p.iter().all(|b| b.0 != 20), "{p:?}");
@@ -726,6 +733,13 @@ mod tests {
         // Turning back in the next bin, or a gap before it.
         assert_eq!(cross(&[low, high, (22, 7.0, 6.0, 0.1)]), None);
         assert_eq!(cross(&[low, high, (23, 4.0, 6.0, 0.1)]), None);
+        // Level with each other is not the lower gear pulling harder.
+        let level = [
+            (20, 7.0, 6.0, 1.0),
+            (21, 6.0, 6.0, 0.01),
+            (22, 4.0, 6.0, 0.01),
+        ];
+        assert_eq!(cross(&level), None);
         // The higher gear pulling harder from the first bin.
         assert_eq!(cross(&[high]), None);
         assert_eq!(cross(&[]), None);
@@ -741,7 +755,9 @@ mod tests {
                 2,
                 (300.0 - gain * (40 - k) as f64) * 30.0,
             ),
-            40..51 => (300.0, 2, 9000.0 + rise * (k - 40).min(9) as f64 / 9.0),
+            40..50 => (300.0, 2, 9000.0 + rise * (k - 40) as f64 / 9.0),
+            // Not held: 3rd comes next.
+            50 => (300.0, 2, 9500.0),
             _ => (300.0 + 0.01 * (k - 50) as f64, 3, 6000.0),
         })
     }
@@ -799,6 +815,15 @@ mod tests {
                 rpm: 102.0
             }]
         );
+        // Into neutral is no change down.
+        let idle = built(100, |k| {
+            (
+                100.0,
+                if k <= 500 { 1 } else { 0 },
+                if k == 501 { 102.0 } else { 80.0 },
+            )
+        });
+        assert!(over_revs(&idle, 100.0).is_empty());
         // Three points after it, no later.
         assert!(over_revs(&down(504, 102.0), 100.0).is_empty());
     }
