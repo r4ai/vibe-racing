@@ -695,6 +695,19 @@ impl LapsReport {
             opt(self.best_lap_s, fmt_lap),
             opt(self.avg_clean_lap_s, fmt_lap)
         );
+        if let Some(t) = &self.trend {
+            let _ = writeln!(
+                out,
+                "pace since the start (clean laps, no mistakes): L{}-L{} avg {} | latest L{}-L{} avg {} | {:+.2}s/lap",
+                t.early_laps.0,
+                t.early_laps.1,
+                fmt_lap(t.early_s),
+                t.recent_laps.0,
+                t.recent_laps.1,
+                fmt_lap(t.recent_s),
+                t.recent_s - t.early_s
+            );
+        }
         if self.laps.is_empty() {
             out.push_str("no completed laps recorded yet\n");
         }

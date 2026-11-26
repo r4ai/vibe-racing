@@ -54,6 +54,7 @@ impl RaceApi for Made {
             laps: laps.map(|(_, l)| l.clone()).collect(),
             best_lap_s: None,
             avg_clean_lap_s: None,
+            trend: None,
         })
     }
     fn events(&self, _: &EventsParams) -> ApiResult<EventsReport> {

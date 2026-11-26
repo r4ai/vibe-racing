@@ -281,6 +281,7 @@ impl RaceApi for RaceState {
                 laps: Vec::new(),
                 best_lap_s: None,
                 avg_clean_lap_s: None,
+                trend: None,
             });
         };
         let car = match &p.car {
@@ -302,6 +303,7 @@ impl RaceApi for RaceState {
             .min_by(f64::total_cmp)
             .or(car.best_lap_s);
         let avg_clean_lap_s = self.avg_clean_lap(car.idx);
+        let trend = LapTrend::of(&laps);
         let n = p.last.unwrap_or(10);
         let skip = laps.len().saturating_sub(n);
         laps.drain(..skip);
@@ -311,6 +313,7 @@ impl RaceApi for RaceState {
             laps,
             best_lap_s,
             avg_clean_lap_s,
+            trend,
         })
     }
 

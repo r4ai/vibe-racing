@@ -1,0 +1,250 @@
+# Complex set: calls nobody writes a rule for. Several questions at once,
+# what-ifs, other cars far down the order, sums over the race, follow-ups that
+# only make sense after the call before, and things the data does not have.
+# Used while changing the radio, like dev; complex-heldout.yaml checks it.
+# See docs/architecture.md for the fields.
+
+- id: many-at-once
+  world:
+    {
+      start_s: 820,
+      laps: 22,
+      tyre_deg_s: 0.08,
+      lap_noise_s: 0.4,
+      mistake_one_in: 14,
+      stops: [[1, 8], [5, 9]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: three-things
+      say: 今何位で、トップと何秒、あと燃料は最後までもつ？
+      voice: vv:13
+      facts: [position, gap_leader, fuel_laps]
+      points:
+        - 現在の順位
+        - トップとの差（秒）
+        - 燃料が最後まで足りるかどうか
+    - id: second-car-back
+      say: 後ろの後ろの車って何秒後ろ？
+      voice: vv:13
+      points:
+        - 2 つ下の順位の車（すぐ後ろの車ではない）との差（秒）。standings の gap の差から求めた値
+    - id: who-is-fastest
+      say: 今このレースで一番ペースいいのって誰？
+      voice: vv:13
+      points:
+        - 直近のラップかベストが最も速い車（号車か名前）。standings と矛盾しない
+    - id: best-lap-when
+      say: 俺の自己ベストって何周目に出したっけ？
+      voice: vv:13
+      facts: [best_lap]
+      points:
+        - 自己ベストを出した周（laps の記録と矛盾しない）。周が分からなければベストのタイムと分からないこと
+
+- id: what-if
+  world:
+    {
+      start_s: 700,
+      laps: 24,
+      fuel_start_l: 36,
+      player_pit_lap: 14,
+      rival_pit_lap: 10,
+      tyre_deg_s: 0.1,
+      lap_noise_s: 0.4,
+      stops: [[0, 12], [6, 13]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: pit-now-where
+      say: もし今この周ピット入ったら、何位くらいで戻れる？
+      voice: gemini:Kore
+      facts: [rejoin]
+      points:
+        - 今ピットに入ったときに戻る順位（strategy の rejoin と矛盾しない）
+    - id: half-second
+      say: 毎周0.5秒速く走れたら、ゴールまでに前の車捕まえられる？
+      voice: gemini:Kore
+      facts: [laps_left]
+      points:
+        - 前との差を、今の差の変化に 0.5 秒/周を足した速さで残り周回で詰められるかの結論（計算が gap と残り周回と合う）
+    - id: leader-pace-drop
+      say: トップが残り全部1秒ずつ落としてくれたら、追いつける計算？
+      voice: gemini:Kore
+      facts: [gap_leader, laps_left]
+      points:
+        - トップとの差と残り周回から、毎周 1 秒（今の差の変化に足して）で追いつけるかの結論
+    - id: fuel-for-two-more
+      say: 燃料、ピットを2周延ばしても大丈夫？
+      voice: gemini:Kore
+      facts: [fuel_laps]
+      points:
+        - 予定のピットより 2 周長く走れるだけ燃料があるか（燃料があと何周もつかと予定の周の比較）
+
+- id: follow-ups
+  world: { start_s: 640, tyre_deg_s: 0.05, lap_noise_s: 0.4, incident_at: null, yellow: null }
+  calls:
+    - id: who-ahead
+      say: 前のやつ誰？
+      voice: vv:2
+      facts: [name_ahead]
+      points: [前の車のドライバー名か号車]
+    - id: their-best
+      say: そいつのベストは？俺より速い？
+      voice: vv:2
+      points:
+        - 前の車（直前の交信の車）のベストラップ
+        - 自分のベストより速いか遅いか（standings と矛盾しない）
+    - id: catch-when
+      say: で、何周で追いつくの？
+      voice: vv:2
+      points:
+        - 前の車に追いつくまでの周数の見通し（gap の毎周の変化から。縮んでいなければ追いつかないこと）
+    - id: and-behind-too
+      say: 後ろも同じ感じ？
+      voice: vv:2
+      facts: [gap_behind]
+      points:
+        - 後ろの車について、同じこと（差と、その変化から追いつかれるか）
+
+- id: sums
+  world:
+    {
+      start_s: 1250,
+      laps: 25,
+      fuel_start_l: 45,
+      player_pit_lap: null,
+      tyre_deg_s: 0.12,
+      lap_noise_s: 0.4,
+      mistake_one_in: 10,
+      stops: [[2, 9]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: early-vs-late
+      say: 序盤と比べて今のペース、どれくらい落ちてる？
+      voice: gemini:Charon
+      facts: [last_lap]
+      points:
+        - 序盤（最初のほうのクリーンな周）と直近の周のラップの差（秒）。laps の記録と矛盾しない
+    - id: positions-gained
+      say: スタートから何個順位上げた？
+      voice: gemini:Charon
+      facts: [position]
+      points:
+        - スタート時の順位と今の順位の差（events・laps の順位と矛盾しない）
+    - id: worst-lap
+      say: 一番遅かった周ってどれ？何があった？
+      voice: gemini:Charon
+      points:
+        - 最も遅い周（周番号かタイム）。理由はデータで分かること（ピット・ミス・イエロー）だけで、作らない
+    - id: total-gap-change
+      say: この10周でトップとの差どれくらい広がった？
+      voice: gemini:Charon
+      facts: [gap_leader]
+      points:
+        - トップとの差の、およそ 10 周での変化（gap の毎周の変化×周数か、記録の差）。今の差を変化量として言わない
+
+- id: not-in-data
+  world: { start_s: 760, tyre_deg_s: 0.07, lap_noise_s: 0.4, incident_at: null, yellow: null }
+  calls:
+    - id: rival-tyres
+      say: 前の車、どのタイヤ履いてる？
+      voice: vv:13
+      points:
+        - データに無いことを作らない。分かることから見立てる（ラップの落ち方など）か、分からないと短く言う
+    - id: lap-record
+      say: このコースのラップレコードっていくつ？
+      voice: vv:13
+      points:
+        - データに無いことを数字で作らない。代わりにこのレースの最速ラップを言うのは可
+    - id: cars-in-race
+      say: 今のレース何台走ってる？周回遅れいる？
+      voice: vv:13
+      points:
+        - 出走台数（standings と同じ）
+        - 周回遅れの車がいるか。トップとの gap が 1 周のタイム以上の車が周回遅れ（周の途中で laps が 1 少ないだけの車は周回遅れではない）
+    - id: odd-unit
+      say: トップとの差、何メートルくらい？
+      voice: vv:13
+      facts: [gap_leader]
+      points:
+        - トップとの差を距離の目安で言う（秒×速度から）か、秒で言う。秒の値は gap と合う
+
+- id: odd-angles
+  world:
+    {
+      start_s: 1000,
+      laps: 24,
+      fuel_start_l: 40,
+      player_pit_lap: 13,
+      rival_pit_lap: 9,
+      tyre_deg_s: 0.1,
+      lap_noise_s: 0.45,
+      mistake_one_in: 11,
+      stops: [[1, 10], [6, 9]],
+      incident_at: null,
+    }
+  calls:
+    - id: which-lap-now
+      say: 今何周目？全部で何周だっけ？
+      voice: vv:2
+      facts: [laps_left]
+      points: [今走っている周, レースの総周回数]
+    - id: fuel-per-lap
+      say: 1周に何リッター使ってて、あと何リッター残ってる？
+      voice: vv:2
+      facts: [fuel_per_lap]
+      points: [1 周あたりの燃料消費（L）, 今の残量（L）]
+    - id: focus-choice
+      say: 前を抜きに行くのと後ろを抑えるの、どっちに集中すればいい？
+      voice: vv:2
+      points:
+        - どちらか一つに決めて言う（選ばせない）
+        - 前後との差とその変化（データ）を根拠にした判断で、データと矛盾しない
+    - id: rival-stop-rejoin
+      say: 後ろのやつが今ピット入ったら、俺の前で戻ってくる？
+      voice: vv:2
+      points:
+        - 後ろの車が今止まると、自分の前ではなく後ろに戻る（差とピットの損失から。損失が差より大きければ前には来ない）
+    - id: pit-count
+      say: 俺ってまだピット入ってないよな？
+      voice: vv:2
+      points: [自分がこのレースでピットに入ったかどうか（laps・events と矛盾しない）]
+
+- id: lap-compare
+  world:
+    {
+      start_s: 900,
+      laps: 20,
+      tyre_deg_s: 0.06,
+      lap_noise_s: 0.5,
+      mistake_one_in: 8,
+      stops: [[0, 7], [5, 8]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: last-two-laps
+      say: さっきの周と、その前の周、どっちが速かった？何秒違う？
+      voice: gemini:Kore
+      points:
+        - 直近の周と、その前の周のどちらが速いか
+        - 2 周のタイムの差（秒。laps と矛盾しない）
+    - id: leader-avg-diff
+      say: トップとはラップ平均で何秒違うの？
+      voice: gemini:Kore
+      points:
+        - トップと自分の最近のペース（平均ラップ）の差（秒）。gap ではない
+    - id: get-lapped
+      say: このままだとトップに周回遅れにされる？
+      voice: gemini:Kore
+      facts: [laps_left]
+      points:
+        - トップとの差が残り周回の間に 1 周分（1 周のタイム）まで広がるかの結論。差と毎周の変化から
+    - id: yellows-so-far
+      say: このレース、イエロー何回出た？
+      voice: gemini:Kore
+      points: [イエローが出た回数（events と矛盾しない）。数えられないときは作らない]

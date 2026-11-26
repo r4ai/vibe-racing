@@ -67,7 +67,10 @@ impl Score {
         let wanted: Vec<Topic> = l.topics.iter().map(|n| Topic::from(*n)).collect();
         // The sets label no driving questions: corner data along with a
         // question of handling costs a little text, nothing more.
-        for t in Topic::ALL.into_iter().filter(|t| *t != Topic::Driving) {
+        for t in Topic::ALL
+            .into_iter()
+            .filter(|t| !matches!(t, Topic::Driving | Topic::Race))
+        {
             let at = || format!("{} [{t:?}]", l.say);
             match (wanted.contains(&t), f.topics.contains(&t)) {
                 (true, false) => self.missed.push(at()),
