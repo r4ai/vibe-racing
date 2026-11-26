@@ -1047,6 +1047,12 @@ fn box_or_stay_out() {
         say(&m, SpeechTopic::Box),
         "ステイアウト。今は入らなくていい。"
     );
+    // A stop planned, not on this lap and not told yet.
+    m.strategy = Some(strategy(None, true, &[&[12]]));
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ステイアウト。今は入らなくていい。"
+    );
     // What comes before any plan.
     m.brief.session.as_mut().unwrap().flags.push(Flag::Repair);
     assert_eq!(say(&m, SpeechTopic::Box), "ボックス、ボックス。修理だ。");

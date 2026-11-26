@@ -85,8 +85,8 @@ pub fn tell(e: &RaceEvent, v: &Values) -> Told {
             "white" if close(v, "gap_ahead") => say("ファイナルラップ。前を狙おう。"),
             "white" => say("ファイナルラップ。"),
             // Out for the leader; told once the driver is over the line too.
+            // Not over the line yet: nothing, as for any flag not told.
             "checkered" if v.get("lap_pct").is_none_or(|p| *p < JUST_OVER) => finished(v),
-            "checkered" => Told::Nothing,
             "black" => {
                 say("ブラックフラッグ、ブラックフラッグ。ペナルティだ、ピットで消化しよう。")
             }
@@ -578,6 +578,7 @@ mod tests {
         let mut b = BoxCall::default();
         // Not the lap of the stop, or too far from pit road.
         assert_eq!(b.check(&at(1.0, Some(5.0), 90.0, 7.0)), None);
+        assert_eq!(b.check(&at(0.5, Some(5.0), 90.0, 7.0)), None);
         assert_eq!(b.check(&at(0.0, Some(12.1), 80.0, 8.0)), None);
         // Too late to act on.
         assert_eq!(b.check(&at(0.0, Some(1.9), 90.0, 8.0)), None);

@@ -3718,6 +3718,60 @@ BB 54"
     }
 
     #[tokio::test]
+    async fn the_box_call_is_made_while_strategy_calls_are_on() {
+        let mut h = start(&["了解。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        let at = |lap: f64| {
+            values(&[
+                ("racing", 1.0),
+                ("on_track", 1.0),
+                ("lap", lap),
+                ("stop_in", 0.0),
+                ("to_pit", 5.0),
+            ])
+        };
+        h.cmds
+            .send(Command::SetProactive(Proactive {
+                enabled: false,
+                ..Default::default()
+            }))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.live.send(at(1.0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(h.out.played.lock().unwrap().is_empty());
+        h.cmds
+            .send(Command::SetProactive(Proactive::default()))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The next lap of a stop.
+        h.live.send(at(2.0)).unwrap();
+        assert!(
+            h.played(1)
+                .await
+                .contains(&"3:ボックス、ボックス。".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_question_in_a_fight_is_asked_with_the_fight() {
+        let mut h = start_with(&["了解。"], Arc::new(FakeStt("x")), 1.0, "{radio}|{text}");
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        let close = values(&[
+            ("racing", 1.0),
+            ("on_track", 1.0),
+            ("lap", 1.0),
+            ("gap_ahead", 0.5),
+        ]);
+        h.live.send(close).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.cmds.send(Command::Ask("前は？".into())).unwrap();
+        h.until(is_done).await;
+        let prompts = h.prompts.lock().unwrap().clone();
+        assert!(prompts[0].contains("前と0.5秒"), "{}", prompts[0]);
+    }
+
+    #[tokio::test]
     async fn a_watch_may_tell_a_topic() {
         let (mut h, events) = asked(&["[[radio when=\"lap_pct > 5\" tell=lap]]了解。"]).await;
         assert_eq!(rules_of(&events)[0].watches[0].tell.as_deref(), Some("lap"));

@@ -240,6 +240,18 @@ pub fn findings(
     out.into_iter().flatten().collect()
 }
 
+/// How far to move the bias, %: the axle that locks has more brake than
+/// grip, and the further apart the two axles lock, the further the share of
+/// the pressure is off. Far apart, and by enough to be more than a moment of
+/// locking: a whole percent.
+fn bias_step(more: f64, less: f64) -> &'static str {
+    if more >= less * FAR_APART && more - less >= FAR_APART_S {
+        "1.0"
+    } else {
+        "0.5"
+    }
+}
+
 fn brakes(c: &Chassis, setup: Option<&Setup>) -> Option<Finding> {
     let front = c.lock_s.lf + c.lock_s.rf;
     let rear = c.lock_s.lr + c.lock_s.rr;
@@ -263,16 +275,7 @@ fn brakes(c: &Chassis, setup: Option<&Setup>) -> Option<Finding> {
         ))
     );
     let (front_first, other) = (front >= rear * CLEARLY, rear >= front * CLEARLY);
-    // The axle that locks has more brake than grip; the further apart the
-    // two axles lock, the further the share of the pressure is off.
-    let by = |more: f64, less: f64| {
-        // Far apart, and by enough to be more than a moment of locking.
-        if more >= less * FAR_APART && more - less >= FAR_APART_S {
-            "1.0"
-        } else {
-            "0.5"
-        }
-    };
+    let by = bias_step;
     let now = c.front_brake.map_or(String::new(), |s| {
         format!(" from {:.1}% at the front", s * 100.0)
     });
@@ -933,6 +936,17 @@ pub fn analyse(r: &SessionRecord, others: &[SessionRecord]) -> SetupAnalysis {
 mod tests {
     use super::*;
     use crate::chassis::{Corners, Damper, Ride};
+
+    #[test]
+    fn a_whole_percent_only_when_one_axle_locks_far_more() {
+        // Three times as long and half a second more, exactly: a whole one.
+        assert_eq!(bias_step(1.5, 0.5), "1.0");
+        assert_eq!(bias_step(0.75, 0.25), "1.0");
+        // Twice as long, half a second more.
+        assert_eq!(bias_step(1.0, 0.5), "0.5");
+        // Four times as long, but only 0.45 s more.
+        assert_eq!(bias_step(0.6, 0.15), "0.5");
+    }
 
     fn setup() -> Setup {
         let item = |path: &str, value: &str| SetupItem {

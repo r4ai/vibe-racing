@@ -50,7 +50,66 @@ const PIT_ENTRIES: usize = 15;
 
 /// From one part of the lap to the next, across the line too (-0.5..0.5).
 fn lap_step(from: f64, to: f64) -> f64 {
-    (to - from + 0.5).rem_euclid(1.0) - 0.5
+    let ahead = (to - from).rem_euclid(1.0);
+    if ahead >= 0.5 { ahead - 1.0 } else { ahead }
+}
+
+/// From `was` to `pct` of the lap in a frame: driven, not put there.
+fn driven(was: f64, pct: f64) -> bool {
+    lap_step(was, pct).abs() < PIT_ENTRY_STEP
+}
+
+/// Entries into pit road kept for the track they were seen on, the latest.
+fn remember_entries(
+    kept: &mut (Option<String>, VecDeque<f64>),
+    track: Option<String>,
+    entered: &[f64],
+) {
+    let (on, seen) = kept;
+    if *on != track {
+        *on = track;
+        seen.clear();
+    }
+    for pct in entered {
+        if seen.len() == PIT_ENTRIES {
+            seen.pop_front();
+        }
+        seen.push_back(*pct);
+    }
+}
+
+/// The lap a box was called for, among new calls.
+fn box_called(advice: &[StrategyCall]) -> Option<i32> {
+    advice.iter().find_map(|a| match a {
+        StrategyCall::BoxThisLap { lap } => Some(*lap),
+        _ => None,
+    })
+}
+
+/// What becomes of a box told for lap `told`.
+#[derive(Debug, PartialEq)]
+enum BoxTurn {
+    Keep,
+    /// Done with: the lap went by, or the car is in.
+    Forget,
+    /// The plan changed before the car came in: stay out, the next stop.
+    StayOut(Option<i32>),
+}
+
+fn box_turn(
+    told: i32,
+    lap: Option<i32>,
+    on_pit_road: bool,
+    pit_this_lap: bool,
+    changed: Option<&[i32]>,
+) -> BoxTurn {
+    if lap != Some(told) || on_pit_road || pit_this_lap {
+        return BoxTurn::Forget;
+    }
+    match changed {
+        Some(stops) => BoxTurn::StayOut(stops.iter().copied().find(|s| *s > told)),
+        None => BoxTurn::Keep,
+    }
 }
 
 /// The middle of parts of the lap, some of them maybe just across the line.
@@ -458,29 +517,30 @@ impl RaceState {
             .retain(|_, last| (0.0..STRATEGY_FORGET_S).contains(&(t - *last)));
         let best = r.plans.first().map(|p| p.stops.clone());
         // Told to box: that is the plan now, and its end is told.
-        if let Some(lap) = advice.iter().find_map(|a| match a {
-            StrategyCall::BoxThisLap { lap } => Some(*lap),
-            _ => None,
-        }) {
+        if let Some(lap) = box_called(&advice) {
             self.box_told = Some(lap);
             if let Some(stops) = &best {
                 self.plan = Some(stops.clone());
             }
         } else if let Some(told) = self.box_told {
             let player = self.frame.as_ref().and_then(|f| f.player_car());
-            let lap = player.and_then(|c| c.lap);
-            let pitting = player.is_some_and(|c| {
-                c.on_pit_road || self.cars.get(&c.idx).is_some_and(|t| t.pit_this_lap)
-            });
-            if lap != Some(told) || pitting {
-                self.box_told = None;
-            } else if let Some(stops) = best.filter(|_| !strategy::still_boxing(&r, told)) {
-                self.box_told = None;
-                let next = stops.iter().copied().find(|s| *s > told);
-                self.plan = Some(stops);
-                advice.push(StrategyCall::StayOut { next });
-                // Should it come back, it is told again.
-                self.strategy_calls.remove("box");
+            let changed = best.filter(|_| !strategy::still_boxing(&r, told));
+            match box_turn(
+                told,
+                player.and_then(|c| c.lap),
+                player.is_some_and(|c| c.on_pit_road),
+                player.is_some_and(|c| self.cars.get(&c.idx).is_some_and(|t| t.pit_this_lap)),
+                changed.as_deref(),
+            ) {
+                BoxTurn::Keep => {}
+                BoxTurn::Forget => self.box_told = None,
+                BoxTurn::StayOut(next) => {
+                    self.box_told = None;
+                    self.plan = changed;
+                    advice.push(StrategyCall::StayOut { next });
+                    // Should it come back, it is told again.
+                    self.strategy_calls.remove("box");
+                }
             }
         }
         if let Some(stops) = strategy::new_plan(self.plan.as_deref(), &r.plans) {
@@ -745,7 +805,7 @@ impl RaceState {
             if tr.prev_on_pit_road == Some(false)
                 && car.on_pit_road
                 && let (Some(was), Some(pct)) = (tr.prev_pct, car.lap_dist_pct)
-                && lap_step(was, pct).abs() < PIT_ENTRY_STEP
+                && driven(was, pct)
             {
                 entered.push(pct);
             }
@@ -888,17 +948,7 @@ impl RaceState {
     /// Pit road begins where the cars enter it, on this track.
     fn learn_pit_entry(&mut self, frame: &Frame, entered: &[f64]) {
         let track = self.session_summary(frame).track;
-        let (on, seen) = &mut self.pit_entries;
-        if *on != track {
-            *on = track;
-            seen.clear();
-        }
-        for pct in entered {
-            if seen.len() == PIT_ENTRIES {
-                seen.pop_front();
-            }
-            seen.push_back(*pct);
-        }
+        remember_entries(&mut self.pit_entries, track, entered);
     }
 
     /// Where pit road begins, as part of the lap, once a car was seen to enter it.
@@ -1512,10 +1562,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_box_holds_until_the_lap_is_done_or_the_plan_changes() {
+        use BoxTurn::*;
+        assert_eq!(
+            box_called(&[StrategyCall::CheapStop, StrategyCall::BoxThisLap { lap: 8 }]),
+            Some(8)
+        );
+        assert_eq!(box_called(&[StrategyCall::CheapStop]), None);
+        assert_eq!(box_turn(8, Some(8), false, false, None), Keep);
+        // The lap went by, or the car is in.
+        assert_eq!(box_turn(8, Some(9), false, false, None), Forget);
+        assert_eq!(box_turn(8, None, false, false, None), Forget);
+        assert_eq!(box_turn(8, Some(8), true, false, None), Forget);
+        assert_eq!(box_turn(8, Some(8), false, true, None), Forget);
+        // Another plan: the next stop after this lap.
+        assert_eq!(
+            box_turn(8, Some(8), false, false, Some(&[8, 12])),
+            StayOut(Some(12))
+        );
+        assert_eq!(
+            box_turn(8, Some(8), false, false, Some(&[3, 8])),
+            StayOut(None)
+        );
+        assert_eq!(box_turn(8, Some(8), false, false, Some(&[])), StayOut(None));
+    }
+
+    #[test]
+    fn pit_road_entries_are_kept_for_their_track() {
+        let mut kept = (None, VecDeque::new());
+        let spa = || Some("spa".to_string());
+        remember_entries(&mut kept, spa(), &[0.9, 0.91]);
+        remember_entries(&mut kept, spa(), &[0.92]);
+        assert_eq!(kept.1, [0.9, 0.91, 0.92]);
+        // The latest 15.
+        let many: Vec<f64> = (0..16).map(|i| f64::from(i) / 100.0).collect();
+        remember_entries(&mut kept, spa(), &many);
+        assert_eq!(kept.1.len(), PIT_ENTRIES);
+        assert_eq!((kept.1[0], kept.1[14]), (0.01, 0.15));
+        // Another track: what was seen is of no use.
+        remember_entries(&mut kept, Some("monza".into()), &[0.5]);
+        assert_eq!((kept.0.as_deref(), kept.1.len()), (Some("monza"), 1));
+    }
+
+    #[test]
     fn parts_of_the_lap_across_the_line() {
         assert!((lap_step(0.98, 0.01) - 0.03).abs() < 1e-9);
         assert!((lap_step(0.01, 0.98) + 0.03).abs() < 1e-9);
         assert!((lap_step(0.2, 0.25) - 0.05).abs() < 1e-9);
+        // A hundredth of a lap in a frame is put there, not driven.
+        assert!(driven(0.0, 0.0099));
+        assert!(!driven(0.0, 0.01));
+        assert!(!driven(0.0, -0.01));
+        // Half a lap either way is half a lap back.
+        assert_eq!(lap_step(0.0, 0.5), -0.5);
+        assert_eq!(lap_step(0.25, 0.5), 0.25);
         let of = |v: &[f64]| circular_median(&v.iter().copied().collect());
         assert_eq!(of(&[]), None);
         assert_eq!(of(&[0.4]), Some(0.4));

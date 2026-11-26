@@ -1110,6 +1110,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_box_and_its_end_are_told() {
+        assert_eq!(
+            StrategyCall::BoxThisLap { lap: 8 }.text(),
+            "best plan: stop at the end of this lap (8)"
+        );
+        assert_eq!(
+            StrategyCall::StayOut { next: Some(12) }.text(),
+            "stay out: no stop this lap, the next is at the end of lap 12"
+        );
+        assert_eq!(
+            StrategyCall::StayOut { next: None }.text(),
+            "stay out: no stop this lap"
+        );
+    }
+
+    #[test]
     fn a_box_call_holds_while_a_plan_as_good_or_the_fuel_wants_it() {
         let st = RaceState::new(
             "t",

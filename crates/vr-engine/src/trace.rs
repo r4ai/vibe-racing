@@ -437,7 +437,7 @@ fn throttle_shape(t: &LapTrace, slowest: usize, to: usize, metre: f64) -> Option
     // Spinning for two points in a row: one is the noise of the ratio.
     let spinning = |k: usize| {
         has_gears
-            && t.speed[k] > 300
+            && t.speed.get(k).is_some_and(|v| *v > 300)
             && gear_ratio(t, t.gear[k])
                 .is_some_and(|r| f64::from(t.rpm[k]) * 10.0 / f64::from(t.speed[k]) >= r * SPIN)
     };
@@ -450,7 +450,7 @@ fn throttle_shape(t: &LapTrace, slowest: usize, to: usize, metre: f64) -> Option
     let before = |k: usize| k.saturating_sub(CAUSE_POINTS)..=k;
     let wheelspin = lifts
         .iter()
-        .any(|&l| before(l).any(|k| k + 1 < POINTS && spinning(k) && spinning(k + 1)));
+        .any(|&l| before(l).any(|k| spinning(k) && spinning(k + 1)));
     let countersteer = lifts.iter().any(|&l| before(l).any(against));
     let lifts = u8::try_from(lifts.len()).unwrap_or(u8::MAX);
     Some(ThrottleShape {
@@ -505,7 +505,7 @@ fn brake_shape(t: &LapTrace, on: usize, slowest: usize, to: usize, metre: f64) -
         .find(|&k| t.brake[k] >= near)
         .unwrap_or(first);
     let steer = |k: usize| steer_at(t, k).map(i32::abs).filter(|_| steers(t));
-    let most = (on..=slowest.min(to - 1)).filter_map(steer).max();
+    let most = (on..=slowest).filter_map(steer).max();
     let at_turn_in = most.filter(|m| *m > 0).and_then(|m| {
         let k =
             (on..to).find(|&k| steer(k).is_some_and(|s| f64::from(s) >= f64::from(m) * TURN_IN))?;
@@ -513,7 +513,7 @@ fn brake_shape(t: &LapTrace, on: usize, slowest: usize, to: usize, metre: f64) -
     });
     let driven = (off..to).find(|&k| t.throttle[k] >= DRIVEN).unwrap_or(to);
     let secs = |k: usize| t.t_ms.get(k).map(|ms| f64::from(*ms) / 1000.0);
-    let speed = |k: usize| f64::from(t.speed[k.min(POINTS - 1)]) / 36.0;
+    let speed = |k: usize| f64::from(t.speed[k]) / 36.0;
     // The held part of the stop only: a stab of the pedal tells nothing of it.
     let decel_g = match (secs(first), secs(last)) {
         (Some(a), Some(b)) if last >= first + HELD_POINTS && b > a => {
@@ -1040,6 +1040,57 @@ mod tests {
         let mut noise = grip.clone();
         noise.steer[178] = -40;
         assert!(!throttle_shape(&noise, 165, 400, 5.0).unwrap().countersteer);
+        // Pickup from where the throttle was last under a tenth.
+        let mut blip = grip.clone();
+        (blip.throttle[164], blip.throttle[165]) = (20, 10);
+        assert_eq!(throttle_shape(&blip, 165, 400, 5.0).unwrap().pickup_m, -5.0);
+        // Spinning at walking pace is not told: the ratio is noise there.
+        let mut slow = spin.clone();
+        spun(&mut slow, 177, 107);
+        slow.speed[177..=178].fill(300);
+        // 7% over the ratio of 5 rpm a tenth of a km/h.
+        slow.rpm[177..=178].fill(1605);
+        assert!(!throttle_shape(&slow, 165, 400, 5.0).unwrap().wheelspin);
+        // Spinning before the points that tell the lift's cause.
+        let mut early = grip.clone();
+        spun(&mut early, 175, 110);
+        spun(&mut early, 176, 110);
+        assert!(!throttle_shape(&early, 165, 400, 5.0).unwrap().wheelspin);
+        // Without revs nothing is known of the wheels.
+        let mut deaf = spin.clone();
+        spun(&mut deaf, 177, 107);
+        assert!(throttle_shape(&deaf, 165, 400, 5.0).unwrap().wheelspin);
+        deaf.rpm.clear();
+        assert!(!throttle_shape(&deaf, 165, 400, 5.0).unwrap().wheelspin);
+        // A wheel that is not told all the lap tells nothing of a slide.
+        let mut part = caught.clone();
+        part.steer.truncate(POINTS - 1);
+        assert!(!throttle_shape(&part, 165, 400, 5.0).unwrap().countersteer);
+        // The wheel turned only after the slowest point: no turn-in to tell.
+        let mut late = stop(90, 4, 20, 175, 25);
+        late.steer = (0..POINTS)
+            .map(|k| if (170..200).contains(&k) { 300 } else { 0 })
+            .collect();
+        assert_eq!(brake_shape(&late, 100, 165, 400, 5.0).at_turn_in, None);
+        // Turned in just as the pedal came off (under a tenth at 158).
+        let mut off = stop(90, 4, 20, 175, 25);
+        off.steer = (0..POINTS)
+            .map(|k| if (158..200).contains(&k) { 300 } else { 0 })
+            .collect();
+        assert_eq!(brake_shape(&off, 100, 165, 400, 5.0).at_turn_in, Some(0));
+        // Near the peak for two points: not held long enough.
+        let mut brief = stop(90, 4, 20, 175, 25);
+        brief.brake[100..160].fill(50);
+        brief.brake[120..=121].fill(90);
+        assert_eq!(brake_shape(&brief, 100, 165, 400, 5.0).decel_g, None);
+        // No time passing while held: nothing to tell.
+        let mut frozen = stop(90, 4, 20, 175, 25);
+        frozen.t_ms[141] = frozen.t_ms[103];
+        assert_eq!(brake_shape(&frozen, 100, 165, 400, 5.0).decel_g, None);
+        // A tenth on the pedal is still on it.
+        let mut light = stop(90, 4, 20, 175, 25);
+        light.brake[145] = 10;
+        assert_eq!(brake_shape(&light, 100, 165, 400, 5.0).release_m, 85.0);
         // No wheel turned: nothing known of the turn-in.
         let mut straight = stop(90, 4, 20, 175, 0);
         straight.steer = vec![0; POINTS];
@@ -1227,5 +1278,40 @@ mod tests {
         assert_eq!((own.usual_laps, own.usual_s.len()), (0, 0));
         assert_eq!(CornersReport::of(&[], &best), None);
         assert_eq!(CornersReport::of(&laps, &LapTrace::default()), None);
+    }
+
+    #[test]
+    fn the_wheel_and_the_gears_of_a_lap() {
+        let mut t = stop(90, 4, 20, 175, 25);
+        t.steer[..4].copy_from_slice(&[0, 30, 60, 90]);
+        // Each point with its neighbours.
+        assert_eq!(steer_at(&t, 0), Some(15));
+        assert_eq!(steer_at(&t, 1), Some(30));
+        assert_eq!(steer_at(&t, 2), Some(60));
+        assert!(steers(&t));
+        let mut none = t.clone();
+        none.steer = vec![0; POINTS];
+        assert!(!steers(&none));
+        none.steer.clear();
+        assert!(!steers(&none));
+        assert_eq!(steer_at(&none, 3), None);
+        let mut short = t.clone();
+        short.steer.truncate(10);
+        assert!(!steers(&short));
+        // Revs per km/h in one gear at full throttle, above walking pace.
+        let mut g = t.clone();
+        for k in 0..POINTS {
+            let (gear, speed, rpm, throttle) = match k {
+                0..100 => (2, 300, 9000, 100),
+                100..110 => (2, 1000, 5000, 100),
+                110..120 => (2, 1000, 6000, 100),
+                120..200 => (3, 1000, 4000, 100),
+                200..300 => (2, 1000, 9000, FULL_THROTTLE - 1),
+                _ => (4, 1000, 7000, 100),
+            };
+            (g.gear[k], g.speed[k], g.rpm[k], g.throttle[k]) = (gear, speed, rpm, throttle);
+        }
+        assert_eq!(gear_ratio(&g, 2), Some(60.0));
+        assert_eq!(gear_ratio(&g, 5), None);
     }
 }

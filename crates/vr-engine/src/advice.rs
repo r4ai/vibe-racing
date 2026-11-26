@@ -685,4 +685,172 @@ mod tests {
         assert!(tc(0.39, 2.0).is_empty());
         assert!(tc(0.79, 0.0).is_empty());
     }
+
+    /// A change of `control` from `from` to `to` at `lap` that did `set`.
+    fn measured(
+        control: &str,
+        from: f64,
+        to: f64,
+        lap: i32,
+        set: fn(&mut Experiment),
+    ) -> Experiment {
+        let mut e = Experiment {
+            control: control.into(),
+            from,
+            to,
+            lap,
+            laps_before: 3,
+            laps_after: 3,
+            lap_time_s: None,
+            understeer_s: None,
+            oversteer_s: None,
+            wheelspin_s: None,
+            rear_lock_s: None,
+            entry_oversteer_s: None,
+            entry_understeer_s: None,
+            exit_oversteer_s: None,
+        };
+        set(&mut e);
+        e
+    }
+
+    /// The change advised for `target`, with whole steps of the controls and
+    /// one change measured.
+    fn sized_change(b: &Behaviour, controls: &[&str], target: &str, e: Experiment) -> String {
+        let car = CarTelemetry {
+            controls: controls
+                .iter()
+                .map(|id| Control {
+                    id: (*id).into(),
+                    value: 3.0,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let adjustments: Vec<Adjustment> = controls.iter().map(|id| turned(id, 2.0, 3.0)).collect();
+        let experiments = [e];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        advise(b, 3, &car, None, &past)
+            .into_iter()
+            .find(|a| a.target == target)
+            .unwrap()
+            .change
+    }
+
+    #[test]
+    fn each_tendency_sizes_its_own_change() {
+        let phases = |entry: f64, exit: f64| crate::handling::Phases {
+            entry,
+            mid: 0.0,
+            exit,
+        };
+        // Entry oversteer 0.32 s, 0.17 s over half its threshold; a step took
+        // 0.1 s off: two steps.
+        let b = Behaviour {
+            oversteer: phases(0.32, 0.0),
+            ..Default::default()
+        };
+        let e = measured("brake_bias", 2.0, 3.0, 4, |e| {
+            e.entry_oversteer_s = Some(-0.1)
+        });
+        assert_eq!(
+            sized_change(&b, &["brake_bias"], "brake_bias", e),
+            "forward (higher number): to 5"
+        );
+        // With engine braking to turn, that instead; down helped.
+        let e = measured("engine_brake", 4.0, 3.0, 4, |e| {
+            e.entry_oversteer_s = Some(-0.1)
+        });
+        assert_eq!(
+            sized_change(&b, &["brake_bias", "engine_brake"], "engine_brake", e),
+            "less engine braking: to 1"
+        );
+        // Entry understeer 0.6 s, 0.35 s over; a step back took 0.2 s off.
+        let b = Behaviour {
+            understeer: phases(0.6, 0.0),
+            ..Default::default()
+        };
+        let e = measured("brake_bias", 4.0, 3.0, 4, |e| {
+            e.entry_understeer_s = Some(-0.2)
+        });
+        assert_eq!(
+            sized_change(&b, &["brake_bias"], "brake_bias", e),
+            "rearward (lower number): to 1"
+        );
+        // Wheelspin 0.85 s, 0.45 s over; a step took 0.2 s off.
+        let b = Behaviour {
+            wheelspin_s: 0.85,
+            ..Default::default()
+        };
+        let e = measured("traction_control", 1.0, 2.0, 4, |e| {
+            e.wheelspin_s = Some(-0.2)
+        });
+        assert_eq!(
+            sized_change(&b, &["traction_control"], "traction_control", e),
+            "more intervention: to 5"
+        );
+        // Some spin and a slide on the way out: the slide is measured.
+        let b = Behaviour {
+            wheelspin_s: 0.5,
+            oversteer: phases(0.0, 0.85),
+            ..Default::default()
+        };
+        let e = measured("traction_control", 1.0, 2.0, 4, |e| {
+            e.exit_oversteer_s = Some(-0.2)
+        });
+        assert_eq!(
+            sized_change(&b, &["traction_control"], "traction_control", e),
+            "more intervention: to 5"
+        );
+    }
+
+    #[test]
+    fn a_change_that_did_nothing_neither_helped_nor_hurt() {
+        let aim = Aim {
+            excess_s: 0.3,
+            effect: |e| e.rear_lock_s,
+            what: "rear locking",
+        };
+        // A turn too small to be one is no step and no change.
+        let adjustments = [turned("abs", 0.0, 1e-6), turned("abs", 0.0, 0.25)];
+        let experiments = [
+            measured("abs", 0.0, 1e-6, 2, |e| e.rear_lock_s = Some(-0.5)),
+            measured("abs", 0.0, 0.25, 3, |e| e.rear_lock_s = Some(-0.1)),
+        ];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        assert_eq!(past.step("abs"), Some(0.25));
+        assert_eq!(past.tried("abs", &aim), [(0.25, -0.1, 3)]);
+        let c = Control {
+            id: "abs".into(),
+            value: 1.0,
+        };
+        // Nothing changed: no way to go is known.
+        let experiments = [measured("abs", 0.0, 0.25, 3, |e| e.rear_lock_s = Some(0.0))];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        assert_eq!(sized(&c, None, &aim, &past), None);
+        // Helped, then a later one did nothing: not worse, nothing to disagree.
+        let experiments = [
+            measured("abs", 0.0, 0.25, 3, |e| e.rear_lock_s = Some(-0.1)),
+            measured("abs", 0.25, 0.5, 5, |e| e.rear_lock_s = Some(0.0)),
+        ];
+        let past = Past {
+            experiments: &experiments,
+            adjustments: &adjustments,
+        };
+        let (to, why) = sized(&c, Some(1.0), &aim, &past).unwrap();
+        assert_eq!(to, "to 1.75");
+        assert!(
+            why.starts_with("turning it 0.25 at lap 3 took 0.1s/lap"),
+            "{why}"
+        );
+    }
 }

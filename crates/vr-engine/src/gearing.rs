@@ -130,96 +130,114 @@ fn of_gear(shifts: &[(i8, f64, f64)], gear: i8) -> Option<(f64, f64)> {
     Some((median(&mut rpm)?, median(&mut speed)?))
 }
 
+/// Speed and pull, m/s², between each two points of a lap at full throttle
+/// in `gear`, straight on: in a corner the tyres take some of the pull.
+fn samples(t: &LapTrace, gear: i8) -> Vec<(f64, f64)> {
+    if t.t_ms.len() != POINTS {
+        return Vec::new();
+    }
+    let straight = |i: usize| {
+        t.lat
+            .get(i)
+            .is_none_or(|g| i32::from(*g).abs() <= STRAIGHT_LAT)
+    };
+    let full =
+        |i: usize| t.throttle[i] >= FULL && t.brake[i] == 0 && t.gear[i] == gear && straight(i);
+    t.t_ms
+        .windows(2)
+        .enumerate()
+        .filter(|(k, w)| full(*k) && full(k + 1) && w[1] > w[0])
+        .map(|(k, w)| {
+            let dt = f64::from(w[1] - w[0]) / 1000.0;
+            let (a, b) = (kmh(t, k), kmh(t, k + 1));
+            ((a + b) / 2.0, (b - a) / 3.6 / dt)
+        })
+        .collect()
+}
+
+/// The middle of a speed bin, km/h.
+fn centre(bin: i64) -> f64 {
+    (bin as f64 + 0.5) * BIN_KMH
+}
+
 /// How hard the car pulls in a gear, m/s², by speed bin, where more than one
 /// lap tells: one pass may be up a slope or out of a corner.
 /// With each bin, the standard error of its median (from the spread).
-fn pull(laps: &[&LapTrace], gear: i8) -> Vec<(f64, f64, f64)> {
+fn pull(laps: &[&LapTrace], gear: i8) -> Vec<(i64, f64, f64)> {
     let mut bins: std::collections::BTreeMap<i64, Vec<(usize, f64)>> = Default::default();
     for (n, t) in laps.iter().enumerate() {
-        for k in 0..POINTS - 1 {
-            // Straight on: in a corner the tyres take some of the pull.
-            let straight = |i: usize| {
-                t.lat
-                    .get(i)
-                    .is_none_or(|g| i32::from(*g).abs() <= STRAIGHT_LAT)
-            };
-            let full = |i: usize| {
-                t.throttle[i] >= FULL && t.brake[i] == 0 && t.gear[i] == gear && straight(i)
-            };
-            let (Some(a), Some(b)) = (secs(t, k), secs(t, k + 1)) else {
-                continue;
-            };
-            if !(full(k) && full(k + 1)) || b <= a {
-                continue;
-            }
-            let accel = (kmh(t, k + 1) - kmh(t, k)) / 3.6 / (b - a);
-            let mid = (kmh(t, k) + kmh(t, k + 1)) / 2.0;
+        for (mid, accel) in samples(t, gear) {
             bins.entry((mid / BIN_KMH).floor() as i64)
                 .or_default()
                 .push((n, accel));
         }
     }
     bins.into_iter()
-        .filter(|(_, v)| {
-            let mut laps: Vec<usize> = v.iter().map(|s| s.0).collect();
-            laps.dedup();
-            v.len() >= SAMPLES && laps.len() >= BIN_LAPS
-        })
         .filter_map(|(bin, v)| {
             // Points next to each other on one lap are one look, not many:
             // each lap gives one value, and the spread is between the laps.
-            let mut per_lap: Vec<f64> = Vec::new();
             let mut laps: Vec<usize> = v.iter().map(|s| s.0).collect();
             laps.dedup();
-            for n in laps {
-                let mut a: Vec<f64> = v.iter().filter(|s| s.0 == n).map(|s| s.1).collect();
-                per_lap.extend(median(&mut a));
+            if v.len() < SAMPLES || laps.len() < BIN_LAPS {
+                return None;
             }
+            let mut per_lap: Vec<f64> = laps
+                .into_iter()
+                .filter_map(|n| {
+                    let mut a: Vec<f64> = v.iter().filter(|s| s.0 == n).map(|s| s.1).collect();
+                    median(&mut a)
+                })
+                .collect();
             let m = median(&mut per_lap)?;
             let mut off: Vec<f64> = per_lap.iter().map(|x| (x - m).abs()).collect();
             let se = median(&mut off)? * MAD_SD / (per_lap.len() as f64).sqrt();
-            Some(((bin as f64 + 0.5) * BIN_KMH, m, se))
+            Some((bin, m, se))
         })
         .collect()
 }
 
-/// The speed from which `gear + 1` pulls harder than `gear`: only where the
-/// lower gear is seen to pull harder first, so that it is a crossing.
+/// The speed from which `gear + 1` pulls harder than `gear`.
 fn crossing(laps: &[&LapTrace], gear: i8) -> Option<f64> {
-    let low = pull(laps, gear);
     let high = pull(laps, gear + 1);
-    // Speed, the pull of each gear, and the error of their difference.
-    let both: Vec<(f64, f64, f64, f64)> = low
-        .iter()
-        .filter_map(|(v, a, ea)| {
-            let (_, b, eb) = high.iter().find(|(w, _, _)| w == v)?;
-            Some((*v, *a, *b, ea.hypot(*eb)))
+    // Bin, the pull of each gear, and the error of their difference.
+    let both: Vec<(i64, f64, f64, f64)> = pull(laps, gear)
+        .into_iter()
+        .filter_map(|(bin, a, ea)| {
+            let (_, b, eb) = high.iter().find(|h| h.0 == bin)?;
+            Some((bin, a, *b, ea.hypot(*eb)))
         })
         .collect();
+    cross(&both)
+}
+
+/// Where the higher gear begins to pull harder, from the pull of both by
+/// bin: only where the lower gear is seen to pull harder first, so that it is
+/// a crossing.
+fn cross(both: &[(i64, f64, f64, f64)]) -> Option<f64> {
     let first = both.first()?;
     if first.1 <= first.2 {
         return None;
     }
+    let d = |i: usize| both[i].2 - both[i].1;
     // Pooled over places of the track: a turn smaller than the noise of the
     // laps is not told.
-    let clear = |i: usize, j: usize| {
-        (both[j].2 - both[j].1) - (both[i].2 - both[i].1) >= NOISE * both[i].3.hypot(both[j].3)
-    };
+    let clear = |i: usize, j: usize| d(j) - d(i) >= NOISE * both[i].3.hypot(both[j].3);
     // Where the difference turns from the lower gear to the higher one, in
     // bins next to each other, and stays there in the next: one noisy bin or
     // a jump over missing speeds is no crossing. Between the two bins, where
     // the difference is zero.
-    let next = |i: usize, j: usize| (both[j].0 - both[i].0 - BIN_KMH).abs() < 1e-6;
-    let d = |i: usize| both[i].2 - both[i].1;
+    let next = |i: usize| both[i].0 == both[i - 1].0 + 1;
     (1..both.len())
         .find(|&i| {
-            next(i - 1, i)
+            next(i)
                 && clear(i - 1, i)
                 && d(i - 1) < 0.0
                 && d(i) >= 0.0
-                && (i + 1 == both.len() || next(i, i + 1) && d(i + 1) >= 0.0)
+                && both
+                    .get(i + 1)
+                    .is_none_or(|_| next(i + 1) && d(i + 1) >= 0.0)
         })
-        .map(|i| both[i - 1].0 + BIN_KMH * -d(i - 1) / (d(i) - d(i - 1)))
+        .map(|i| centre(both[i - 1].0) + BIN_KMH * -d(i - 1) / (d(i) - d(i - 1)))
 }
 
 /// Revs per km/h in a gear, from the laps.
@@ -266,18 +284,23 @@ fn clips(t: &LapTrace) -> Vec<(usize, usize, f64)> {
         )
     };
     let mut out = Vec::new();
-    let mut k = 0;
-    while k < POINTS {
+    // A point in a cut is in no other. A run that is no cut may hold the
+    // start of one: the revs climbing up to it.
+    let mut from = 0;
+    for k in 0..POINTS {
         let rpm = f64::from(t.rpm[k]);
-        let mut end = k;
-        while end < POINTS && rpm > 0.0 && flat(end, rpm) {
-            end += 1;
+        if k < from || rpm <= 0.0 {
+            continue;
         }
+        // The last point is never held: a run ends by then.
+        let Some(end) = (k..POINTS).find(|&e| !flat(e, rpm)) else {
+            continue;
+        };
         if end - k >= CLIP_POINTS && cut(k, end) == Some(true) {
             let mut at: Vec<f64> = (k..end).map(|i| f64::from(t.rpm[i])).collect();
             out.push((k, end, median(&mut at).unwrap_or(rpm)));
+            from = end;
         }
-        k = end.max(k + 1);
     }
     out
 }
@@ -319,8 +342,7 @@ fn on_limiter(t: &LapTrace, limit: f64) -> f64 {
     clips(t)
         .into_iter()
         .filter(|c| c.2 >= limit * LIMITER)
-        .filter_map(|(from, to, _)| Some(secs(t, to.min(POINTS - 1))? - secs(t, from)?))
-        .filter(|d| *d > 0.0)
+        .filter_map(|(from, to, _)| Some(secs(t, to)? - secs(t, from)?))
         .sum()
 }
 
@@ -590,6 +612,237 @@ mod tests {
                 .contains("limiter about 9000 rpm (estimated from the laps)"),
             "{}",
             g.to_text()
+        );
+    }
+
+    /// A lap at full throttle, straight on, a point every `step_ms`: speed,
+    /// gear and revs of each point from `at`.
+    fn built(step_ms: u32, at: impl Fn(usize) -> (f64, i8, f64)) -> LapTrace {
+        let mut t = lap(1, 0.0);
+        for k in 0..POINTS {
+            let (v, g, r) = at(k);
+            t.t_ms[k] = k as u32 * step_ms;
+            t.speed[k] = (v * 10.0).round() as u16;
+            t.gear[k] = g;
+            t.rpm[k] = r.round() as u16;
+        }
+        t
+    }
+
+    #[test]
+    fn the_small_parts() {
+        let t = built(100, |k| (100.0 + k as f64 * 0.1, 2, 5000.0));
+        assert_eq!(kmh(&t, POINTS), kmh(&t, POINTS - 1));
+        assert_eq!(kmh(&t, POINTS), 199.9);
+        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), Some(2.5));
+        assert_eq!(median(&mut [3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(median(&mut []), None);
+        assert!(usable(&t));
+        let short = |f: fn(&mut LapTrace)| {
+            let mut s = t.clone();
+            f(&mut s);
+            usable(&s)
+        };
+        assert!(!short(|s| s.speed.truncate(10)));
+        assert!(!short(|s| s.gear.truncate(10)));
+        assert!(!short(|s| s.rpm.truncate(10)));
+        assert!(!short(|s| s.throttle.truncate(10)));
+        // The same gear around a point.
+        let mut g = t.clone();
+        g.gear[10] = 3;
+        let held_at: Vec<usize> = (0..16).filter(|&k| held(&g, k)).collect();
+        assert_eq!(held_at, [2, 3, 4, 5, 6, 7, 8, 13, 14, 15]);
+        assert!(!held(&g, POINTS - 1));
+        // Out of neutral is no change up.
+        let n = built(100, |k| {
+            let gear = match k {
+                0..10 => 0,
+                10..20 => 1,
+                _ => 2,
+            };
+            (100.0, gear, 5000.0)
+        });
+        assert_eq!(upshifts(&n), [(1, 5000.0, 100.0)]);
+        // Revs per km/h, not from the slowest points.
+        let r = built(100, |k| {
+            if k < 600 {
+                (30.0, 2, 9000.0)
+            } else {
+                (100.0, 2, 5000.0)
+            }
+        });
+        assert_eq!(ratio(&[&r], 2), Some(50.0));
+    }
+
+    #[test]
+    fn the_pull_of_each_lap_and_its_spread() {
+        // 1, 2 and 3 km/h a tenth of a second from 100 km/h.
+        let by = |kmh: f64| built(100, move |k| (100.0 + kmh * k as f64, 2, 5000.0));
+        let (a, b, c) = (by(1.0), by(2.0), by(3.0));
+        let pull_of = |kmh: f64| kmh / 3.6 / 0.1;
+        let s = samples(&a, 2);
+        assert_eq!(s.len(), POINTS - 1);
+        assert_eq!(s[0].0, 100.5);
+        assert!((s[0].1 - pull_of(1.0)).abs() < 1e-9, "{}", s[0].1);
+        // A point off the throttle takes the samples on either side of it.
+        let mut off = a.clone();
+        off.throttle[1] = 50;
+        assert_eq!(samples(&off, 2)[0].0, 102.5);
+        // Without the times of the points, nothing.
+        let mut timeless = a.clone();
+        timeless.t_ms.clear();
+        assert!(samples(&timeless, 2).is_empty());
+        // 100-105 km/h: one value a lap, the middle one, and its error.
+        let p = pull(&[&a, &b, &c], 2);
+        let (bin, m, se) = p[0];
+        assert_eq!(bin, 20);
+        assert!((m - pull_of(2.0)).abs() < 1e-9, "{m}");
+        let spread = pull_of(1.0) * MAD_SD / 3f64.sqrt();
+        assert!((se - spread).abs() < 1e-9, "{se}");
+        // One lap alone tells nothing.
+        assert!(pull(&[&a], 2).is_empty());
+        // Two laps, but one sample each in 100-105.
+        let p = pull(&[&by(5.0), &by(6.0)], 2);
+        assert!(p.iter().all(|b| b.0 != 20), "{p:?}");
+    }
+
+    #[test]
+    fn a_crossing_is_a_clear_turn_in_bins_next_to_each_other() {
+        // Bin, pull of the lower gear, of the higher, error of the difference.
+        let low = (20, 7.0, 6.0, 0.6);
+        let high = (21, 5.0, 6.0, 0.8);
+        // -1 then +1: a turn of 2, twice the error; zero halfway.
+        assert_eq!(cross(&[low, high]), Some(105.0));
+        assert_eq!(cross(&[low, high, (22, 4.0, 6.0, 0.1)]), Some(105.0));
+        // From -2 to 0.
+        assert_eq!(
+            cross(&[(20, 8.0, 6.0, 0.6), (21, 6.0, 6.0, 0.8)]),
+            Some(107.5)
+        );
+        // A turn of 1.9: within the noise.
+        assert_eq!(cross(&[low, (21, 5.1, 6.0, 0.8)]), None);
+        // Across a missing bin.
+        assert_eq!(cross(&[low, (22, 5.0, 6.0, 0.8)]), None);
+        // Turning back in the next bin, or a gap before it.
+        assert_eq!(cross(&[low, high, (22, 7.0, 6.0, 0.1)]), None);
+        assert_eq!(cross(&[low, high, (23, 4.0, 6.0, 0.1)]), None);
+        // The higher gear pulling harder from the first bin.
+        assert_eq!(cross(&[high]), None);
+        assert_eq!(cross(&[]), None);
+    }
+
+    /// Up to 300 km/h by `gain` km/h a point (a quarter of a second) in 2nd at
+    /// 30 rpm a km/h, held from point 40 with the revs rising by `rise` to
+    /// point 49; 3rd from 51.
+    fn cut_lap(gain: f64, rise: f64) -> LapTrace {
+        built(250, move |k| match k {
+            0..40 => (
+                300.0 - gain * (40 - k) as f64,
+                2,
+                (300.0 - gain * (40 - k) as f64) * 30.0,
+            ),
+            40..51 => (300.0, 2, 9000.0 + rise * (k - 40).min(9) as f64 / 9.0),
+            _ => (300.0 + 0.01 * (k - 50) as f64, 3, 6000.0),
+        })
+    }
+
+    #[test]
+    fn a_cut_is_flat_revs_right_after_a_hard_pull() {
+        // 3.6 km/h in 0.75 s: 1.33 m/s². 1.2% faster over the 3 points, so
+        // the revs of 10 points could rise by 3.6%; a cut rises by under a
+        // quarter of it, 81 rpm.
+        assert_eq!(
+            clips(&cut_lap(1.2, 80.0)),
+            [(40, 50, 9000.0 + 80.0 * 4.5 / 9.0)]
+        );
+        assert!(clips(&cut_lap(1.2, 82.0)).is_empty());
+        // 1.8 km/h in 0.75 s: 0.67 m/s², no pull to cut.
+        assert!(clips(&cut_lap(0.6, 0.0)).is_empty());
+        // Flat at once: the last 2 points of the climb are within 1% of it,
+        // from point 38 at 9.5 s to 50 at 12.5 s.
+        let t = cut_lap(1.2, 0.0);
+        assert_eq!(clips(&t), [(38, 50, 9000.0)]);
+        assert_eq!(on_limiter(&t, 9000.0), 3.0);
+        // No time between the points: nothing told of the pull.
+        let mut still = t.clone();
+        still.t_ms[35..=50].fill(10_000);
+        assert!(clips(&still).is_empty(), "{:?}", clips(&still));
+        // Without revs, below full throttle or in neutral: no cut.
+        let mut none = t.clone();
+        none.rpm = vec![0; POINTS];
+        assert!(clips(&none).is_empty());
+        let mut part = t.clone();
+        part.throttle = vec![FULL - 1; POINTS];
+        assert!(clips(&part).is_empty());
+        let mut neutral = t.clone();
+        neutral.gear = vec![0; POINTS];
+        assert!(clips(&neutral).is_empty());
+    }
+
+    #[test]
+    fn past_the_limiter_just_after_a_change_down() {
+        // Down to 2nd at point 500, the revs high at one point after it.
+        let down = |peak_at: usize, rpm: f64| {
+            built(100, move |k| {
+                let gear = if k <= 500 { 3 } else { 2 };
+                (100.0, gear, if k == peak_at { rpm } else { 80.0 })
+            })
+        };
+        // 1% over 100 rpm: 101, past it only above.
+        assert!(over_revs(&down(501, 101.0), 100.0).is_empty());
+        assert_eq!(
+            over_revs(&down(503, 102.0), 100.0),
+            [OverRev {
+                gear: 2,
+                at: 0.5,
+                kmh: 100.0,
+                rpm: 102.0
+            }]
+        );
+        // Three points after it, no later.
+        assert!(over_revs(&down(504, 102.0), 100.0).is_empty());
+    }
+
+    #[test]
+    fn nothing_without_what_it_takes() {
+        let t = lap(1, 175.0);
+        let mut bad = t.clone();
+        bad.rpm.clear();
+        assert_eq!(gearing(&[], &bad, &t), None);
+        assert_eq!(gearing(&[], &t, &bad), None);
+        let mut dead = t.clone();
+        dead.rpm = vec![0; POINTS];
+        assert_eq!(gearing(&[], &dead, &dead), None);
+    }
+
+    #[test]
+    fn the_text_tells_what_is_known() {
+        let shift = |gear: i8, reference: bool, best: (Option<f64>, Option<f64>)| Shift {
+            gear,
+            rpm: 8000.0,
+            kmh: 140.0,
+            reference_rpm: reference.then_some(8200.0),
+            reference_kmh: reference.then_some(145.0),
+            best_kmh: best.0,
+            best_rpm: best.1,
+        };
+        let g = Gearing {
+            shifts: vec![
+                shift(2, true, (Some(150.0), Some(8250.0))),
+                shift(3, false, (Some(190.0), None)),
+                shift(4, false, (None, None)),
+            ],
+            max_rpm: 8500.0,
+            limiter_rpm: None,
+            limiter_s: 0.0,
+            reference_limiter_s: 0.0,
+            over_revs: 0,
+            over_rev_at: Vec::new(),
+            reference_over_revs: 0,
+        };
+        assert_eq!(
+            g.to_text(),
+            "changes up: 2->3 at 8000 rpm 140 km/h (reference 8200 rpm, 145 km/h), pull crossover 150 km/h (8250 rpm, estimated from the laps, shift time not counted) | 3->4 at 8000 rpm 140 km/h, pull crossover 190 km/h | 4->5 at 8000 rpm 140 km/h | no limiter reached, highest 8500 rpm\n"
         );
     }
 }

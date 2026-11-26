@@ -1407,8 +1407,71 @@ mod tests {
         );
         c.throttle = Some(opening(0, 79.0, false, false));
         assert_eq!(
-            corner_advice(&report(vec![c], vec![], 0)).unwrap(),
+            corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap(),
             "1コーナーで0.2秒失ってる。ラインを見直そう。"
+        );
+        // As many lifts as the best lap: whatever the car did, no new mistake.
+        c.reference_throttle = Some(opening(2, 60.0, false, false));
+        for (spin, counter) in [(false, true), (true, false)] {
+            assert_eq!(
+                lifted(&mut c, spin, counter),
+                "1コーナーで0.2秒失ってる。ラインを見直そう。"
+            );
+        }
+        // Picked up as late as the best lap.
+        let mut c = corner(1, 0.2, None, 0.0);
+        let at = |pickup_m: f64| ThrottleShape {
+            pickup_m,
+            ..opening(0, 60.0, false, false)
+        };
+        (c.throttle, c.reference_throttle) = (Some(at(20.0)), Some(at(20.0)));
+        assert_eq!(
+            corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap(),
+            "1コーナーで0.2秒失ってる。ラインを見直そう。"
+        );
+        (c.throttle, c.reference_throttle) = (Some(at(35.0)), Some(at(20.0)));
+        assert_eq!(
+            corner_advice(&report(vec![c], vec![], 0)).unwrap(),
+            "1コーナーで0.2秒失ってる。アクセルの踏み始めがベストより15m遅い。向きが変わったら早めに乗せよう。"
+        );
+    }
+
+    #[test]
+    fn the_pedal_is_told_only_where_the_stop_differs() {
+        let said = |a: BrakeShape, b: BrakeShape, min_kmh: f64| {
+            let mut c = corner(1, 0.2, Some(-20.0), min_kmh);
+            (c.brake, c.reference_brake) = (Some(a), Some(b));
+            corner_advice(&report(vec![c], vec![], 0)).unwrap()
+        };
+        let point = "1コーナーで0.2秒失ってる。ブレーキをあと20m遅らせられる。";
+        let g = |decel_g: f64, s: BrakeShape| BrakeShape {
+            decel_g: Some(decel_g),
+            ..s
+        };
+        // More pedal for the same stop: nothing to press harder for.
+        assert_eq!(
+            said(
+                g(1.4, shape(85, 10.0, 40.0, 30, 10.0)),
+                g(1.4, shape(95, 10.0, 40.0, 30, 10.0)),
+                0.0
+            ),
+            point
+        );
+        // More brake at the turn-in on the best lap, but let go over as long.
+        let best = g(1.4, shape(95, 10.0, 40.0, 30, 10.0));
+        assert_eq!(
+            said(g(1.4, shape(95, 10.0, 40.0, 20, 10.0)), best, -3.0),
+            point
+        );
+        // More brake left at the turn-in, but released over as long.
+        assert_eq!(
+            said(g(1.4, shape(95, 10.0, 40.0, 40, 10.0)), best, -4.0),
+            point
+        );
+        // Held longer, but as fast through the corner.
+        assert_eq!(
+            said(g(1.4, shape(95, 10.0, 50.0, 40, 10.0)), best, 0.0),
+            point
         );
     }
 }
