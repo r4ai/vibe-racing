@@ -422,8 +422,8 @@ fn throttle_shape(t: &LapTrace, slowest: usize, to: usize, metre: f64) -> Option
     let mut lifts = Vec::new();
     let mut high = 0u8;
     let mut lifted = false;
-    for k in pickup..full.unwrap_or(to) {
-        let p = t.throttle[k];
+    let until = full.unwrap_or(to);
+    for (k, &p) in t.throttle.iter().enumerate().take(until).skip(pickup) {
         if p >= high {
             high = p;
             lifted = false;
@@ -1034,9 +1034,7 @@ mod tests {
         assert!(!throttle_shape(&late, 165, 400, 5.0).unwrap().wheelspin);
         // Steering the other way on the way out: caught a slide.
         let mut caught = grip.clone();
-        for k in 177..181 {
-            caught.steer[k] = -40;
-        }
+        caught.steer[177..181].fill(-40);
         assert!(throttle_shape(&caught, 165, 400, 5.0).unwrap().countersteer);
         // One point of noise is not.
         let mut noise = grip.clone();
