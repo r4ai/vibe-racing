@@ -2698,8 +2698,10 @@ mod tests {
         /// Events up to and including the first one matching `stop`, minus levels and telemetry.
         async fn until(&mut self, stop: impl Fn(&Event) -> bool) -> Vec<Event> {
             let mut seen = Vec::new();
+            // One deadline for all: levels keep coming while a button is held.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             loop {
-                let e = tokio::time::timeout(Duration::from_secs(5), self.events.recv())
+                let e = tokio::time::timeout_at(deadline, self.events.recv())
                     .await
                     .unwrap_or_else(|_| panic!("timed out; saw {seen:?}"))
                     .expect("engine stopped");
