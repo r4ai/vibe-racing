@@ -1334,28 +1334,78 @@ mod tests {
         gear_low.gear = Some(1);
         gear_low.reference_gear = Some(2);
         assert_eq!(
-            corner_advice(&report(vec![gear_low], vec![], 0)).unwrap(),
+            corner_advice(&report(vec![gear_low.clone()], vec![], 0)).unwrap(),
             "ヘアピンで0.2秒失ってる。ベストは2速、1速上でボトムを転がそう。"
         );
+        // Same gear must not trigger the lower-gear branch.
+        gear_low.gear = Some(2);
+        assert_eq!(
+            corner_advice(&report(vec![gear_low], vec![], 0)).unwrap(),
+            "ヘアピンで0.2秒失ってる。ボトムが4キロ低い、ブレーキの抜きを少し早めて転がそう。"
+        );
 
-        // Wrong gear (too high -> slow exit).
+        // Wrong gear (too high -> slow exit or late throttle).
         let mut gear_high = corner(4, 0.16, Some(0.0), 0.0);
         gear_high.name = Some("シケイン".into());
         gear_high.gear = Some(3);
         gear_high.reference_gear = Some(2);
         gear_high.exit_kmh = -4.0;
         assert_eq!(
+            corner_advice(&report(vec![gear_high.clone()], vec![], 0)).unwrap(),
+            "シケインで0.2秒失ってる。ベストは2速、1速落として立ち上がりを稼ごう。"
+        );
+        // Same gear must not trigger the higher-gear branch.
+        gear_high.gear = Some(2);
+        assert_eq!(
+            corner_advice(&report(vec![gear_high.clone()], vec![], 0)).unwrap(),
+            "シケインで0.2秒失ってる。出口が4キロ遅い、脱出重視で早めにアクセルを乗せよう。"
+        );
+        // Higher gear with late throttle alone (exit_kmh ok).
+        gear_high.gear = Some(3);
+        gear_high.exit_kmh = 0.0;
+        gear_high.throttle_m = Some(5.0);
+        assert_eq!(
             corner_advice(&report(vec![gear_high], vec![], 0)).unwrap(),
             "シケインで0.2秒失ってる。ベストは2速、1速落として立ち上がりを稼ごう。"
         );
 
-        // Slow exit without late throttle threshold.
+        // Flat-out threshold boundary: 95% does NOT count as lifting.
+        let mut barely_flat = corner(1, 0.16, None, 0.0);
+        barely_flat.exit_kmh = 0.0;
+        barely_flat.reference_min_throttle = 100;
+        barely_flat.min_throttle = 95;
+        assert_eq!(
+            corner_advice(&report(vec![barely_flat], vec![], 0)).unwrap(),
+            "1コーナーで0.2秒失ってる。進入と脱出のラインを揃えよう。"
+        );
+
+        // Late-braking overshoot triggers on each of late_throttle, slow_exit, or slow_apex alone.
+        for (throttle_m, exit_kmh, min_kmh) in
+            [(Some(5.0), 0.0, 0.0), (None, -3.0, 0.0), (None, 0.0, -3.0)]
+        {
+            let mut c = corner(2, 0.25, Some(10.0), min_kmh);
+            c.throttle_m = throttle_m;
+            c.exit_kmh = exit_kmh;
+            assert_eq!(
+                corner_advice(&report(vec![c], vec![], 0)).unwrap(),
+                "2コーナーで0.2秒失ってる。ブレーキが10m奥すぎて脱出が遅れてる、手前から入って早めに開けよう。"
+            );
+        }
+
+        // Slow exit boundary: -3.0 triggers, -2.9 and +0.0 do not.
         let mut exit = corner(5, 0.16, Some(0.0), 0.0);
         exit.exit_kmh = -3.0;
         assert_eq!(
-            corner_advice(&report(vec![exit], vec![], 0)).unwrap(),
+            corner_advice(&report(vec![exit.clone()], vec![], 0)).unwrap(),
             "5コーナーで0.2秒失ってる。出口が3キロ遅い、脱出重視で早めにアクセルを乗せよう。"
         );
+        for ok_exit in [-2.9, 0.0] {
+            exit.exit_kmh = ok_exit;
+            assert_eq!(
+                corner_advice(&report(vec![exit.clone()], vec![], 0)).unwrap(),
+                "5コーナーで0.2秒失ってる。進入と脱出のラインを揃えよう。"
+            );
+        }
     }
 
     fn shape(peak: u8, build_m: f64, release_m: f64, at_turn_in: u8, coast_m: f64) -> BrakeShape {
