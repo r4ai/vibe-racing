@@ -1,0 +1,82 @@
+# Held-out real-world race radio set: never tuned on directly.
+# Distinct wording and voices from real-radio.yaml.
+
+- id: heldout-terse-race
+  world:
+    start_s: 1150
+    laps: 25
+    tyre_deg_s: 0.13
+    lap_noise_s: 0.3
+    fuel_start_l: 46
+    player_pit_lap: null
+    rival_pit_lap: 11
+    yellow: null
+    incident_at: null
+    stops: [[6, 9], [8, 10]]
+  calls:
+    - id: h-status
+      say: 今どんな感じ？
+      voice: vv:1
+      facts: [position]
+      points:
+        - 現在の順位と、今もっとも重要な状況（前後との差・推移や燃料・ピットの状況）を伝える
+        - 次の行動や見通しを一つ添える
+    - id: h-pace-mode
+      say: 抑えた方がいい？
+      voice: vv:3
+      points:
+        - 抑えるか攻めるかを一つに決めて言う
+        - 実データ（前後との差・推移・燃料・タイヤの落ち）と矛盾しない
+    - id: h-tired
+      say: タイヤもう厳しい
+      voice: vv:8
+      points:
+        - 実データ（タイムの落ち、残り周回、ピット予定など）を踏まえた具体的な対処（ピット時期、労り方等）を伝える
+
+- id: heldout-driving
+  world:
+    start_s: 740
+    laps: 20
+    player_pit_lap: null
+    tyre_deg_s: 0.08
+    lap_noise_s: 0.25
+    yellow: null
+    incident_at: null
+    balance: { rear_lock_s: 1.1, oversteer_exit_s: 1.4 }
+  calls:
+    - id: h-rear-lock
+      say: ブレーキで巻く
+      voice: vv:1
+      points:
+        - データでリアロックが出ていることを踏まえ、ブレーキバイアスを前寄り（数値を上げる方向）にする等の一手を言う
+    - id: h-exit-loose
+      say: アクセル踏むとケツ出る
+      voice: vv:3
+      points:
+        - データで脱出オーバーが出ていることを踏まえ、トラコンを強めるか立ち上がりのアクセル操作・ショートシフト等の具体的な一手を言う
+
+- id: heldout-strategy
+  world:
+    start_s: 1200
+    laps: 30
+    tyre_deg_s: 0.18
+    lap_noise_s: 0.15
+    fuel_start_l: 88
+    player_pit_lap: null
+    rival_pit_lap: null
+    yellow: null
+    incident_at: null
+    stops: [[6, 8], [7, 9], [8, 10]]
+  calls:
+    - id: h-undercut-sense
+      say: 先に入った方がいい？
+      voice: gemini:Aoede
+      points:
+        - 先に入るべきか待つべきかを一つに決めて言う
+        - 後ろの車からの脅威・前の車へのアンダーカット可否・戻る位置など実データと矛盾しない
+    - id: h-rejoin-check
+      say: 今ボックスしたら詰まる？
+      voice: vv:8
+      facts: [rejoin]
+      points:
+        - 今ピットに入った場合の戻る順位と、周囲に車がいるか（トラフィック・クリーンエア）を伝える

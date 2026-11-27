@@ -1,0 +1,156 @@
+# Real-world race radio set (Super Formula / Super GT / F1 / WEC inspired):
+# terse/abstract driver calls requiring context inference, deep driving advice,
+# and multi-step tactical anticipation. Used while improving the radio.
+
+- id: terse-battle
+  world:
+    start_s: 1120
+    laps: 24
+    tyre_deg_s: 0.14
+    lap_noise_s: 0.3
+    fuel_start_l: 48
+    player_pit_lap: null
+    rival_pit_lap: 11
+    yellow: null
+    incident_at: null
+    stops: [[6, 9], [7, 10], [8, 10]]
+  calls:
+    - id: terse-status
+      say: どう？
+      voice: vv:13
+      facts: [position]
+      points:
+        - 現在の順位と、今もっとも重要な状況（前後との差・推移、または燃料・ピットの状況）を文脈から補って伝える
+        - 次にやるべき行動や見通しを一つ添える
+    - id: terse-push-or-save
+      say: プッシュ？セーブ？
+      voice: vv:13
+      points:
+        - 攻める（プッシュ）か抑える（セーブ）かを一つに決めて言う
+        - 前後との差・推移・燃料・タイヤの落ちなど実データの根拠が矛盾しない
+    - id: terse-can-i
+      say: いける？
+      voice: vv:13
+      points:
+        - 現在の状況（前との差・燃料・ピットなど）から「いけるか」の結論を言い切る
+        - 根拠となる数字か、次の具体的な一手（仕掛ける場所・ピット時期・ペース等）を添える
+    - id: terse-tough
+      say: きつい
+      voice: vv:13
+      points:
+        - 聞き取れない扱い（「聞き取れなかった」等）にせず、ドライバーの訴えとして受ける
+        - 実データ（タイヤの落ち、ペース、前後との差、燃料など）から今の厳しい要因と次の一手を伝える
+
+- id: driving-coaching
+  world:
+    start_s: 760
+    laps: 20
+    player_pit_lap: null
+    tyre_deg_s: 0.08
+    lap_noise_s: 0.25
+    yellow: null
+    incident_at: null
+    balance: { understeer_mid_s: 3.2, wheelspin_s: 1.5 }
+  calls:
+    - id: front-wont-turn
+      say: フロント入らない
+      voice: vv:2
+      points:
+        - データで中盤アンダーが出ていることを踏まえている（handling と矛盾しない）
+        - 具体的なドライビングの打ち手（進入速度・ブレーキリリース等）か、車内・次セッションのセットアップ提案（フロントARBを柔らかくする等）を一つ言う
+    - id: rear-sliding
+      say: 立ち上がり滑る
+      voice: vv:2
+      points:
+        - データで空転（wheelspin）が出ていることを踏まえている
+        - トラコンを強める方向か、立ち上がりのアクセル操作・ショートシフトなど具体的な一手を言う
+    - id: where-to-gain
+      say: もっと速く走りたい、どこ詰めればいい？
+      voice: vv:2
+      points:
+        - セクター・コーナー・挙動のどれか実データに基づく具体的な改善箇所を挙げる
+        - 漠然とした応援ではなく、具体的な操作や走りの一手を言う
+
+- id: wec-fuel-save
+  world:
+    start_s: 1260
+    laps: 30
+    fuel_start_l: 47
+    fuel_per_lap_l: 2.9
+    player_pit_lap: null
+    rival_pit_lap: 12
+    tyre_deg_s: 0.06
+    lap_noise_s: 0.35
+    yellow: null
+    incident_at: null
+    stops: [[0, 14], [4, 15]]
+  calls:
+    - id: fuel-can-make
+      say: これ、いける？
+      voice: gemini:Kore
+      facts: [fuel_laps]
+      points:
+        - 燃料が今のペースでは足りるか足りないかの結論を言う（残り周回との比較）
+        - 完走するための行動（目標燃費・リフト＆コースト等のセーブ、またはピット）を具体的に伝える
+    - id: how-to-save
+      say: どうやって稼ぐ？
+      voice: gemini:Kore
+      points:
+        - 燃料を節約する具体的な走法（リフト＆コースト、ショートシフト等）を伝える
+        - 実データに基づく目標の消費量（L/周）または不足量と矛盾しない
+
+- id: sgt-rain-crossover
+  world:
+    start_s: 1140
+    laps: 25
+    fuel_start_l: 42
+    player_pit_lap: 15
+    rival_pit_lap: 11
+    tyre_deg_s: 0.08
+    lap_noise_s: 0.4
+    rain: [960, 1500]
+    yellow: null
+    incident_at: null
+    stops: [[0, 13], [5, 10], [8, 12]]
+  calls:
+    - id: rain-terse
+      say: 滑る、やばい
+      voice: gemini:Charon
+      behavior: calm
+      points:
+        - 路面が濡れてきている・雨が増えている事実（weather）を踏まえる
+        - 走り方の注意（ブレーキ・立ち上がり等）またはピット・タイヤ判断の見通しを短く伝える
+    - id: stay-or-box
+      say: 入る？
+      voice: gemini:Charon
+      points:
+        - 聞き取れない扱いにせず、今ピットに入るべきかステイアウトすべきかを一つに決めて言う
+        - 燃料・雨・戦略など実データと矛盾しない
+
+- id: sf-undercut-chess
+  world:
+    start_s: 1180
+    laps: 30
+    tyre_deg_s: 0.2
+    lap_noise_s: 0.15
+    fuel_start_l: 90
+    player_pit_lap: null
+    rival_pit_lap: null
+    yellow: null
+    incident_at: null
+    stops: [[6, 8], [7, 9], [8, 9], [9, 10]]
+  calls:
+    - id: behind-terse
+      say: 後ろ
+      voice: vv:13
+      facts: [gap_behind]
+      points:
+        - 後ろの車との差（秒）
+        - 推移またはアンダーカットの脅威・守り方など先を見据えた一手を添える
+    - id: next-move
+      say: 次どうする？
+      voice: vv:13
+      facts: [stop_lap]
+      points:
+        - 作戦の次の一手（いつピットに入るか、または後ろへの対応）を決めて言う
+        - 落ち方・ピット損失・後ろの車など実データの根拠を添える

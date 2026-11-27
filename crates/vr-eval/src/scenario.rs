@@ -350,6 +350,8 @@ mod tests {
             "complex.yaml",
             "complex-heldout.yaml",
             "pressure.yaml",
+            "real-radio.yaml",
+            "real-radio-heldout.yaml",
         ] {
             let stints = load(&dir().join(name)).unwrap();
             assert!(stints.len() >= 3, "{name}");
@@ -362,6 +364,7 @@ mod tests {
         new_to("dev.yaml", "heldout.yaml");
         new_to("features.yaml", "features-heldout.yaml");
         new_to("complex.yaml", "complex-heldout.yaml");
+        new_to("real-radio.yaml", "real-radio-heldout.yaml");
     }
 
     fn new_to(known: &str, held_out: &str) {

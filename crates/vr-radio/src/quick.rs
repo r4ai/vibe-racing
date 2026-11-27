@@ -203,7 +203,36 @@ const MORE: &[&str] = &[
     "回数",
     "どっち",
     "どちら",
+    // Terse/abstract real-world radio calls that need live context & engineering judgement.
+    "きつい",
+    "厳しい",
+    "やばい",
+    "入る",
+    "入ろ",
+    "プッシュ",
+    "セーブ",
+    "抑え",
+    "リフト",
+    "リフコ",
+    "滑る",
+    "滑っ",
+    "すべる",
+    "巻く",
+    "巻き",
+    "タレ",
+    "たれ",
+    "重い",
+    "跳ね",
+    "ロック",
+    "もっと速",
+    "速く走",
+    "伸びしろ",
+    "次どう",
+    "どうする",
 ];
+
+/// Short 2-3 character real radio calls that must go to the agent, never `Unclear`.
+const TERSE: &[&str] = &["どう", "今どう", "いける", "いけそ", "押す"];
 
 /// Another car, or the cars: their tyres, fuel and damage are not ours.
 const OTHERS: &[&str] = &[
@@ -526,7 +555,7 @@ pub fn read(text: &str) -> Option<Quick> {
     {
         return Some(Quick::Say(topic));
     }
-    let more = MORE.iter().any(|m| s.contains(m));
+    let more = MORE.iter().any(|m| s.contains(m)) || TERSE.contains(&s.as_str());
     (chars <= UNCLEAR_CHARS && !more).then_some(Quick::Unclear)
 }
 
@@ -681,11 +710,9 @@ fn topic(s: &str) -> Option<&'static str> {
         "状況",
         "セッション情報",
         "どうなってる",
-        "今どんな",
         "繋がって",
         "つながって",
-    ]) || matches!(s, "今どう" | "どう" | "どんな感じ")
-    {
+    ]) {
         "status"
     } else {
         return None;
@@ -997,7 +1024,6 @@ mod tests {
                 &[
                     "アイレーシング、繋がってるこれ今。",
                     "セッション情報は。",
-                    "今どう？",
                     "状況は",
                 ],
             ),
@@ -1070,9 +1096,18 @@ mod tests {
             "普通に走れるけど。",
             "これ入んないと失格。",
             "早いのとか遅いのとか、どこで失ってるのとか教えて。",
+            // Terse/abstract calls go to the agent for contextual inference.
+            "どう？",
+            "今どう？",
+            "今どんな感じ？",
+            "いける？",
+            "きつい",
+            "プッシュ？セーブ？",
+            "もっと速く走りたい、どこ詰めればいい？",
         ] {
             assert_eq!(read(q), None, "{q}");
         }
+        assert_eq!(say("入る？"), Some("box"));
     }
 
     /// Asked at speed: box or stay out, nothing else.
