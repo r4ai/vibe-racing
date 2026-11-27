@@ -23,6 +23,9 @@ const UNDERSTEER_S: f64 = 0.9;
 const OVERSTEER_S: f64 = 0.5;
 /// One side of the balance outweighs the other by this factor.
 const CLEARLY: f64 = 1.5;
+/// Locking this many times as long on one axle: a full step of bias, not half.
+const FAR_APART: f64 = 3.0;
+const FAR_APART_S: f64 = 0.5;
 /// Across a loaded tyre, in °C: the inner edge should be a little hotter.
 const INNER_MORE_C: f64 = 9.0;
 const INNER_LESS_C: f64 = -1.0;
@@ -237,6 +240,18 @@ pub fn findings(
     out.into_iter().flatten().collect()
 }
 
+/// How far to move the bias, %: the axle that locks has more brake than
+/// grip, and the further apart the two axles lock, the further the share of
+/// the pressure is off. Far apart, and by enough to be more than a moment of
+/// locking: a whole percent.
+fn bias_step(more: f64, less: f64) -> &'static str {
+    if more >= less * FAR_APART && more - less >= FAR_APART_S {
+        "1.0"
+    } else {
+        "0.5"
+    }
+}
+
 fn brakes(c: &Chassis, setup: Option<&Setup>) -> Option<Finding> {
     let front = c.lock_s.lf + c.lock_s.rf;
     let rear = c.lock_s.lr + c.lock_s.rr;
@@ -260,11 +275,18 @@ fn brakes(c: &Chassis, setup: Option<&Setup>) -> Option<Finding> {
         ))
     );
     let (front_first, other) = (front >= rear * CLEARLY, rear >= front * CLEARLY);
+    let by = bias_step;
+    let now = c.front_brake.map_or(String::new(), |s| {
+        format!(" from {:.1}% at the front", s * 100.0)
+    });
     let options = if front_first {
         vec![change(
             setup,
             &[Part::BrakeBias],
-            "bias rearward 0.5-1.0 % (the fronts lock first)",
+            &format!(
+                "bias rearward {} %{now} (the fronts lock first)",
+                by(front, rear)
+            ),
             "rear instability on the brakes",
         )]
     } else if other {
@@ -272,7 +294,10 @@ fn brakes(c: &Chassis, setup: Option<&Setup>) -> Option<Finding> {
             change(
                 setup,
                 &[Part::BrakeBias],
-                "bias forward 0.5-1.0 % (the rears lock first)",
+                &format!(
+                    "bias forward {} %{now} (the rears lock first)",
+                    by(rear, front)
+                ),
                 "front locking, entry understeer",
             ),
             change(
@@ -683,6 +708,14 @@ pub struct Experiment {
     pub oversteer_s: Option<f64>,
     pub wheelspin_s: Option<f64>,
     pub rear_lock_s: Option<f64>,
+    /// Oversteer and understeer on the brakes only.
+    #[serde(default)]
+    pub entry_oversteer_s: Option<f64>,
+    #[serde(default)]
+    pub entry_understeer_s: Option<f64>,
+    /// Oversteer on the throttle only.
+    #[serde(default)]
+    pub exit_oversteer_s: Option<f64>,
 }
 
 /// Laps compared on either side of a change.
@@ -769,6 +802,9 @@ pub fn experiments(
             oversteer_s: delta(&|b| b.oversteer.total()),
             wheelspin_s: delta(&|b| b.wheelspin_s),
             rear_lock_s: delta(&|b| b.rear_lock_s),
+            entry_oversteer_s: delta(&|b| b.oversteer.entry),
+            entry_understeer_s: delta(&|b| b.understeer.entry),
+            exit_oversteer_s: delta(&|b| b.oversteer.exit),
         });
     }
     out
@@ -900,6 +936,17 @@ pub fn analyse(r: &SessionRecord, others: &[SessionRecord]) -> SetupAnalysis {
 mod tests {
     use super::*;
     use crate::chassis::{Corners, Damper, Ride};
+
+    #[test]
+    fn a_whole_percent_only_when_one_axle_locks_far_more() {
+        // Three times as long and half a second more, exactly: a whole one.
+        assert_eq!(bias_step(1.5, 0.5), "1.0");
+        assert_eq!(bias_step(0.75, 0.25), "1.0");
+        // Twice as long, half a second more.
+        assert_eq!(bias_step(1.0, 0.5), "0.5");
+        // Four times as long, but only 0.45 s more.
+        assert_eq!(bias_step(0.6, 0.15), "0.5");
+    }
 
     fn setup() -> Setup {
         let item = |path: &str, value: &str| SetupItem {

@@ -68,6 +68,11 @@ pub const LIVE_KEYS: &[(&str, &str)] = &[
     ("stops", "pit stops made"),
     ("tyre_age", "laps"),
     ("stop_in", "laps to the planned stop, 0: end of this lap"),
+    (
+        "pit_entry",
+        "where pit road begins, 0-100 of the lap, once a car entered it",
+    ),
+    ("to_pit", "part of the lap to the pit entry, 0-100"),
     ("on_pit", "on pit road, 0/1"),
     ("in_stall", "0/1"),
     ("on_track", "in the car, 0/1"),
@@ -212,6 +217,14 @@ fn values(state: &RaceState, f: &Frame) -> BTreeMap<&'static str, f64> {
         let lap = car.lap;
         put("lap", lap.map(f64::from));
         put("lap_pct", car.lap_dist_pct.map(|p| p * 100.0));
+        let entry = state.pit_entry();
+        put("pit_entry", entry.map(|e| e * 100.0));
+        put(
+            "to_pit",
+            entry
+                .zip(car.lap_dist_pct)
+                .map(|(e, p)| (e - p).rem_euclid(1.0) * 100.0),
+        );
         let length = f.session.track.as_ref().and_then(|t| t.length_m);
         put("lap_m", length.zip(car.lap_dist_pct).map(|(l, p)| l * p));
         put("last_lap", car.last_lap_s.filter(|t| *t > 0.0));

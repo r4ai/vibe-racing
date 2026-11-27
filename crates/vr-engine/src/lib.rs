@@ -12,6 +12,7 @@ mod chassis;
 mod events;
 mod forecast;
 mod garage;
+mod gearing;
 mod handling;
 mod live;
 pub mod render;
@@ -35,6 +36,7 @@ pub use forecast::{ForecastCar, ForecastReport};
 pub use garage::{
     Area, Change, Comparison, Experiment, Finding, SetupAnalysis, analyse, experiments, findings,
 };
+pub use gearing::{Gearing, OverRev, Shift};
 pub use handling::{Balance, Behaviour, HandlingLap, Phases, Tendency, Zone};
 pub use live::{LIVE_KEYS, LiveReport};
 pub use report::*;
@@ -44,7 +46,7 @@ pub use strategy::{
     Basis, Fade, PitLoss, Plan, Rejoin, Rival, StrategyCall, StrategyReport, TyreCall, pit_loss_of,
 };
 pub use trace::{
-    Corner, CornersReport, LapTrace, POINTS as TRACE_POINTS, Speeds, compare as compare_laps,
-    compare_on as compare_laps_on,
+    BrakeShape, Corner, CornersReport, LapTrace, POINTS as TRACE_POINTS, Speeds, ThrottleShape,
+    compare as compare_laps, compare_on as compare_laps_on,
 };
 pub use util::now_ms;

@@ -12,6 +12,9 @@ struct Made {
     forecast: Option<ForecastReport>,
     /// Last laps by car number, `""` for the player.
     laps: Vec<(String, LapRecord)>,
+    /// Values of `vr live` besides the tyre age.
+    live: Vec<(&'static str, f64)>,
+    strategy: Option<StrategyReport>,
 }
 
 fn no<T>() -> ApiResult<T> {
@@ -33,7 +36,10 @@ impl RaceApi for Made {
     fn live(&self) -> ApiResult<LiveReport> {
         Ok(LiveReport {
             meta: self.brief.meta.clone(),
-            values: [("tyre_age".to_string(), 7.0)].into(),
+            values: std::iter::once(("tyre_age", 7.0))
+                .chain(self.live.iter().copied())
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
         })
     }
     fn standings(&self, _: &StandingsParams) -> ApiResult<StandingsReport> {
@@ -76,7 +82,9 @@ impl RaceApi for Made {
         no()
     }
     fn strategy(&self) -> ApiResult<StrategyReport> {
-        no()
+        self.strategy
+            .clone()
+            .ok_or_else(|| ApiError::Other("none".into()))
     }
     fn forecast(&self) -> ApiResult<ForecastReport> {
         self.forecast
@@ -187,6 +195,8 @@ fn made() -> Made {
         sectors: None,
         forecast: None,
         laps: Vec::new(),
+        live: Vec::new(),
+        strategy: None,
         car: CarReport {
             meta: meta(),
             car_name: None,
@@ -976,4 +986,84 @@ fn the_ideal_lap_takes_the_sectors_done_now_and_empty_comparisons_go() {
     let text = r.to_text();
     assert!(!text.contains("you vs"), "{text}");
     assert!(!text.contains("ideal lap"), "{text}");
+}
+
+/// A strategy of lap 5: the fuel window and the best plans as given.
+fn strategy(window: Option<(i32, i32)>, to_end: bool, plans: &[&[i32]]) -> StrategyReport {
+    serde_json::from_value(serde_json::json!({
+        "meta": meta(),
+        "missing": [],
+        "lap": 5,
+        "laps_total": 20,
+        "stops_done": 0,
+        "tyre_age": 5,
+        "fade": null,
+        "pit_loss": {"seconds": null, "basis": "unknown", "stops": 0},
+        "fuel_window": window,
+        "fuel_to_end": to_end,
+        "plans": plans
+            .iter()
+            .map(|s| serde_json::json!({"stops": s, "behind_best_s": 0.0}))
+            .collect::<Vec<_>>(),
+        "rejoin_now": null,
+        "rivals": [],
+        "calls": [],
+    }))
+    .unwrap()
+}
+
+#[test]
+fn box_or_stay_out() {
+    let mut m = made();
+    m.live = vec![("stop_in", 0.0)];
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ボックス、ボックス。この周入ろう。"
+    );
+    m.live = vec![("stop_in", 3.0)];
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ステイアウト。ピットは8周目、あと3周。"
+    );
+    // Without a plan told: the fuel decides, then the plans.
+    m.live = Vec::new();
+    m.strategy = Some(strategy(Some((6, 9)), false, &[&[8]]));
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ステイアウト。燃料で9周目までに入る。"
+    );
+    m.strategy = Some(strategy(Some((3, 5)), false, &[&[5]]));
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ボックス、ボックス。燃料が持たない。"
+    );
+    m.strategy = Some(strategy(None, true, &[&[]]));
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ステイアウト。ピット無しで完走する。"
+    );
+    m.strategy = Some(strategy(None, true, &[]));
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ステイアウト。今は入らなくていい。"
+    );
+    // A stop planned, not on this lap and not told yet.
+    m.strategy = Some(strategy(None, true, &[&[12]]));
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "ステイアウト。今は入らなくていい。"
+    );
+    // What comes before any plan.
+    m.brief.session.as_mut().unwrap().flags.push(Flag::Repair);
+    assert_eq!(say(&m, SpeechTopic::Box), "ボックス、ボックス。修理だ。");
+    m.brief.player.as_mut().unwrap().on_pit_road = true;
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "もうピットレーンだ、速度に注意。"
+    );
+    m.brief.session.as_mut().unwrap().kind = SessionKind::Practice;
+    assert_eq!(
+        say(&m, SpeechTopic::Box),
+        "レースじゃない、いつ入ってもいい。"
+    );
 }

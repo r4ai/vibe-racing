@@ -79,9 +79,15 @@ jobs:
 
   mutants:
     # A full run takes long: PRs check their diff, the full run is weekly or manual.
+    # Split into shards that run side by side; each has the longest time a
+    # hosted runner allows.
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -102,14 +108,14 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git diff "origin/${BASE_REF}...HEAD" > mutants.diff
-          cargo mutants --workspace --in-diff mutants.diff --no-shuffle -j 2
+          cargo mutants --workspace --in-diff mutants.diff --no-shuffle -j 2 --shard ${{ matrix.shard }}/8
       - name: All mutants
         if: github.event_name != 'pull_request'
-        run: cargo mutants -p vr-engine -p vr-iracing -p vr-ams2 -p vr-replay -p vr-radio --no-shuffle -j 2
-      - if: failure()
+        run: cargo mutants -p vr-engine -p vr-iracing -p vr-ams2 -p vr-replay -p vr-radio --no-shuffle -j 2 --shard ${{ matrix.shard }}/8
+      - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutants.out
+          name: mutants.out-${{ matrix.shard }}
           path: mutants.out
 
   format:

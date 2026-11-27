@@ -661,6 +661,7 @@ struct Engine {
     hushed: bool,
     gate: Arc<Gate>,
     lookout: Lookout,
+    box_call: calls::BoxCall,
     plan: Option<String>,
     plan_due: bool,
     plan_lap: Option<f64>,
@@ -1325,7 +1326,11 @@ impl Engine {
 
     fn ask(&mut self, turn: Turn, started: Instant, text: &str, data: Option<&str>, spoken: bool) {
         self.newest = self.newest.max(turn);
-        let template = self.prompt_template.replace("{radio}", &self.status());
+        let mut radio = self.status();
+        if let Some(fight) = calls::pressure(&self.now) {
+            radio = format!("{radio}\n{fight}");
+        }
+        let template = self.prompt_template.replace("{radio}", &radio);
         let data = data.map(|d| unsent(&mut self.sent, d));
         let prompt = self.missed() + &render_prompt(&template, text, data.as_deref());
         let mut cmd = AgentCmd::Prompt {
@@ -1981,6 +1986,11 @@ impl Engine {
                 self.came_true(&w, &v);
             }
         }
+        let boxing = self.proactive.enabled && self.proactive.get(Group::Strategy);
+        if let Some(text) = self.box_call.check(&v).filter(|_| boxing) {
+            // Before pit road, whatever the car does: it cannot wait.
+            self.call_out("ピットの合図".into(), text, true);
+        }
         let on = |k: &str| v.get(k).is_some_and(|x| *x > 0.0);
         if self.rules.planning > 0
             && on("racing")
@@ -2033,17 +2043,19 @@ impl Engine {
             });
             return;
         };
+        let text = rules::fill(say, v);
+        // Told at once, but not on the brakes.
+        self.call_out(format!("見張り: {}", w.when), &text, false);
+    }
+
+    /// Says words of the engineer's own, as a call of its own.
+    fn call_out(&mut self, about: String, text: &str, urgent: bool) {
         self.next_turn += 1;
         let (turn, started) = (self.next_turn, Instant::now());
-        let text = rules::fill(say, v);
-        self.emit(Event::CallStarted {
-            turn,
-            about: format!("見張り: {}", w.when),
-        });
-        // Told at once, but not on the brakes.
-        self.tell(turn, started, &text, Scope::Calls, false);
+        self.emit(Event::CallStarted { turn, about });
+        self.tell(turn, started, text, Scope::Calls, urgent);
         self.done(turn, Outcome::Answered, started);
-        self.remember(String::new(), text, false);
+        self.remember(String::new(), text.to_string(), false);
     }
 
     /// Says what needs no agent: words, or topics (`Ok`) of `vr say`.
@@ -2380,6 +2392,7 @@ pub async fn run(deps: Deps, mut cmds: UnboundedReceiver<Command>, events: Unbou
         hushed: false,
         gate,
         lookout: Lookout::default(),
+        box_call: calls::BoxCall::default(),
         plan: None,
         plan_due: false,
         plan_lap: None,
@@ -2685,8 +2698,10 @@ mod tests {
         /// Events up to and including the first one matching `stop`, minus levels and telemetry.
         async fn until(&mut self, stop: impl Fn(&Event) -> bool) -> Vec<Event> {
             let mut seen = Vec::new();
+            // One deadline for all: levels keep coming while a button is held.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             loop {
-                let e = tokio::time::timeout(Duration::from_secs(5), self.events.recv())
+                let e = tokio::time::timeout_at(deadline, self.events.recv())
                     .await
                     .unwrap_or_else(|_| panic!("timed out; saw {seen:?}"))
                     .expect("engine stopped");
@@ -3122,7 +3137,7 @@ BB 54"
         h.until(|e| matches!(e, Event::AgentReady { .. })).await;
         h.race.send(yellow()).unwrap();
         h.until(is_done).await;
-        assert_eq!(h.played(1).await, ["3:イエロー。"]);
+        assert_eq!(h.played(1).await, ["3:イエロー、イエロー。"]);
     }
 
     #[tokio::test]
@@ -3460,9 +3475,12 @@ BB 54"
         );
         assert!(events.contains(&Event::Chunk {
             turn: 1,
-            text: "イエロー。weatherの答え。".into()
+            text: "イエロー、イエロー。weatherの答え。".into()
         }));
-        assert_eq!(h.played(2).await, ["3:イエロー。", "3:weatherの答え。"]);
+        assert_eq!(
+            h.played(2).await,
+            ["3:イエロー、イエロー。", "3:weatherの答え。"]
+        );
         assert!(h.prompts.lock().unwrap().is_empty(), "nobody was asked");
     }
 
@@ -3616,7 +3634,7 @@ BB 54"
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(h.prompts.lock().unwrap().len(), 1);
         h.race.send(yellow()).unwrap();
-        assert_eq!(h.played(4).await[3], "3:イエロー。");
+        assert_eq!(h.played(4).await[3], "3:イエロー、イエロー。");
         h.cmds.send(Command::Ask("順位".into())).unwrap();
         assert_eq!(h.played(5).await[4], "3:4番手。");
     }
@@ -3699,6 +3717,60 @@ BB 54"
         h.live.send(beside(0.0, 0.0)).unwrap();
         h.live.send(beside(0.0, 1.0)).unwrap();
         h.prompted(1).await;
+    }
+
+    #[tokio::test]
+    async fn the_box_call_is_made_while_strategy_calls_are_on() {
+        let mut h = start(&["了解。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        let at = |lap: f64| {
+            values(&[
+                ("racing", 1.0),
+                ("on_track", 1.0),
+                ("lap", lap),
+                ("stop_in", 0.0),
+                ("to_pit", 5.0),
+            ])
+        };
+        h.cmds
+            .send(Command::SetProactive(Proactive {
+                enabled: false,
+                ..Default::default()
+            }))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.live.send(at(1.0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(h.out.played.lock().unwrap().is_empty());
+        h.cmds
+            .send(Command::SetProactive(Proactive::default()))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The next lap of a stop.
+        h.live.send(at(2.0)).unwrap();
+        assert!(
+            h.played(1)
+                .await
+                .contains(&"3:ボックス、ボックス。".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_question_in_a_fight_is_asked_with_the_fight() {
+        let mut h = start_with(&["了解。"], Arc::new(FakeStt("x")), 1.0, "{radio}|{text}");
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        let close = values(&[
+            ("racing", 1.0),
+            ("on_track", 1.0),
+            ("lap", 1.0),
+            ("gap_ahead", 0.5),
+        ]);
+        h.live.send(close).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        h.cmds.send(Command::Ask("前は？".into())).unwrap();
+        h.until(is_done).await;
+        let prompts = h.prompts.lock().unwrap().clone();
+        assert!(prompts[0].contains("前と0.5秒"), "{}", prompts[0]);
     }
 
     #[tokio::test]
@@ -4044,7 +4116,7 @@ BB 54"
             played.contains(&"3:ピット無しで完走する。".to_string()),
             "{played:?}"
         );
-        assert!(played.contains(&"3:ボックス、この周ピット。".to_string()));
+        assert!(played.contains(&"3:この周ボックスだ。".to_string()));
         assert_eq!(h.prompts.lock().unwrap().len(), 1);
     }
 
@@ -4060,7 +4132,7 @@ BB 54"
         // A flag is told all the same.
         h.race.send(yellow()).unwrap();
         h.until(is_done).await;
-        assert_eq!(h.played(2).await[1], "3:イエロー。");
+        assert_eq!(h.played(2).await[1], "3:イエロー、イエロー。");
     }
 
     #[tokio::test]

@@ -1,0 +1,98 @@
+# Pressure set: calls made at the limit. Shouted complaints that want a way
+# out (曲がんない！, 追いつかない！), box or stay out in a word, and the longer
+# questions about the others and where to attack. Built from real team radio
+# (skills/race-engineer/references/radio-style.md). Used while changing the
+# radio. See docs/architecture.md for the fields.
+
+- id: stuck-behind
+  world:
+    {
+      start_s: 760,
+      laps: 22,
+      tyre_deg_s: 0.08,
+      lap_noise_s: 0.3,
+      stops: [[2, 14], [3, 15]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: cannot-catch
+      say: 追いつかない！
+      voice: vv:2
+      facts: [gap_ahead]
+      points:
+        - 受け止めだけで終えず、前の車に対して負けている場所（セクターかコーナーの名前）を言う
+        - その場所で今できる一手（ブレーキ、進入速度、アクセルなど）を一つ言う
+        - 届くかどうかの見通しを、差の変化や相手の状態の事実で言う
+    - id: will-not-turn
+      say: 曲がんない！
+      voice: vv:2
+      points:
+        - 「了解」や「落ち着こう」だけで終えない
+        - アンダーが出ている場所か局面を言う（データに無ければ、出ている傾向を言う）
+        - 運転か車内調整の一手を一つ、数字か具体的な操作で言う
+    - id: cannot-pass
+      say: 抜けない、どうすんのこれ
+      voice: vv:8
+      points:
+        - 自分が前の車より速い区間かコーナーを言う
+        - そこからどこで仕掛けるか（次のブレーキングなど）を一つに決めて言う
+
+- id: box-or-not
+  world:
+    {
+      start_s: 700,
+      laps: 24,
+      fuel_start_l: 36,
+      player_pit_lap: 14,
+      rival_pit_lap: 10,
+      tyre_deg_s: 0.1,
+      lap_noise_s: 0.4,
+      stops: [[0, 12], [6, 13]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: pit-question
+      say: ピット？
+      voice: vv:13
+      facts: [stop_lap]
+      points:
+        - 最初に入るか入らない（ステイアウト）かを言い切る
+        - 入らないなら、入る予定の周を言う
+    - id: tyres-gone
+      say: タイヤ終わってる
+      voice: vv:13
+      points:
+        - 受け止めだけで終えず、タイヤの状態か落ち方の事実を一つ言う
+        - ピットまでの周か、持たせるための一手を言う
+
+- id: the-others
+  world:
+    {
+      start_s: 900,
+      laps: 20,
+      tyre_deg_s: 0.06,
+      lap_noise_s: 0.3,
+      stops: [[1, 7], [4, 9]],
+      incident_at: null,
+      yellow: null,
+    }
+  calls:
+    - id: ahead-situation
+      say: 前の車の状況と、どこで攻めればいいか教えて
+      voice: vv:3
+      facts: [gap_ahead]
+      points:
+        - 前の車との差と、縮まっているか（毎周の変化）
+        - 前の車が速い場所か遅い場所を、コーナーか区間で言う
+        - 最後に仕掛ける場所かやることを一つに決めて言う
+        - 走行中でも 120 字ほどまでに収まる
+    - id: can-we-win
+      say: これ勝てる？
+      voice: vv:3
+      facts: [position]
+      points:
+        - 優勝が届くかを事実（差と毎周の変化、残り周）で言い切る
+        - 届かないなら、届く目標（前の車、順位を守るなど）を一つ言う
+        - 空の励ましだけで終えない

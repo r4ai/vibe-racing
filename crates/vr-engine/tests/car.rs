@@ -344,22 +344,18 @@ fn advice_follows_what_the_car_can_adjust() {
     spin(&mut s);
     s.run(0.1, corner);
     let h = s.handling();
-    let tc = &h.advice[0];
-    assert_eq!(tc.place, Place::InCar);
-    assert_eq!(tc.target, "traction_control");
-    assert_eq!(tc.current.as_deref(), Some("2"));
-    assert_eq!(tc.change, "one step more intervention");
-    assert_eq!(tc.reason, "wheelspin 0.0s and exit oversteer 1.5s per lap");
-    let bar = &h.advice[1];
+    // Sliding out with the wheels gripping: no matter for traction control.
+    assert!(
+        h.advice.iter().all(|a| a.target != "traction_control"),
+        "{:?}",
+        h.advice
+    );
+    let bar = &h.advice[0];
     assert_eq!(bar.place, Place::Garage);
     assert_eq!(bar.target, "Chassis/Rear/ArbPosition");
     assert_eq!(bar.current.as_deref(), Some("P2"));
-    assert_eq!(h.advice.len(), 2, "{:?}", h.advice);
+    assert_eq!(h.advice.len(), 1, "{:?}", h.advice);
     let text = h.to_text();
-    assert!(
-        text.contains("[in the car] traction_control (now 2): one step more intervention"),
-        "{text}"
-    );
     assert!(
         text.contains("brake_bias 57.2 | traction_control 2"),
         "{text}"
@@ -779,7 +775,7 @@ fn generated_balance_is_seen() {
     assert!(near(m.rear_lock_s, 0.8) && m.rear_lock_s > 0.4, "{m:?}");
     assert!(near(m.wheelspin_s, 1.2) && m.wheelspin_s > 0.8, "{m:?}");
     let bias = r.advice.iter().find(|a| a.target == "brake_bias").unwrap();
-    assert!(bias.change.starts_with("forward"), "{bias:?}");
+    assert!(bias.change.contains("forward"), "{bias:?}");
 }
 
 /// Round a circle with a radius of 100 m, 4 pi seconds a lap.

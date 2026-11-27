@@ -147,6 +147,8 @@ pub enum StrategyCall {
     FuelStop { by_lap: i32 },
     /// Stopping at the end of this lap is the best plan.
     BoxThisLap { lap: i32 },
+    /// The stop told for this lap is off: the next one, if any, is later.
+    StayOut { next: Option<i32> },
     /// From now on one stop reaches the end.
     WindowOpen { until_lap: i32 },
     /// A car behind can pass by stopping now.
@@ -177,6 +179,7 @@ impl StrategyCall {
         match self {
             Self::FuelStop { .. } => "fuel".into(),
             Self::BoxThisLap { .. } => "box".into(),
+            Self::StayOut { .. } => "stay".into(),
             Self::WindowOpen { .. } => "window".into(),
             Self::UndercutThreat { car, .. } => format!("threat {}", car.number),
             Self::Answer { car, .. } => format!("answer {}", car.number),
@@ -192,6 +195,10 @@ impl StrategyCall {
         match self {
             Self::FuelStop { by_lap } => format!("fuel: stop by the end of lap {by_lap}"),
             Self::BoxThisLap { lap } => format!("best plan: stop at the end of this lap ({lap})"),
+            Self::StayOut { next: Some(lap) } => {
+                format!("stay out: no stop this lap, the next is at the end of lap {lap}")
+            }
+            Self::StayOut { next: None } => "stay out: no stop this lap".into(),
             Self::WindowOpen { until_lap } => {
                 format!("pit window open: one stop now reaches the end (until lap {until_lap})")
             }
@@ -225,6 +232,20 @@ impl StrategyCall {
 const PLAN_MOVES: i32 = 2;
 /// A plan is kept as long as it loses less than this.
 const PLAN_KEPT_S: f64 = 1.5;
+
+/// Whether a stop at the end of `lap` still holds: for the fuel, or as a plan
+/// about as good as the best. Without plans nothing is known to have changed.
+pub(crate) fn still_boxing(r: &StrategyReport, lap: i32) -> bool {
+    let fuel = r
+        .calls
+        .iter()
+        .any(|c| matches!(c, StrategyCall::FuelStop { by_lap } if *by_lap <= lap));
+    let planned = r
+        .plans
+        .iter()
+        .any(|p| p.behind_best_s < PLAN_KEPT_S && p.stops.first() == Some(&lap));
+    fuel || planned || r.plans.is_empty()
+}
 
 /// The plan to tell about, if the one told before no longer holds.
 pub(crate) fn new_plan(told: Option<&[i32]>, plans: &[Plan]) -> Option<Vec<i32>> {
@@ -1087,6 +1108,46 @@ fn calls(r: &StrategyReport, frame: &Frame, lap: i32) -> Vec<StrategyCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_box_and_its_end_are_told() {
+        assert_eq!(
+            StrategyCall::BoxThisLap { lap: 8 }.text(),
+            "best plan: stop at the end of this lap (8)"
+        );
+        assert_eq!(
+            StrategyCall::StayOut { next: Some(12) }.text(),
+            "stay out: no stop this lap, the next is at the end of lap 12"
+        );
+        assert_eq!(
+            StrategyCall::StayOut { next: None }.text(),
+            "stay out: no stop this lap"
+        );
+    }
+
+    #[test]
+    fn a_box_call_holds_while_a_plan_as_good_or_the_fuel_wants_it() {
+        let st = RaceState::new(
+            "t",
+            crate::SourceKind::Synthetic,
+            vr_core::Capabilities::ALL,
+        );
+        let mut r = strategy(&st, None);
+        // Nothing known: nothing changed.
+        assert!(still_boxing(&r, 8));
+        let plan = |stops: Vec<i32>, behind_best_s: f64| Plan {
+            stops,
+            behind_best_s,
+        };
+        r.plans = vec![plan(vec![10], 0.0), plan(vec![8], 1.49)];
+        assert!(still_boxing(&r, 8));
+        r.plans[1].behind_best_s = 1.5;
+        assert!(!still_boxing(&r, 8));
+        r.calls = vec![StrategyCall::FuelStop { by_lap: 9 }];
+        assert!(!still_boxing(&r, 8));
+        r.calls = vec![StrategyCall::FuelStop { by_lap: 8 }];
+        assert!(still_boxing(&r, 8));
+    }
 
     fn lap(lap: i32, time: f64, pit: bool) -> LapRecord {
         LapRecord {

@@ -241,3 +241,21 @@ fn gap_trends_leave_out_the_stops() {
     // Before the stop there is a trend as always.
     assert!(leader(700.0).trend_s_per_lap.is_some());
 }
+
+#[test]
+fn pit_road_begins_where_the_cars_drive_into_it() {
+    let live = |st: &RaceState| st.live().unwrap().values;
+    // Nobody has stopped yet.
+    let early = live(&run(SynthConfig::default(), Some(60.0)));
+    assert_eq!(early.get("pit_entry"), None);
+    assert_eq!(early.get("to_pit"), None);
+    // The synthetic pit road begins at 97 % of the lap.
+    let st = run(SynthConfig::default(), None);
+    let v = live(&st);
+    let entry = v["pit_entry"];
+    assert!((97.0..=97.2).contains(&entry), "{entry}");
+    let to_pit = v["to_pit"];
+    let lap_pct = v["lap_pct"];
+    let want = (entry - lap_pct).rem_euclid(100.0);
+    assert!((to_pit - want).abs() < 0.01, "{to_pit} {want}");
+}

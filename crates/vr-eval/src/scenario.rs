@@ -349,6 +349,7 @@ mod tests {
             "strategy.yaml",
             "complex.yaml",
             "complex-heldout.yaml",
+            "pressure.yaml",
             "real-radio.yaml",
             "real-radio-heldout.yaml",
         ] {

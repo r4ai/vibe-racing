@@ -14,7 +14,7 @@ use vr_core::{Flag, SessionKind, SessionPhase, Warning, Wetness};
 
 use crate::api::{ApiResult, LapsParams, RaceApi, SectorsParams};
 use crate::report::*;
-use crate::trace::CornersReport;
+use crate::trace::{Corner, CornersReport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -46,10 +46,12 @@ pub enum Topic {
     /// Laps of fuel, as a number.
     FuelLaps,
     TyreTemps,
+    /// Whether to come in: box, or stay out.
+    Box,
 }
 
 impl Topic {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Status,
         Self::Position,
         Self::Ahead,
@@ -70,6 +72,7 @@ impl Topic {
         Self::Losing,
         Self::FuelLaps,
         Self::TyreTemps,
+        Self::Box,
     ];
 
     pub fn key(self) -> &'static str {
@@ -94,6 +97,7 @@ impl Topic {
             Self::Losing => "losing",
             Self::FuelLaps => "fuel-laps",
             Self::TyreTemps => "tyre-temps",
+            Self::Box => "box",
         }
     }
 }
@@ -159,6 +163,11 @@ const MORE_S: f64 = 0.5;
 
 /// A corner that loses less is not worth the words.
 const CORNER_S: f64 = 0.05;
+/// Pedal percent and metres of the shape of a stop a driver can act on.
+const PEDAL_PCT: u8 = 10;
+const SHAPE_M: f64 = 10.0;
+/// Less deceleration than this is the same stop.
+const DECEL_G: f64 = 0.1;
 /// Metres and km/h a driver can act on.
 const CORNER_M: f64 = 5.0;
 const CORNER_KMH: f64 = 3.0;
@@ -192,7 +201,9 @@ fn corner_advice(r: &CornersReport) -> Option<String> {
     let late_throttle = c.throttle_m.filter(|m| *m >= CORNER_M);
     let slow_apex = c.min_kmh <= -CORNER_KMH;
     let slow_exit = c.exit_kmh <= -CORNER_KMH;
-    let todo = if c.reference_min_throttle == 100 && c.min_throttle < 95 {
+    let todo = if let Some(todo) = pedal(c, metres) {
+        todo
+    } else if c.reference_min_throttle == 100 && c.min_throttle < 95 {
         "ベストは全開だ、アクセル戻さず行ける。".to_string()
     } else if let Some(m) = late_brake
         && (late_throttle.is_some() || slow_exit || slow_apex)
@@ -212,15 +223,7 @@ fn corner_advice(r: &CornersReport) -> Option<String> {
     {
         format!("ベストは{rg}速、1速落として立ち上がりを稼ごう。")
     } else if let Some(m) = early_brake {
-        if slow_apex {
-            format!(
-                "ブレーキが{:.0}m早い、あと{:.0}m奥で踏んでボトムを乗せよう。",
-                metres(m),
-                metres(m)
-            )
-        } else {
-            format!("ブレーキをあと{:.0}m遅らせられる。", metres(m))
-        }
+        format!("ブレーキをあと{:.0}m遅らせられる。", metres(m))
     } else if let Some(m) = late_throttle {
         format!(
             "アクセルをあと{:.0}m早く開けられる、向きが変わったら早めに踏もう。",
@@ -242,6 +245,94 @@ fn corner_advice(r: &CornersReport) -> Option<String> {
         "進入と脱出のラインを揃えよう。".to_string()
     };
     Some(format!("{name}で{}失ってる。{todo}", sec(loss(i))))
+}
+
+/// What the shape of the stop against the best one says to do: a brake
+/// point is no fix for a pedal that is pressed too softly or let go too soon.
+fn pedal(c: &Corner, metres: impl Fn(f64) -> f64) -> Option<String> {
+    brake_pedal(c, &metres).or_else(|| throttle_pedal(c, &metres))
+}
+
+/// The way out: lifting again, or full throttle long after the best lap.
+fn throttle_pedal(c: &Corner, metres: &impl Fn(f64) -> f64) -> Option<String> {
+    let (a, b) = (c.throttle?, c.reference_throttle?);
+    // A lift is a mistake only where the car shows why: it may be the line.
+    if a.lifts > b.lifts && a.countersteer {
+        return Some(
+            "立ち上がりでリアが出てカウンターを当ててる。向きが変わるまで開け始めを待とう。".into(),
+        );
+    }
+    if a.lifts > b.lifts && a.wheelspin {
+        return Some(
+            "立ち上がりで空転してアクセルを戻してる。開け始めを穏やかに、踏み増しはまっすぐになってから。"
+                .into(),
+        );
+    }
+    // Later on the throttle where the corner was not slower: the car was
+    // ready for it. Slower, and the way in is what to fix.
+    if c.min_kmh > -CORNER_KMH && a.pickup_m - b.pickup_m >= SHAPE_M {
+        return Some(format!(
+            "アクセルの踏み始めがベストより{:.0}m遅い。向きが変わったら早めに乗せよう。",
+            metres(a.pickup_m - b.pickup_m)
+        ));
+    }
+    let (Some(x), Some(y)) = (a.to_full_m, b.to_full_m) else {
+        return None;
+    };
+    (x - y >= 2.0 * SHAPE_M).then(|| {
+        format!(
+            "全開までがベストより{:.0}m長い。向きが変わったら踏み切ろう。",
+            metres(x - y)
+        )
+    })
+}
+
+fn brake_pedal(c: &Corner, metres: &impl Fn(f64) -> f64) -> Option<String> {
+    let (a, b) = (c.brake?, c.reference_brake?);
+    let slower = c.min_kmh <= -CORNER_KMH;
+    // Less pedal is less brake only where the car also stopped less hard:
+    // with ABS, or another pedal map, the limit may come before the peak.
+    let best_g = b
+        .decel_g
+        .filter(|g| a.decel_g.is_some_and(|x| g - x >= DECEL_G));
+    let softer = best_g.is_some();
+    if let Some(g) = best_g.filter(|_| b.peak >= a.peak.saturating_add(PEDAL_PCT)) {
+        return Some(format!(
+            "最初の踏みが足りない、ベストは{}%で{g:.1}G出てる。踏み始めから素早く{}%まで上げよう。",
+            b.peak, b.peak
+        ));
+    }
+    if softer && a.build_m - b.build_m >= SHAPE_M {
+        return Some(format!(
+            "踏み込みが{:.0}m遅い、踏み始めから素早く強く。",
+            metres(a.build_m - b.build_m)
+        ));
+    }
+    // Without the wheel, nothing is known of the turn-in.
+    if let (Some(left), Some(best)) = (a.at_turn_in, b.at_turn_in) {
+        if best >= left.saturating_add(PEDAL_PCT) && slower && b.release_m - a.release_m >= SHAPE_M
+        {
+            return Some(format!(
+                "ブレーキを抜くのが早い。曲がり始めまで{best}%ほど残して向きを変えよう。"
+            ));
+        }
+        if slower && a.release_m - b.release_m >= SHAPE_M && left >= best.saturating_add(PEDAL_PCT)
+        {
+            return Some(format!(
+                "ブレーキを引きずってボトムが{:.0}キロ低い、{:.0}m早く抜こう。",
+                c.min_kmh.abs(),
+                metres(a.release_m - b.release_m)
+            ));
+        }
+    }
+    // A coast that carries more speed through is a choice, not a loss.
+    if c.min_kmh <= 0.0 && a.coast_m - b.coast_m >= SHAPE_M {
+        return Some(format!(
+            "ブレーキからアクセルへの持ち替えがベストより{:.0}m長い。ブレーキを離したら間を空けずにアクセルに乗せよう。",
+            metres(a.coast_m - b.coast_m)
+        ));
+    }
+    None
 }
 
 const PIT_LAP: &str = "ピットかイエローの周は比べられない、次の周で伝える。";
@@ -437,6 +528,7 @@ impl Voice<'_> {
             Topic::Tyres => self.tyres()?,
             Topic::TyreTemps => self.tyre_temps()?,
             Topic::Forecast => self.forecast()?,
+            Topic::Box => self.pit_call()?,
         })
     }
 
@@ -800,6 +892,43 @@ impl Voice<'_> {
         Some(lap + (n.floor() as i32 - 1).max(0))
     }
 
+    /// Box or stay out, as the engineer calls it: the order twice when it is
+    /// to be acted on now, so that it is heard whatever the car is doing.
+    fn pit_call(&self) -> ApiResult<String> {
+        if !self.race() {
+            return Ok("レースじゃない、いつ入ってもいい。".into());
+        }
+        if self.b.player.as_ref().is_some_and(|p| p.on_pit_road) {
+            return Ok("もうピットレーンだ、速度に注意。".into());
+        }
+        if self.session().flags.contains(&Flag::Repair) {
+            return Ok("ボックス、ボックス。修理だ。".into());
+        }
+        let live = self.api.live()?.values;
+        let lap = self.session().lap;
+        if let Some(n) = live.get("stop_in").map(|n| n.round() as i32) {
+            return Ok(match (n, lap) {
+                (0, _) => "ボックス、ボックス。この周入ろう。".into(),
+                (n, Some(lap)) => format!("ステイアウト。ピットは{}周目、あと{n}周。", lap + n),
+                (n, None) => format!("ステイアウト。ピットはあと{n}周。"),
+            });
+        }
+        let r = self.api.strategy()?;
+        if let (Some(by), Some(lap)) = (r.fuel_window.map(|w| w.1), lap)
+            && r.fuel_to_end == Some(false)
+        {
+            return Ok(if by <= lap {
+                "ボックス、ボックス。燃料が持たない。".into()
+            } else {
+                format!("ステイアウト。燃料で{by}周目までに入る。")
+            });
+        }
+        Ok(match r.plans.first() {
+            Some(p) if p.stops.is_empty() => "ステイアウト。ピット無しで完走する。".into(),
+            _ => "ステイアウト。今は入らなくていい。".into(),
+        })
+    }
+
     fn fuel(&self) -> String {
         let f = self.b.fuel.as_ref().filter(|f| f.fuel_l.is_some());
         let f = f.filter(|f| self.race() && f.laps_of_fuel.is_some());
@@ -1076,7 +1205,7 @@ fn warning(w: Warning) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{Corner, Speeds};
+    use crate::trace::{BrakeShape, Corner, Speeds, ThrottleShape};
 
     fn corner(number: usize, loss_s: f64, brake_m: Option<f64>, min_kmh: f64) -> Corner {
         Corner {
@@ -1099,6 +1228,10 @@ mod tests {
             reference_entry_kmh: 0.0,
             min_throttle: 0,
             reference_min_throttle: 0,
+            brake: None,
+            reference_brake: None,
+            throttle: None,
+            reference_throttle: None,
         }
     }
 
@@ -1119,6 +1252,7 @@ mod tests {
                 medium: None,
                 fast: None,
             },
+            gearing: None,
         }
     }
 
@@ -1221,6 +1355,209 @@ mod tests {
         assert_eq!(
             corner_advice(&report(vec![exit], vec![], 0)).unwrap(),
             "5コーナーで0.2秒失ってる。出口が3キロ遅い、脱出重視で早めにアクセルを乗せよう。"
+        );
+    }
+
+    fn shape(peak: u8, build_m: f64, release_m: f64, at_turn_in: u8, coast_m: f64) -> BrakeShape {
+        BrakeShape {
+            peak,
+            build_m,
+            release_m,
+            at_turn_in: Some(at_turn_in),
+            coast_m,
+            decel_g: Some(1.2),
+        }
+    }
+
+    fn opening(lifts: u8, to_full_m: f64, wheelspin: bool, countersteer: bool) -> ThrottleShape {
+        ThrottleShape {
+            pickup_m: 0.0,
+            to_full_m: Some(to_full_m),
+            lifts,
+            wheelspin,
+            countersteer,
+        }
+    }
+
+    /// The shape of the pedals comes before the points where they are used.
+    #[test]
+    fn the_pedals_are_told_by_their_shape() {
+        let said = |a: BrakeShape, b: BrakeShape, min_kmh: f64| {
+            let mut c = corner(1, 0.2, Some(-20.0), min_kmh);
+            (c.brake, c.reference_brake) = (Some(a), Some(b));
+            corner_advice(&report(vec![c], vec![], 0)).unwrap()
+        };
+        let best = BrakeShape {
+            decel_g: Some(1.4),
+            ..shape(95, 10.0, 40.0, 30, 10.0)
+        };
+        assert_eq!(
+            said(shape(85, 10.0, 40.0, 30, 10.0), best, 0.0),
+            "1コーナーで0.2秒失ってる。最初の踏みが足りない、ベストは95%で1.4G出てる。踏み始めから素早く95%まで上げよう。"
+        );
+        // Nine points softer is the same pedal: the brake point is told.
+        assert_eq!(
+            said(shape(86, 10.0, 40.0, 30, 10.0), best, 0.0),
+            "1コーナーで0.2秒失ってる。ブレーキをあと20m遅らせられる。"
+        );
+        // Less pedal for the same stop: ABS or a pedal map, not a soft foot.
+        let same_stop = BrakeShape {
+            decel_g: Some(1.31),
+            ..shape(85, 20.0, 40.0, 30, 10.0)
+        };
+        assert_eq!(
+            said(same_stop, best, 0.0),
+            "1コーナーで0.2秒失ってる。ブレーキをあと20m遅らせられる。"
+        );
+        assert_eq!(
+            said(shape(95, 20.0, 40.0, 30, 10.0), best, 0.0),
+            "1コーナーで0.2秒失ってる。踏み込みが10m遅い、踏み始めから素早く強く。"
+        );
+        assert_eq!(
+            said(shape(95, 10.0, 30.0, 20, 10.0), best, -3.0),
+            "1コーナーで0.2秒失ってる。ブレーキを抜くのが早い。曲がり始めまで30%ほど残して向きを変えよう。"
+        );
+        // Let go early but as fast through the corner: nothing to say of it.
+        assert_eq!(
+            said(shape(95, 10.0, 30.0, 20, 10.0), best, -2.9),
+            "1コーナーで0.2秒失ってる。ブレーキをあと20m遅らせられる。"
+        );
+        assert_eq!(
+            said(shape(95, 10.0, 50.0, 40, 10.0), best, -4.0),
+            "1コーナーで0.2秒失ってる。ブレーキを引きずってボトムが4キロ低い、10m早く抜こう。"
+        );
+        // Without the wheel nothing is said of the turn-in.
+        let blind = |s: BrakeShape| BrakeShape {
+            at_turn_in: None,
+            ..s
+        };
+        assert_eq!(
+            said(blind(shape(95, 10.0, 50.0, 40, 10.0)), blind(best), -4.0),
+            "1コーナーで0.2秒失ってる。ブレーキをあと20m遅らせられる。"
+        );
+        assert_eq!(
+            said(shape(95, 10.0, 40.0, 30, 20.0), best, 0.0),
+            "1コーナーで0.2秒失ってる。ブレーキからアクセルへの持ち替えがベストより10m長い。ブレーキを離したら間を空けずにアクセルに乗せよう。"
+        );
+        // A coast that carries more speed is no loss.
+        assert_eq!(
+            said(shape(95, 10.0, 40.0, 30, 20.0), best, 0.1),
+            "1コーナーで0.2秒失ってる。ブレーキをあと20m遅らせられる。"
+        );
+        let mut c = corner(1, 0.2, None, 0.0);
+        let none = opening(0, 60.0, false, false);
+        c.reference_throttle = Some(none);
+        let lifted = |c: &mut Corner, spin: bool, counter: bool| {
+            c.throttle = Some(opening(2, 60.0, spin, counter));
+            corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap()
+        };
+        assert_eq!(
+            lifted(&mut c, false, true),
+            "1コーナーで0.2秒失ってる。立ち上がりでリアが出てカウンターを当ててる。向きが変わるまで開け始めを待とう。"
+        );
+        assert_eq!(
+            lifted(&mut c, true, false),
+            "1コーナーで0.2秒失ってる。立ち上がりで空転してアクセルを戻してる。開け始めを穏やかに、踏み増しはまっすぐになってから。"
+        );
+        // Lifts the car shows no reason for: the line, not the foot.
+        assert_eq!(
+            lifted(&mut c, false, false),
+            "1コーナーで0.2秒失ってる。進入と脱出のラインを揃えよう。"
+        );
+        let late = |pickup_m: f64, min_kmh: f64| {
+            let mut c = corner(1, 0.2, None, min_kmh);
+            c.reference_throttle = Some(opening(0, 60.0, false, false));
+            c.throttle = Some(ThrottleShape {
+                pickup_m,
+                ..opening(0, 60.0, false, false)
+            });
+            corner_advice(&report(vec![c], vec![], 0)).unwrap()
+        };
+        assert_eq!(
+            late(10.0, 0.0),
+            "1コーナーで0.2秒失ってる。アクセルの踏み始めがベストより10m遅い。向きが変わったら早めに乗せよう。"
+        );
+        // Slower through it: the way in is the matter.
+        assert_eq!(
+            late(10.0, -3.0),
+            "1コーナーで0.2秒失ってる。ボトムが3キロ低い、ブレーキの抜きを少し早めて転がそう。"
+        );
+        assert_eq!(
+            late(9.9, 0.0),
+            "1コーナーで0.2秒失ってる。進入と脱出のラインを揃えよう。"
+        );
+        c.throttle = Some(opening(0, 80.0, false, false));
+        assert_eq!(
+            corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap(),
+            "1コーナーで0.2秒失ってる。全開までがベストより20m長い。向きが変わったら踏み切ろう。"
+        );
+        c.throttle = Some(opening(0, 79.0, false, false));
+        assert_eq!(
+            corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap(),
+            "1コーナーで0.2秒失ってる。進入と脱出のラインを揃えよう。"
+        );
+        // As many lifts as the best lap: whatever the car did, no new mistake.
+        c.reference_throttle = Some(opening(2, 60.0, false, false));
+        for (spin, counter) in [(false, true), (true, false)] {
+            assert_eq!(
+                lifted(&mut c, spin, counter),
+                "1コーナーで0.2秒失ってる。進入と脱出のラインを揃えよう。"
+            );
+        }
+        // Picked up as late as the best lap.
+        let mut c = corner(1, 0.2, None, 0.0);
+        let at = |pickup_m: f64| ThrottleShape {
+            pickup_m,
+            ..opening(0, 60.0, false, false)
+        };
+        (c.throttle, c.reference_throttle) = (Some(at(20.0)), Some(at(20.0)));
+        assert_eq!(
+            corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap(),
+            "1コーナーで0.2秒失ってる。進入と脱出のラインを揃えよう。"
+        );
+        (c.throttle, c.reference_throttle) = (Some(at(35.0)), Some(at(20.0)));
+        assert_eq!(
+            corner_advice(&report(vec![c], vec![], 0)).unwrap(),
+            "1コーナーで0.2秒失ってる。アクセルの踏み始めがベストより15m遅い。向きが変わったら早めに乗せよう。"
+        );
+    }
+
+    #[test]
+    fn the_pedal_is_told_only_where_the_stop_differs() {
+        let said = |a: BrakeShape, b: BrakeShape, min_kmh: f64| {
+            let mut c = corner(1, 0.2, Some(-20.0), min_kmh);
+            (c.brake, c.reference_brake) = (Some(a), Some(b));
+            corner_advice(&report(vec![c], vec![], 0)).unwrap()
+        };
+        let point = "1コーナーで0.2秒失ってる。ブレーキをあと20m遅らせられる。";
+        let g = |decel_g: f64, s: BrakeShape| BrakeShape {
+            decel_g: Some(decel_g),
+            ..s
+        };
+        // More pedal for the same stop: nothing to press harder for.
+        assert_eq!(
+            said(
+                g(1.4, shape(85, 10.0, 40.0, 30, 10.0)),
+                g(1.4, shape(95, 10.0, 40.0, 30, 10.0)),
+                0.0
+            ),
+            point
+        );
+        // More brake at the turn-in on the best lap, but let go over as long.
+        let best = g(1.4, shape(95, 10.0, 40.0, 30, 10.0));
+        assert_eq!(
+            said(g(1.4, shape(95, 10.0, 40.0, 20, 10.0)), best, -3.0),
+            point
+        );
+        // More brake left at the turn-in, but released over as long.
+        assert_eq!(
+            said(g(1.4, shape(95, 10.0, 40.0, 40, 10.0)), best, -4.0),
+            point
+        );
+        // Held longer, but as fast through the corner.
+        assert_eq!(
+            said(g(1.4, shape(95, 10.0, 50.0, 40, 10.0)), best, 0.0),
+            point
         );
     }
 }

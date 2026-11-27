@@ -266,6 +266,8 @@ const DRIVING: &[&str] = &[
     "足りな",
     "追いつ",
     "追い付",
+    "届かない",
+    "速すぎ",
     "もっと速",
     "速くなる",
     "速くする",
@@ -310,6 +312,12 @@ const PAST: &[&str] = &[
 ];
 
 const STRATEGY: &[&str] = &[
+    // Catching a car is a matter of its tyres and its stops too.
+    "追いつかない",
+    "追いつけない",
+    "抜けない",
+    "届かない",
+    "速すぎ",
     "作戦",
     "戦略",
     "ストラテジー",
