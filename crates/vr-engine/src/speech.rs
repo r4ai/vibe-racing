@@ -187,16 +187,59 @@ fn corner_advice(r: &CornersReport) -> Option<String> {
     };
     // Five metres at a time: nobody brakes at a metre.
     let metres = |m: f64| ((m.abs() / CORNER_M).round() * CORNER_M).max(CORNER_M);
-    let todo = if let Some(m) = c.brake_m.filter(|m| *m <= -CORNER_M) {
-        format!("ブレーキをあと{:.0}m遅らせられる。", metres(m))
-    } else if c.min_kmh <= -CORNER_KMH {
-        format!("ボトムスピードをあと{:.0}キロ上げられる。", c.min_kmh.abs())
-    } else if let Some(m) = c.throttle_m.filter(|m| *m >= CORNER_M) {
-        format!("アクセルをあと{:.0}m早く開けられる。", metres(m))
-    } else if let Some(m) = c.brake_m.filter(|m| *m >= CORNER_M) {
-        format!("ブレーキが{:.0}m奥すぎる、少し手前で。", metres(m))
+    let late_brake = c.brake_m.filter(|m| *m >= CORNER_M);
+    let early_brake = c.brake_m.filter(|m| *m <= -CORNER_M);
+    let late_throttle = c.throttle_m.filter(|m| *m >= CORNER_M);
+    let slow_apex = c.min_kmh <= -CORNER_KMH;
+    let slow_exit = c.exit_kmh <= -CORNER_KMH;
+    let todo = if c.reference_min_throttle == 100 && c.min_throttle < 95 {
+        "ベストは全開だ、アクセル戻さず行ける。".to_string()
+    } else if let Some(m) = late_brake
+        && (late_throttle.is_some() || slow_exit || slow_apex)
+    {
+        format!(
+            "ブレーキが{:.0}m奥すぎて脱出が遅れてる、手前から入って早めに開けよう。",
+            metres(m)
+        )
+    } else if let (Some(g), Some(rg)) = (c.gear, c.reference_gear)
+        && g < rg
+        && slow_apex
+    {
+        format!("ベストは{rg}速、1速上でボトムを転がそう。")
+    } else if let (Some(g), Some(rg)) = (c.gear, c.reference_gear)
+        && g > rg
+        && (slow_exit || late_throttle.is_some())
+    {
+        format!("ベストは{rg}速、1速落として立ち上がりを稼ごう。")
+    } else if let Some(m) = early_brake {
+        if slow_apex {
+            format!(
+                "ブレーキが{:.0}m早い、あと{:.0}m奥で踏んでボトムを乗せよう。",
+                metres(m),
+                metres(m)
+            )
+        } else {
+            format!("ブレーキをあと{:.0}m遅らせられる。", metres(m))
+        }
+    } else if let Some(m) = late_throttle {
+        format!(
+            "アクセルをあと{:.0}m早く開けられる、向きが変わったら早めに踏もう。",
+            metres(m)
+        )
+    } else if slow_exit {
+        format!(
+            "出口が{:.0}キロ遅い、脱出重視で早めにアクセルを乗せよう。",
+            c.exit_kmh.abs()
+        )
+    } else if slow_apex {
+        format!(
+            "ボトムが{:.0}キロ低い、ブレーキの抜きを少し早めて転がそう。",
+            c.min_kmh.abs()
+        )
+    } else if let Some(m) = late_brake {
+        format!("ブレーキが{:.0}m奥すぎる、少し手前から丁寧に。", metres(m))
     } else {
-        "ラインを見直そう。".to_string()
+        "進入と脱出のラインを揃えよう。".to_string()
     };
     Some(format!("{name}で{}失ってる。{todo}", sec(loss(i))))
 }
@@ -1104,7 +1147,7 @@ mod tests {
         let r = report(r.corners, vec![0.0, 0.04, 0.12], 3);
         assert_eq!(
             corner_advice(&r).unwrap(),
-            "最終コーナーで0.1秒失ってる。ボトムスピードをあと4キロ上げられる。"
+            "最終コーナーで0.1秒失ってる。ボトムが4キロ低い、ブレーキの抜きを少し早めて転がそう。"
         );
     }
 
@@ -1115,18 +1158,69 @@ mod tests {
         let mut c = corner(1, 0.05, Some(-4.9), -2.9);
         assert_eq!(
             corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap(),
-            "1コーナーで0.05秒失ってる。ラインを見直そう。"
+            "1コーナーで0.05秒失ってる。進入と脱出のラインを揃えよう。"
         );
         c.throttle_m = Some(5.0);
         assert_eq!(
             corner_advice(&report(vec![c.clone()], vec![], 0)).unwrap(),
-            "1コーナーで0.05秒失ってる。アクセルをあと5m早く開けられる。"
+            "1コーナーで0.05秒失ってる。アクセルをあと5m早く開けられる、向きが変わったら早めに踏もう。"
         );
         c.throttle_m = None;
         c.brake_m = Some(13.0);
         assert_eq!(
             corner_advice(&report(vec![c], vec![], 0)).unwrap(),
-            "1コーナーで0.05秒失ってる。ブレーキが15m奥すぎる、少し手前で。"
+            "1コーナーで0.05秒失ってる。ブレーキが15m奥すぎる、少し手前から丁寧に。"
+        );
+    }
+
+    #[test]
+    fn corner_advice_diagnoses_cause_and_effect() {
+        // Flat-out corner where driver lifted.
+        let mut flat = corner(1, 0.18, None, -6.0);
+        flat.name = Some("130R".into());
+        flat.reference_min_throttle = 100;
+        flat.min_throttle = 85;
+        assert_eq!(
+            corner_advice(&report(vec![flat], vec![], 0)).unwrap(),
+            "130Rで0.2秒失ってる。ベストは全開だ、アクセル戻さず行ける。"
+        );
+
+        // Late braking overshooting apex / hurting exit: must NOT tell driver to raise apex speed blindly.
+        let mut over = corner(2, 0.25, Some(10.0), -4.0);
+        over.name = Some("スプーン".into());
+        over.throttle_m = Some(8.0);
+        assert_eq!(
+            corner_advice(&report(vec![over], vec![], 0)).unwrap(),
+            "スプーンで0.2秒失ってる。ブレーキが10m奥すぎて脱出が遅れてる、手前から入って早めに開けよう。"
+        );
+
+        // Wrong gear (downshifted too low -> slow apex).
+        let mut gear_low = corner(3, 0.16, Some(0.0), -4.0);
+        gear_low.name = Some("ヘアピン".into());
+        gear_low.gear = Some(1);
+        gear_low.reference_gear = Some(2);
+        assert_eq!(
+            corner_advice(&report(vec![gear_low], vec![], 0)).unwrap(),
+            "ヘアピンで0.2秒失ってる。ベストは2速、1速上でボトムを転がそう。"
+        );
+
+        // Wrong gear (too high -> slow exit).
+        let mut gear_high = corner(4, 0.16, Some(0.0), 0.0);
+        gear_high.name = Some("シケイン".into());
+        gear_high.gear = Some(3);
+        gear_high.reference_gear = Some(2);
+        gear_high.exit_kmh = -4.0;
+        assert_eq!(
+            corner_advice(&report(vec![gear_high], vec![], 0)).unwrap(),
+            "シケインで0.2秒失ってる。ベストは2速、1速落として立ち上がりを稼ごう。"
+        );
+
+        // Slow exit without late throttle threshold.
+        let mut exit = corner(5, 0.16, Some(0.0), 0.0);
+        exit.exit_kmh = -3.0;
+        assert_eq!(
+            corner_advice(&report(vec![exit], vec![], 0)).unwrap(),
+            "5コーナーで0.2秒失ってる。出口が3キロ遅い、脱出重視で早めにアクセルを乗せよう。"
         );
     }
 }

@@ -127,7 +127,17 @@ const HANDLING: &[&str] = &[
     "車高",
     "キャンバー",
     "デフの",
+    "デフ",
     "ブレーキング",
+    "グレイニング",
+    "ピックアップ",
+    "バイブレーション",
+    "振動",
+    "トレイル",
+    "突っ込",
+    "オーバースピード",
+    "ショートシフト",
+    "ケツ出",
     "bb",
     "tc",
     "tcs",
@@ -351,6 +361,41 @@ const STRATEGY: &[&str] = &[
     "乾く",
     "ウィンドウ",
     "ウインドウ",
+    "セーブ",
+    "抑え",
+    "リフト",
+    "リフコ",
+    "ステイ",
+    "トラフィック",
+    "渋滞",
+    "詰まる",
+    "インラップ",
+    "アウトラップ",
+    "稼ぐ",
+    "次どう",
+    "どうする",
+    "入る",
+    "入ろ",
+];
+
+/// Terse/abstract radio calls where the engineer must infer what matters right now
+/// from strategy, car, handling, and driving data together.
+const ABSTRACT: &[&str] = &[
+    "どう",
+    "今どう",
+    "どんな感じ",
+    "今どんな感じ",
+    "きつい",
+    "厳しい",
+    "やばい",
+    "いける",
+    "いけそう",
+    "これいける",
+    "これ、いける",
+    "どうすればいい",
+    "次どうする",
+    "プッシュ？セーブ",
+    "プッシュ?セーブ",
 ];
 
 /// Beyond the cars around and the last laps: what goes with every question
@@ -492,9 +537,18 @@ pub struct Found {
 /// What the words of the question tell; `None` when they do not.
 pub fn read(text: &str) -> Option<Found> {
     let text = fold(text);
+    let trimmed = text.trim_matches(['。', '？', '?', '！', '!', '、', ' ', '…']);
     let any = |words: &[&str]| words.iter().any(|w| contains(&text, w));
+    let mut topics: Vec<Topic> = Topic::ALL.into_iter().filter(|t| any(t.words())).collect();
+    if ABSTRACT.contains(&trimmed) {
+        for t in [Topic::Strategy, Topic::Car, Topic::Handling, Topic::Driving] {
+            if !topics.contains(&t) {
+                topics.push(t);
+            }
+        }
+    }
     let found = Found {
-        topics: Topic::ALL.into_iter().filter(|t| any(t.words())).collect(),
+        topics,
         long: any(LONG),
     };
     let chars = text.chars().count();
@@ -778,8 +832,21 @@ mod tests {
             "タイヤ変えなくていい？",
             "雨いつ止む？",
             "路面乾いてきた？",
+            "プッシュ？セーブ？",
+            "入る？",
+            "今ボックスしたら詰まる？",
         ] {
             assert!(topics(q).contains(&Topic::Strategy), "{q}");
+        }
+        for q in ["どう？", "今どう？", "きつい", "いける？", "次どうする？"] {
+            let t = topics(q);
+            assert!(
+                t.contains(&Topic::Strategy)
+                    && t.contains(&Topic::Car)
+                    && t.contains(&Topic::Handling)
+                    && t.contains(&Topic::Driving),
+                "{q}: {t:?}"
+            );
         }
     }
 

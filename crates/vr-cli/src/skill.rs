@@ -30,6 +30,10 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../../skills/race-engineer/references/setup.md"),
     ),
     (
+        "references/driving.md",
+        include_str!("../../../skills/race-engineer/references/driving.md"),
+    ),
+    (
         "references/glossary.md",
         include_str!("../../../skills/race-engineer/references/glossary.md"),
     ),
