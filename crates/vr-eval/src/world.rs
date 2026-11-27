@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use vr_core::{Capabilities, Poll, TelemetrySource};
 use vr_engine::{
-    EventsParams, GapParams, HandlingParams, LapsParams, RaceApi, RaceState, SessionRecord,
-    SharedState, SourceKind, StandingsParams,
+    EventsParams, GapParams, HandlingParams, LapsParams, RaceApi, RaceState, SectorsParams,
+    SessionRecord, SharedState, SourceKind, StandingsParams,
 };
 use vr_replay::{SynthConfig, SynthSource};
 use vr_server::{AppState, SessionStore};
@@ -196,6 +196,13 @@ fn text(st: &RaceState) -> String {
             "gaps",
             st.gaps(&GapParams::default()).ok().map(|r| r.to_text()),
         ),
+        part(
+            "sectors",
+            st.sectors(&SectorsParams::default())
+                .ok()
+                .map(|r| r.to_text()),
+        ),
+        part("forecast", st.forecast().ok().map(|r| r.to_text())),
         part(
             "my laps",
             st.laps(&LapsParams::default()).ok().map(|r| r.to_text()),

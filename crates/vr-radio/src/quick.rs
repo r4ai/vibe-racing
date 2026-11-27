@@ -207,6 +207,8 @@ const MORE: &[&str] = &[
     "きつい",
     "厳しい",
     "やばい",
+    "やば",
+    "無理",
     "入る",
     "入ろ",
     "プッシュ",
@@ -229,10 +231,42 @@ const MORE: &[&str] = &[
     "伸びしろ",
     "次どう",
     "どうする",
+    // Complaints, incidents, or observations about rivals that need judgement.
+    "ミス",
+    "ブロック",
+    "幅寄せ",
+    "抜かれ",
+    "危な",
+    "追いつかれ",
 ];
 
 /// Short 2-3 character real radio calls that must go to the agent, never `Unclear`.
-const TERSE: &[&str] = &["どう", "今どう", "いける", "いけそ", "押す"];
+const TERSE: &[&str] = &[
+    "どう",
+    "今どう",
+    "いける",
+    "いけそ",
+    "行ける",
+    "行く",
+    "押す",
+    "押せ",
+    "待つ",
+    "攻め",
+    "攻める",
+    "守り",
+    "守る",
+    "熱い",
+    "冷え",
+    "濡れ",
+    "乾い",
+    "ガス",
+    "どこ",
+    "いつ",
+    "誰",
+    "なぜ",
+    "何周",
+    "何分",
+];
 
 /// Another car, or the cars: their tyres, fuel and damage are not ours.
 const OTHERS: &[&str] = &[
@@ -299,52 +333,37 @@ const AGAIN: &[&str] = &[
     "リピート",
 ];
 
-/// Whether to come in now: 「ピット？」「入る？」「ボックス？」.
-const PIT_ASK: &[&str] = &[
+/// Exact short binary calls asking only whether to box now or stay out.
+/// Any nuanced pit question (e.g. timing, undercut, traffic, fuel, tyres)
+/// falls through to the agent with full `vr strategy` context.
+const BOX_EXACT: &[&str] = &[
     "ピット",
     "ボックス",
+    "ボックス、ボックス",
+    "ボックスボックス",
     "ステイアウト",
     "入る",
-    "入ろう",
-    "入った方",
-    "入ったほう",
+    "今入る",
+    "この周入る",
+    "この周ピット",
+    "この周ボックス",
+    "入ろうか",
     "入っていい",
     "入るべき",
+    "今入るべき",
+    "入った方がいい",
+    "入ったほうがいい",
+    "今入った方がいい",
+    "今入ったほうがいい",
+    "この周入った方がいい",
+    "この周入ったほうがいい",
+    "ピット入る",
+    "ピット入るべき",
+    "今ピット入る",
+    "この周ピット入る",
+    "ボックスする",
+    "今ボックス",
 ];
-/// About the stop, but not whether to make it now.
-const PIT_ELSE: &[&str] = &[
-    "ロス",
-    "何秒",
-    "誰",
-    "なんで",
-    "なぜ",
-    "アンダーカット",
-    "オーバーカット",
-    "タイヤ",
-    "燃料",
-    "ガソリン",
-    "給油",
-    "修理",
-    "作業",
-    "速度",
-    "リミッター",
-    "何位",
-    "順位",
-    "戻",
-    "出た",
-    "入った？",
-    "入ってる",
-    "曲が",
-    "フロント",
-    "リア",
-    "ブレーキ",
-    // Another stop than the one planned.
-    "もう一回",
-    "もう1回",
-    "もう一度",
-];
-/// Short enough to be the question alone.
-const PIT_CHARS: usize = 12;
 
 /// Complaints that something does not work: the driver wants a way out of it,
 /// not the report of how things are.
@@ -399,17 +418,13 @@ const HERE: &[(&str, &str)] = &[
 ];
 
 /// How the race ends: asked in words that otherwise ask for a judgement.
+/// Tactical "can we win / podium?" calls go to the agent for full pace/target reasoning.
 const END: &[&str] = &[
     "位になれ",
     "1になれ",
     "一になれ",
     "番手になれ",
     "トップになれ",
-    "優勝でき",
-    "優勝いけ",
-    "優勝狙え",
-    "勝てる",
-    "勝てそう",
     "何位になり",
     "何位になる",
     "何位で終",
@@ -419,7 +434,6 @@ const END: &[&str] = &[
     "何位でフィニッシュ",
     "このままだと何位",
     "このままいくと何位",
-    "表彰台",
 ];
 /// Whether the fuel lasts, in words that otherwise are about a stop.
 const LASTS: &[&str] = &["持つ", "もつ", "持ちそう", "もちそう", "足り", "完走"];
@@ -525,13 +539,7 @@ pub fn read(text: &str) -> Option<Quick> {
         return None;
     }
     // Asked at speed in a word or two: box or stay out, at once.
-    if chars <= PIT_CHARS
-        && any(PIT_ASK)
-        && !any(PIT_ELSE)
-        && !any(OTHERS)
-        && topic(&s).is_none()
-        && fuel_lasts(&s).is_none()
-    {
+    if BOX_EXACT.contains(&s.as_str()) {
         return Some(Quick::Say("box"));
     }
     if chars <= MAX_CHARS && !any(LOOK) {
@@ -573,19 +581,21 @@ fn topic(s: &str) -> Option<&'static str> {
     {
         return None;
     }
-    let losing = any(&["どこ", "どのセクター", "どの区間", "どのコーナー"])
-        && any(&[
-            "離され",
-            "失",
-            "遅",
-            "負け",
-            "詰め",
-            "稼",
-            "ロス",
-            "削れ",
-            "縮め",
-        ])
-        || any(&["ブレーキ"]) && any(&["遅らせ", "奥", "もっと我慢"]);
+    let fuel_word = any(&["燃料", "ガソリン", "燃費", "フューエル"]);
+    let losing = !fuel_word
+        && (any(&["どこ", "どのセクター", "どの区間", "どのコーナー"])
+            && any(&[
+                "離され",
+                "失",
+                "遅",
+                "負け",
+                "詰め",
+                "稼",
+                "ロス",
+                "削れ",
+                "縮め",
+            ])
+            || any(&["ブレーキ"]) && any(&["遅らせ", "奥", "もっと我慢"]));
     let sectors = any(&["セクター", "区間"]);
     let gap = any(GAP);
     let lap = any(LAP) && !any(&["タイム差", "差"]);
@@ -616,16 +626,22 @@ fn topic(s: &str) -> Option<&'static str> {
     if behind && lap && !any(&["ペース", "上げ", "速"]) {
         return None;
     }
-    // Where, when, with whom or what it does: the state of the car is no answer.
-    let cause = why || any(&["いつ", "誰", "影響", "せい", "原因", "どれだけ遅"]);
+    // Where, when, with whom or what it does: a canned report does not answer.
+    // Note: "いつ" inside "追いつく" is not "when".
+    let when_word = s.contains("いつ") && !s.contains("追いつ");
+    let cause = why || when_word || any(&["誰", "影響", "せい", "原因", "どれだけ遅"]);
+    if losing {
+        return Some("losing");
+    }
+    if cause {
+        return None;
+    }
     // The tyres, fuel or damage of another car: the reports are of ours.
     let theirs = any(OTHERS);
-    Some(if losing {
-        "losing"
-    } else if sectors && !why {
+    Some(if sectors {
         "sectors"
     } else if hurt {
-        if cause || theirs {
+        if theirs {
             return None;
         }
         "damage"
@@ -639,7 +655,7 @@ fn topic(s: &str) -> Option<&'static str> {
         } else {
             "tyres"
         }
-    } else if any(&["燃料", "ガソリン", "燃費", "フューエル"]) {
+    } else if fuel_word {
         if theirs {
             return None;
         }
@@ -665,7 +681,7 @@ fn topic(s: &str) -> Option<&'static str> {
         "leader-lap"
     } else if any(LEADER) && (gap || s.ends_with(['は', 'と']) || chars_at_most(s, 5)) {
         "leader"
-    } else if any(&["追いつ"]) && !behind {
+    } else if any(&["追いつ"]) && !behind && !s.contains("追いつかれ") {
         "ahead"
     } else if any(&[
         "何位",
@@ -977,9 +993,6 @@ mod tests {
                     "このペースで1位になれそうですか?",
                     "このペースで1になれそうですか?",
                     "このままだと何位",
-                    "優勝できそう",
-                    "表彰台いける",
-                    "勝てる？",
                 ],
             ),
             (
@@ -1104,6 +1117,18 @@ mod tests {
             "きつい",
             "プッシュ？セーブ？",
             "もっと速く走りたい、どこ詰めればいい？",
+            // Misclassification guards: never hijack strategy/tactical/causal/terse calls.
+            "ピットいつ入る？",
+            "次の周入る？",
+            "これ勝てる？",
+            "優勝できそう？",
+            "表彰台いける？",
+            "追いつかれそう？",
+            "どこで燃料稼ぐ？",
+            "後ろ、どこで速い？",
+            "前の車ミスった",
+            "行く？",
+            "無理",
         ] {
             assert_eq!(read(q), None, "{q}");
         }
@@ -1118,7 +1143,6 @@ mod tests {
             "ボックス？",
             "入る？",
             "今入る？",
-            "ピットいつ入る",
             "この周入った方がいい？",
             "ステイアウト？",
             "ボックス、ボックス？",
@@ -1135,6 +1159,11 @@ mod tests {
             "ピット出たら何位？",
             "燃料、ピット入らずにもつ？",
             "もう一回ピット入る",
+            // Nuanced pit questions must go to the agent, not canned `box`.
+            "先に入った方がいい？",
+            "今ボックスしたら詰まる？",
+            "ボックスしたらどうなる？",
+            "ピット開いてる？",
             // A complaint, not a question of the stop.
             "フロント入らない",
             // Longer: more than the call.

@@ -39,11 +39,11 @@ fn fits_question(report: &str) -> Value {
         "fits": {
             "type": "noul",
             "instructions": format!(
-                "The race engineer would reply to this radio call with only a short ready-made report that tells {report}. Does that report answer everything the driver asks? It does not when the driver asks where, when, why, with whom or what effect something had, asks about someone else's best lap, refers back to an earlier answer, asks for a judgement, or says something the report does not cover."
+                "The race engineer would reply to this radio call with only a short ready-made report that tells {report}. Does that report answer everything the driver asks? It does not when the driver asks where, when, why, how, with whom or what effect something had, asks for strategy reasoning (e.g. when to pit, undercut, fuel-saving technique), asks for driving or setup advice, asks about someone else's best lap or tyres, refers back to an earlier answer, asks a terse contextual question (like 'どう？', 'いける？', 'きつい'), or says something the report does not cover."
             ),
             "criteria": {
-                "true": "The report alone answers the call",
-                "false": "The call asks for something the report does not tell",
+                "true": "The report alone completely answers the call",
+                "false": "The call asks for reasoning, advice, context inference, or anything the report does not tell",
             },
         },
     })
