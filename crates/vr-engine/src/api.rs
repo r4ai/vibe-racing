@@ -558,9 +558,20 @@ impl RaceApi for RaceState {
         let each: Vec<Behaviour> = laps.iter().map(|l| l.behaviour).collect();
         let mean = Behaviour::mean(&each);
         let car = self.frame().and_then(|f| f.player.as_ref()).map(|p| &p.car);
+        let experiments = {
+            let idx = self.frame().and_then(|f| f.player_car_idx);
+            let laps = idx.map(|i| self.car_laps(i)).unwrap_or_default();
+            let all: Vec<HandlingLap> = tracker.laps().cloned().collect();
+            let fade = crate::strategy::fade_of(&laps).unwrap_or(0.0);
+            crate::garage::experiments(self.adjustments(), &laps, &all, fade)
+        };
         let advice = car.map(|car| {
             let b = mean.unwrap_or_default();
-            crate::advice::advise(&b, laps.len(), car, self.setup_now())
+            let past = crate::advice::Past {
+                experiments: &experiments,
+                adjustments: self.adjustments(),
+            };
+            crate::advice::advise(&b, laps.len(), car, self.setup_now(), &past)
         });
         Ok(HandlingReport {
             meta: self.meta(),
@@ -583,13 +594,7 @@ impl RaceApi for RaceState {
             controls: self.controls(),
             adjustments: self.adjustments().to_vec(),
             advice: advice.unwrap_or_default(),
-            experiments: {
-                let idx = self.frame().and_then(|f| f.player_car_idx);
-                let laps = idx.map(|i| self.car_laps(i)).unwrap_or_default();
-                let all: Vec<HandlingLap> = tracker.laps().cloned().collect();
-                let fade = crate::strategy::fade_of(&laps).unwrap_or(0.0);
-                crate::garage::experiments(self.adjustments(), &laps, &all, fade)
-            },
+            experiments,
         })
     }
 }

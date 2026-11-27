@@ -349,6 +349,7 @@ mod tests {
             "strategy.yaml",
             "complex.yaml",
             "complex-heldout.yaml",
+            "pressure.yaml",
         ] {
             let stints = load(&dir().join(name)).unwrap();
             assert!(stints.len() >= 3, "{name}");

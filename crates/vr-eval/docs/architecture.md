@@ -68,6 +68,7 @@ flowchart LR
 | `topics-heldout.yaml`   | 同上（35 問）                                                                | 確認用 |
 | `complex.yaml`          | 決まった形に無い質問: 一度に複数、もしも、全体・過去の集計、続きの質問       | 改善用 |
 | `complex-heldout.yaml`  | 同上                                                                         | 確認用 |
+| `pressure.yaml`         | 極限での無線: 叫びへの具体策、ピットかステイアウトか、他車と攻めどころ       | 改善用 |
 
 ## 機械的な検査
 
