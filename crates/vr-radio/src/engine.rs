@@ -2600,17 +2600,119 @@ BB 54"
 
     #[tokio::test]
     async fn options_of_the_agent_can_be_changed() {
-        let mut h = start(&["はい。"], "x", 1.0);
-        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        let set = Arc::new(Mutex::new(Vec::new()));
+        let (cmds, cmd_rx) = unbounded_channel();
+        let (ev_tx, mut events) = unbounded_channel();
+        let agent = AgentLink::spawn(
+            fake::agent_set(&["はい。"], Arc::default(), set.clone()),
+            SessionConfig {
+                cwd: std::env::temp_dir(),
+                permissions: Permissions::Safe,
+                options: vec![],
+                primer: None,
+                renew: crate::agent::Renew::NEVER,
+            },
+        );
+        tokio::spawn(run(
+            Deps {
+                recorder: Arc::new(FakeMic {
+                    seconds: 1.0,
+                    started: AtomicBool::new(false),
+                }),
+                transcriber: Arc::new(FakeStt("x")),
+                make_transcriber: Box::new(|_| Arc::new(FakeStt("x"))),
+                synth: Arc::new(EchoSynth(Arc::default(), Arc::default())),
+                output: Arc::new(FakeOut::default()),
+                agent,
+                agent_command: "other".into(),
+                agent_options: AgentOptions::default(),
+                connect: Box::new(|_, _| AgentLink::failed("unused".into())),
+                context: None,
+                prompt_template: "無線:「{text}」{context}".into(),
+                speaker: 3,
+                volume: 100,
+                speed: 120,
+                early_stt: false,
+                language: Some("ja".into()),
+                watch: None,
+                proactive: Proactive::default(),
+                timing: watch::Timing::default(),
+                rules: Rules::default(),
+                live: None,
+                standby: None,
+                transcript: None,
+            },
+            cmd_rx,
+            ev_tx,
+        ));
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Event::AgentOptions(_)
+        ) {}
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
         let o = AgentOptions {
             radio: vec![pair("model", "b")],
         };
-        // Nothing to set in an agent that offers nothing: it goes on.
-        h.cmds.send(Command::SetAgentOptions(o)).unwrap();
-        h.cmds.send(Command::Ask("何か".into())).unwrap();
+        cmds.send(Command::SetAgentOptions(o.clone())).unwrap();
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Event::AgentOptions(_)
+        ) {}
+        assert_eq!(*set.lock().unwrap(), ["s1 model=b"]);
+        // Sending the same options again sends no redundant Set command.
+        cmds.send(Command::SetAgentOptions(o)).unwrap();
+        cmds.send(Command::Ask("何か".into())).unwrap();
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Event::TurnDone { .. }
+        ) {}
+        assert_eq!(*set.lock().unwrap(), ["s1 model=b"]);
+    }
+
+    #[tokio::test]
+    async fn a_call_without_end_is_given_up() {
+        let mut h = start(&["はい。"], "x", 1.0);
+        h.until(|e| matches!(e, Event::AgentReady { .. })).await;
+        // Driver's own slow question is not cut off by CALL_LIMIT.
+        h.cmds.send(Command::Ask("slow".into())).unwrap();
+        h.prompted(1).await;
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        h.cmds.send(Command::Cancel).unwrap();
         let e = h.until(is_done).await;
-        assert!(e.iter().all(|e| !matches!(e, Event::Error(_))));
+        assert!(
+            matches!(
+                e.last(),
+                Some(Event::TurnDone {
+                    outcome: Outcome::Cancelled,
+                    ..
+                })
+            ),
+            "{e:?}"
+        );
+        // An automatic call that hangs is cancelled after CALL_LIMIT.
+        h.race.send(thought("slow event")).unwrap();
+        h.prompted(2).await;
+        let e = h.until(is_done).await;
+        assert!(
+            matches!(
+                e.last(),
+                Some(Event::TurnDone {
+                    outcome: Outcome::Failed(f),
+                    ms,
+                    ..
+                }) if f == "時間切れ" && *ms >= 2000
+            ),
+            "{e:?}"
+        );
     }
 
     #[tokio::test]

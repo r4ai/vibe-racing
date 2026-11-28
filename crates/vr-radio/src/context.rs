@@ -82,18 +82,7 @@ impl ContextSource for Commands {
                 }
             })
             .unwrap_or_default();
-        let mut commands = if found.long {
-            let mut all: Vec<String> = topic::STUDY.iter().map(|c| c.to_string()).collect();
-            for c in topic::commands(&found, text) {
-                if !all.iter().any(|x| within(&c, x)) {
-                    all.push(c);
-                }
-            }
-            all
-        } else {
-            topic::commands(&found, text)
-        };
-        commands.retain(|c| !self.commands.contains(c));
+        let commands = commands_for(&self.commands, &found, text);
         More {
             data: self.output(&commands),
             long: found.long,
@@ -150,6 +139,23 @@ impl Commands {
         });
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
+}
+
+/// Commands to run for a question beyond `base`.
+fn commands_for(base: &[String], found: &topic::Found, text: &str) -> Vec<String> {
+    let mut commands = if found.long {
+        let mut all: Vec<String> = topic::STUDY.iter().map(|c| c.to_string()).collect();
+        for c in topic::commands(found, text) {
+            if !all.iter().any(|x| within(&c, x)) {
+                all.push(c);
+            }
+        }
+        all
+    } else {
+        topic::commands(found, text)
+    };
+    commands.retain(|c| !base.contains(c));
+    commands
 }
 
 /// The same command, perhaps with other options.
@@ -262,6 +268,25 @@ mod tests {
         assert_eq!(failed.fetch_for(unclear), More::default());
         assert_eq!(commands(&[]).fetch_for(unclear), More::default());
         assert!(commands(&[]).fetch_for("コースレコード調べて").long);
+    }
+
+    #[test]
+    fn long_questions_bundle_study_and_extra_topic_commands_without_duplicates() {
+        let base = vec!["vr brief".into()];
+        let found = topic::Found {
+            topics: vec![topic::Topic::Handling, topic::Topic::Past],
+            long: true,
+        };
+        let cmds = commands_for(&base, &found, "12号車の挙動と前のレース調べて");
+        // Already in `base`: omitted.
+        assert!(!cmds.iter().any(|c| c == "vr brief"));
+        // Study commands are included.
+        assert!(cmds.iter().any(|c| c == "vr handling"));
+        // Topic commands not covered by STUDY are added once.
+        assert!(cmds.iter().any(|c| c == "vr sessions list --limit 5"));
+        assert!(cmds.iter().any(|c| c == "vr gap --car 12"));
+        // `vr handling` is in both STUDY and Topic::Handling: not duplicated.
+        assert_eq!(cmds.iter().filter(|c| *c == "vr handling").count(), 1);
     }
 
     #[test]

@@ -98,4 +98,10 @@ exclude_re = [
     'replace < with <= in clips',
     # Equivalent: NoMic::stop already returns the default recording.
     'replace <impl Recorder for NoMic>::stop -> Recording with Default::default\(\)',
+    # Equivalent: `begin()` assigns strictly increasing turn numbers, so `words()`
+    # is never called twice with `turn == self.newest`.
+    'replace < with <= in Engine::words',
+    # Returning `Ok(())` immediately closes the fake ACP session before any test
+    # turn can start, making reconnect-loop tests wait until the mutant timeout.
+    'replace sessions ',
 ]

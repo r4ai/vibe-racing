@@ -549,9 +549,15 @@ mod tests {
             )]
         );
         assert_eq!(d("do=x"), [bad("do=x")]);
-        let found = d(r#"when="lap > 1" every=often once=yes"#);
-        assert_eq!(found[..2], [bad("every=often"), bad("once=yes")]);
-        assert!(matches!(found[2], Ok(Directive::Watch(_))));
+        let found = d(r#"when="lap > 1" tell=lap tell=bogus every=often once=yes"#);
+        assert_eq!(
+            found[..3],
+            [bad("tell=bogus"), bad("every=often"), bad("once=yes")]
+        );
+        assert!(matches!(
+            &found[3],
+            Ok(Directive::Watch(w)) if w.tell.as_deref() == Some("lap")
+        ));
         assert_eq!(
             d("hold=brake >"),
             [Err(
