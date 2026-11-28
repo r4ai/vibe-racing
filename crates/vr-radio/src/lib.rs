@@ -19,6 +19,7 @@ pub mod fonts;
 pub mod gate;
 pub mod hotkey;
 pub mod http;
+pub mod inbox;
 pub mod live;
 pub mod policy;
 pub mod resident;

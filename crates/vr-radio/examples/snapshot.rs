@@ -67,6 +67,33 @@ fn main() {
     render("idle", &App::new(), &theme, None);
     render("conversation", &App::sample(), &theme, None);
 
+    // An error over the log: the log and the input stay where they were.
+    let mut failed = App::sample();
+    failed.handle(Event::Error("VOICEVOX に接続できません".into()));
+    render("error", &failed, &theme, None);
+
+    // A long race: the oldest exchanges are no longer kept.
+    let mut long = App::new();
+    for turn in 1..=260 {
+        long.handle(Event::TurnStarted { turn });
+        long.handle(Event::Transcript {
+            turn,
+            text: format!("{turn}周目、前との差は？"),
+            ms: 400,
+        });
+        long.handle(Event::Chunk {
+            turn,
+            text: "前まで 0.6。毎周 0.4 詰めてる。".into(),
+        });
+        long.handle(Event::TurnDone {
+            turn,
+            outcome: vr_radio::engine::Outcome::Answered,
+            ms: 2000,
+        });
+    }
+    let _ = long.update(Message::ScrollToEnd);
+    render("long", &long, &theme, None);
+
     let mut recording = App::sample();
     recording.handle(Event::TurnDone {
         turn: 2,

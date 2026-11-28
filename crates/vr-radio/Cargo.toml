@@ -22,7 +22,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ureq = { workspace = true, features = ["rustls", "platform-verifier"] }
 agent-client-protocol = { version = "5.4.0", features = ["process", "unstable_end_turn_token_usage"] }
-iced = { version = "0.14.0", features = ["tokio"] }
+iced = { version = "0.14.0", features = ["lazy", "tokio"] }
 # Unreleased main: Japanese IME input in text inputs (r4ai/shadcn-iced#89),
 # long selects over their trigger (r4ai/shadcn-iced#95).
 shadcn-iced = { git = "https://github.com/r4ai/shadcn-iced", rev = "3e02f7675ddfba7ecd7a10f834c72a347984b8cb" }

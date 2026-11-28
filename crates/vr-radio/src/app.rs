@@ -35,9 +35,21 @@ pub static HOTKEY: OnceLock<Result<String, String>> = OnceLock::new();
 /// Saved choices and the file they are kept in.
 pub static SETTINGS: OnceLock<(Settings, Option<PathBuf>)> = OnceLock::new();
 
+mod paced;
 mod view;
 
 const SCROLLER: &str = "conversation";
+
+/// Exchanges kept in the window. Older ones stay in the transcript file;
+/// the window's memory and work per update do not grow with the race.
+const MAX_TURNS: usize = 200;
+
+/// How long the orb takes to change color with the phase.
+const ORB_FADE: Duration = Duration::from_millis(220);
+
+/// How much of the previous level is kept every 50 ms of recording: the
+/// ring follows the voice up at once and settles down smoothly.
+const LEVEL_DECAY: f32 = 0.7;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -102,6 +114,8 @@ pub enum Message {
     Minimize,
     Close,
     Chrome(crate::chrome::ChromeEvent),
+    /// A frame of an animation of the window.
+    Frame(iced::time::Instant),
 }
 
 /// When to keep quiet, for those who do not write conditions.
@@ -357,6 +371,8 @@ enum VoiceState {
 #[derive(Debug, Default)]
 struct TurnView {
     id: Turn,
+    /// Changes with every change to the turn: its view is cached until then.
+    rev: u64,
     /// The engineer called by itself: `heard` is what it is about.
     call: bool,
     heard: Option<String>,
@@ -375,6 +391,8 @@ pub struct App {
     speaking: bool,
     level: f32,
     turns: Vec<TurnView>,
+    /// Exchanges no longer kept (see `MAX_TURNS`).
+    dropped: usize,
     errors: Vec<String>,
     draft: String,
     voices: Vec<Voice>,
@@ -410,6 +428,10 @@ pub struct App {
     hold_drafts: [Option<String>; 2],
     /// The engineer's notes on the strategy.
     plan: Option<String>,
+    /// The phase the orb is fading from, and since when.
+    orb_from: Option<(Phase, iced::time::Instant)>,
+    /// The time of the last frame of an animation.
+    now: iced::time::Instant,
 }
 
 impl App {
@@ -437,6 +459,8 @@ impl App {
             note_draft: String::new(),
             hold_drafts: [None, None],
             plan: None,
+            orb_from: None,
+            now: iced::time::Instant::now(),
             config,
             settings,
             settings_path,
@@ -446,6 +470,7 @@ impl App {
             speaking: false,
             level: 0.0,
             turns: Vec::new(),
+            dropped: 0,
             errors: Vec::new(),
             draft: String::new(),
             voices: Vec::new(),
@@ -661,6 +686,7 @@ impl App {
     /// Follows a setting the driver had changed by voice.
     fn changed(&mut self, s: Setting) {
         if let Some(t) = self.turns.last_mut() {
+            t.rev += 1;
             t.tools
                 .push((format!("setting:{s}"), s.to_string(), ToolState::Done));
         }
@@ -811,17 +837,55 @@ impl App {
         }
     }
 
+    /// The turn, to be changed: its view is built again.
     fn turn(&mut self, id: Turn) -> Option<&mut TurnView> {
-        self.turns.iter_mut().rev().find(|t| t.id == id)
+        let t = self.turns.iter_mut().rev().find(|t| t.id == id)?;
+        t.rev += 1;
+        Some(t)
+    }
+
+    fn push_turn(&mut self, turn: TurnView) {
+        self.turns.push(turn);
+        let excess = self.turns.len().saturating_sub(MAX_TURNS);
+        self.turns.drain(..excess);
+        self.dropped += excess;
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let before = self.phase();
+        let task = self.react(message);
+        let after = self.phase();
+        if after != before {
+            self.now = iced::time::Instant::now();
+            self.orb_from = Some((before, self.now));
+        }
+        task
+    }
+
+    /// How far the orb has faded to the current phase, from 0 to 1.
+    fn orb_progress(&self) -> Option<(Phase, f32)> {
+        let (from, since) = self.orb_from?;
+        let t = self.now.saturating_duration_since(since).as_secs_f32() / ORB_FADE.as_secs_f32();
+        (t < 1.0).then(|| (from, shadcn_iced::animation::ease_out(t)))
+    }
+
+    fn react(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::EngineReady(tx) => self.engine = Some(tx),
             Message::Engine(event) => {
+                // The scroller is anchored at the end: what comes in stays in
+                // sight without scrolling. A new question brings it back.
+                let asked = matches!(event, Event::TurnStarted { .. });
                 self.apply(event);
-                if self.at_end {
+                if asked {
+                    self.at_end = true;
                     return shadcn_iced::message_scroller::scroll_to_end(SCROLLER);
+                }
+            }
+            Message::Frame(now) => {
+                self.now = now;
+                if self.orb_progress().is_none() {
+                    self.orb_from = None;
                 }
             }
             Message::Voices(Ok(voices)) => {
@@ -1076,7 +1140,7 @@ impl App {
             Event::Plan(p) => self.plan = p,
             Event::CallStarted { turn, about } => {
                 self.previewing = false;
-                self.turns.push(TurnView {
+                self.push_turn(TurnView {
                     id: turn,
                     call: true,
                     heard: Some(about),
@@ -1087,8 +1151,11 @@ impl App {
                 self.agent =
                     AgentStatus::Closed(error.unwrap_or_else(|| "connection closed".into()))
             }
-            Event::Recording(r) => self.recording = r,
-            Event::Level(l) => self.level = l,
+            Event::Recording(r) => {
+                self.recording = r;
+                self.level = 0.0;
+            }
+            Event::Level(l) => self.level = l.max(self.level * LEVEL_DECAY),
             Event::Speaking(s) => {
                 self.speaking = s;
                 self.previewing &= s;
@@ -1099,7 +1166,7 @@ impl App {
             Event::AgentOptions(o) => self.offered = o,
             Event::TurnStarted { turn } => {
                 self.previewing = false;
-                self.turns.push(TurnView {
+                self.push_turn(TurnView {
                     id: turn,
                     ..Default::default()
                 });
@@ -1246,7 +1313,14 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
+    // Only while something moves: nothing wakes the window otherwise.
+    let frames = if app.orb_from.is_some() {
+        window::frames().map(Message::Frame)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
+        frames,
         Subscription::run(engine_stream),
         Subscription::run(hotkey_stream),
         Subscription::run(chrome_stream),
@@ -1461,18 +1535,8 @@ fn engine_stream() -> impl Stream<Item = Message> {
 }
 
 fn hotkey_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(16, async |mut out| {
-        use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-        let rx = GlobalHotKeyEvent::receiver();
-        loop {
-            while let Ok(e) = rx.try_recv() {
-                let down = e.state == HotKeyState::Pressed;
-                if out.send(Message::Hotkey(down)).await.is_err() {
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    iced::stream::channel(16, async |out| {
+        crate::inbox::forward(hotkey::events(), out, Message::Hotkey).await;
     })
 }
 
@@ -1489,28 +1553,14 @@ fn wheel_stream() -> impl Stream<Item = Message> {
 }
 
 fn resident_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(4, async |mut out| {
-        loop {
-            while let Some(e) = resident::poll() {
-                if out.send(Message::Resident(e)).await.is_err() {
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+    iced::stream::channel(4, async |out| {
+        crate::inbox::forward(resident::events(), out, Message::Resident).await;
     })
 }
 
 fn chrome_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(16, async |mut out| {
-        loop {
-            for e in crate::chrome::drain() {
-                if out.send(Message::Chrome(e)).await.is_err() {
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(16)).await;
-        }
+    iced::stream::channel(16, async |out| {
+        crate::inbox::forward(crate::chrome::events(), out, Message::Chrome).await;
     })
 }
 
@@ -2326,5 +2376,96 @@ mod tests {
             ]
         );
         assert_eq!(app.draft, "");
+    }
+
+    #[test]
+    fn old_turns_are_let_go_and_counted() {
+        let mut app = App::new();
+        for turn in 1..=(MAX_TURNS as u64 + 3) {
+            app.apply(Event::TurnStarted { turn });
+        }
+        assert_eq!(app.turns.len(), MAX_TURNS);
+        assert_eq!(app.dropped, 3);
+        assert_eq!(app.turns[0].id, 4);
+        assert_eq!(app.turns.last().unwrap().id, MAX_TURNS as u64 + 3);
+        app.apply(Event::CallStarted {
+            turn: 999,
+            about: "flag".into(),
+        });
+        assert_eq!(app.turns.len(), MAX_TURNS);
+        assert_eq!(app.dropped, 4);
+        let _ = app.view();
+    }
+
+    #[test]
+    fn a_turn_is_built_again_only_when_it_changes() {
+        let mut app = app_with_turn();
+        app.apply(Event::TurnStarted { turn: 2 });
+        assert_eq!((app.turns[0].rev, app.turns[1].rev), (0, 0));
+        app.apply(Event::Chunk {
+            turn: 1,
+            text: "a".into(),
+        });
+        app.apply(Event::FirstAudio { turn: 1, ms: 5 });
+        // Not this turn's: nothing changes.
+        app.apply(Event::Chunk {
+            turn: 7,
+            text: "b".into(),
+        });
+        app.apply(Event::Level(0.5));
+        assert_eq!((app.turns[0].rev, app.turns[1].rev), (2, 0));
+        app.apply(Event::Setting(Setting::Muted(true)));
+        assert_eq!((app.turns[0].rev, app.turns[1].rev), (2, 1));
+    }
+
+    #[test]
+    fn the_level_rises_at_once_and_falls_slowly() {
+        let mut app = App::new();
+        app.apply(Event::Recording(true));
+        app.apply(Event::Level(0.1));
+        assert_eq!(app.level, 0.1);
+        app.apply(Event::Level(0.0));
+        assert!((app.level - 0.07).abs() < 1e-6, "{}", app.level);
+        app.apply(Event::Level(0.2));
+        assert_eq!(app.level, 0.2);
+        app.apply(Event::Recording(false));
+        assert_eq!(app.level, 0.0);
+    }
+
+    #[test]
+    fn only_a_new_question_scrolls_back_to_the_end() {
+        let mut app = App::new();
+        let _ = app.update(Message::Scrolled(false));
+        let _ = app.update(Message::Engine(Event::CallStarted {
+            turn: 1,
+            about: "flag".into(),
+        }));
+        let _ = app.update(Message::Engine(Event::Chunk {
+            turn: 1,
+            text: "黄旗".into(),
+        }));
+        assert!(!app.at_end);
+        let _ = app.update(Message::Engine(Event::TurnStarted { turn: 2 }));
+        assert!(app.at_end);
+    }
+
+    #[test]
+    fn the_orb_fades_between_phases_then_stops_animating() {
+        let mut app = App::new();
+        assert_eq!(app.orb_progress(), None);
+        let _ = app.update(Message::Engine(Event::Level(0.3)));
+        assert_eq!(app.orb_from, None, "the phase did not change");
+        let _ = app.update(Message::Engine(Event::Recording(true)));
+        let (from, since) = app.orb_from.unwrap();
+        assert_eq!(from, Phase::Idle);
+        assert_eq!(app.orb_progress(), Some((Phase::Idle, 0.0)));
+        let _ = app.update(Message::Frame(since + ORB_FADE / 2));
+        let (_, half) = app.orb_progress().unwrap();
+        assert!(half > 0.5 && half < 1.0, "{half}");
+        assert!(app.orb_from.is_some());
+        let _ = app.view();
+        let _ = app.update(Message::Frame(since + ORB_FADE));
+        assert_eq!(app.orb_progress(), None);
+        assert_eq!(app.orb_from, None);
     }
 }
