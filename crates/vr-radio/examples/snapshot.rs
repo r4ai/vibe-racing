@@ -10,7 +10,7 @@
 use iced::{Size, Theme};
 use iced_test::simulator::Simulator;
 use shadcn_iced::Mode;
-use vr_radio::app::{App, Message};
+use vr_radio::app::{App, Message, SettingsPage};
 use vr_radio::engine::Event;
 use vr_radio::voicevox::Voice;
 
@@ -104,9 +104,25 @@ fn main() {
     settings_open.handle(Event::Rules(rules));
     let _ = settings_open.update(Message::Capture(vr_radio::app::Capture::Wheel));
     render("settings-capture", &settings_open, &theme, None);
+    // Every page of the settings, with the rules above.
     let _ = settings_open.update(Message::Settings(true));
-    let tall = Size::new(1040.0, 1800.0);
-    render_at(tall, "settings-all", &settings_open, &theme, None);
+    for (name, page) in [
+        ("talk", SettingsPage::Talk),
+        ("voice", SettingsPage::Voice),
+        ("calls", SettingsPage::Calls),
+        ("answers", SettingsPage::Answers),
+        ("orders", SettingsPage::Orders),
+        ("agent", SettingsPage::Agent),
+        ("app", SettingsPage::App),
+    ] {
+        let _ = settings_open.update(Message::SettingsPage(page));
+        render(&format!("settings-{name}"), &settings_open, &theme, None);
+    }
+    // A short window: the page scrolls, the sidebar stays.
+    let _ = settings_open.update(Message::SettingsPage(SettingsPage::Calls));
+    let short = Size::new(800.0, 480.0);
+    render_at(short, "settings-short", &settings_open, &theme, None);
+    let _ = settings_open.update(Message::SettingsPage(SettingsPage::Voice));
 
     // Right after the start: nothing can be used yet.
     let mut starting = App::new();
@@ -136,5 +152,6 @@ fn main() {
     });
     let _ = many.update(Message::Voices(Ok(voices.collect())));
     let _ = many.update(Message::Settings(true));
+    let _ = many.update(Message::SettingsPage(SettingsPage::Voice));
     render("settings-long-select", &many, &theme, Some("四国めたん"));
 }

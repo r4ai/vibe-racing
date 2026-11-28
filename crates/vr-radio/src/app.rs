@@ -77,6 +77,8 @@ pub enum Message {
     Scrolled(bool),
     ScrollToEnd,
     Settings(bool),
+    /// Shows one page of the settings.
+    SettingsPage(SettingsPage),
     /// Plays a sample of the selected voice.
     Preview,
     AgentChoice(AgentChoice),
@@ -254,6 +256,31 @@ impl std::fmt::Display for SttChoice {
     }
 }
 
+/// A page of the settings, picked in their sidebar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SettingsPage {
+    #[default]
+    Talk,
+    Voice,
+    Calls,
+    Answers,
+    Orders,
+    Agent,
+    App,
+}
+
+impl SettingsPage {
+    pub const ALL: [Self; 7] = [
+        Self::Talk,
+        Self::Voice,
+        Self::Calls,
+        Self::Answers,
+        Self::Orders,
+        Self::Agent,
+        Self::App,
+    ];
+}
+
 /// What the settings wait for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Capture {
@@ -355,6 +382,7 @@ pub struct App {
     muted: bool,
     at_end: bool,
     settings_open: bool,
+    settings_page: SettingsPage,
     chrome: crate::chrome::ChromeState,
     /// Current settings, starting from the command line and the saved file.
     config: Config,
@@ -425,6 +453,7 @@ impl App {
             muted: false,
             at_end: true,
             settings_open: false,
+            settings_page: SettingsPage::default(),
             chrome: Default::default(),
         }
     }
@@ -905,6 +934,11 @@ impl App {
             Message::Settings(open) => {
                 self.hold_drafts = [None, None];
                 self.settings_open = open;
+                self.set_capture(Capture::None);
+            }
+            Message::SettingsPage(page) => {
+                self.hold_drafts = [None, None];
+                self.settings_page = page;
                 self.set_capture(Capture::None);
             }
             Message::Preview => {
@@ -1953,6 +1987,29 @@ mod tests {
         let _ = app.update(Message::Capture(Capture::Wheel));
         let _ = app.update(Message::Settings(false));
         assert_eq!(app.capture, Capture::None);
+    }
+
+    #[test]
+    fn settings_pages() {
+        let mut app = App::sample();
+        let _ = app.update(Message::Settings(true));
+        assert_eq!(app.settings_page, SettingsPage::Talk);
+        for page in SettingsPage::ALL {
+            let _ = app.update(Message::SettingsPage(page));
+            assert_eq!(app.settings_page, page);
+            let _ = app.view();
+        }
+        // Leaving the page stops waiting for a key and drops unfinished
+        // conditions; closing keeps the page for the next time.
+        let _ = app.update(Message::SettingsPage(SettingsPage::Talk));
+        let _ = app.update(Message::Capture(Capture::Wheel));
+        app.hold_drafts = [Some("brake >".into()), None];
+        let _ = app.update(Message::SettingsPage(SettingsPage::Calls));
+        assert_eq!(app.capture, Capture::None);
+        assert_eq!(app.hold_drafts, [None, None]);
+        let _ = app.update(Message::Settings(false));
+        let _ = app.update(Message::Settings(true));
+        assert_eq!(app.settings_page, SettingsPage::Calls);
     }
 
     #[test]
