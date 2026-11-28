@@ -16,6 +16,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  clippy:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        group:
+          - name: core
+            packages: >-
+              -p vr-core -p vr-iracing -p vr-ams2 -p vr-ac
+              -p vr-replay -p vr-engine -p vr-server -p vr-cli
+            needs_alsa: false
+          - name: radio
+            packages: -p vr-radio -p vr-eval
+            needs_alsa: true
+    name: clippy (${{ matrix.os }}, ${{ matrix.group.name }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # cpal (vr-radio) links ALSA on Linux.
+      - if: runner.os == 'Linux' && matrix.group.needs_alsa
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: clippy-${{ matrix.group.name }}
+      - run: cargo clippy ${{ matrix.group.packages }} --all-targets -- -D warnings
+
   test:
     strategy:
       fail-fast: false
@@ -44,11 +76,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
-          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-${{ matrix.group.name }}
-      - run: cargo clippy ${{ matrix.group.packages }} --all-targets -- -D warnings
       - run: cargo test ${{ matrix.group.packages }}
 
   coverage:
