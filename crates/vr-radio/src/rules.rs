@@ -81,8 +81,6 @@ pub struct Rules {
     pub watches: Vec<Watch>,
     /// Laps between the engineer's own looks at the strategy; 0: never.
     pub planning: u16,
-    /// The usual questions are answered without the agent.
-    pub quick: bool,
 }
 
 /// Quiet on the brakes, like a real engineer.
@@ -102,7 +100,6 @@ impl Default for Rules {
             notes: Vec::new(),
             watches: Vec::new(),
             planning: PLANNING,
-            quick: true,
         }
     }
 }
@@ -193,13 +190,12 @@ impl Rules {
     pub fn status(&self) -> String {
         let off = |s: Option<&str>| s.unwrap_or("off").to_string();
         let mut out = format!(
-            "interval={} hold=\"{}\" hold_calls=\"{}\" quiet=\"{}\" hold_max={} quick={} planning={}",
+            "interval={} hold=\"{}\" hold_calls=\"{}\" quiet=\"{}\" hold_max={} planning={}",
             self.interval_s,
             off(self.hold.as_deref()),
             off(self.hold_calls.as_deref()),
             off(self.quiet.as_deref()),
             self.hold_max_s,
-            if self.quick { "on" } else { "off" },
             if self.planning == 0 {
                 "off".into()
             } else {
@@ -364,7 +360,7 @@ mod tests {
         let mut r = Rules::default();
         assert_eq!(
             r.status(),
-            "interval=8 hold=\"off\" hold_calls=\"brake > 10\" quiet=\"off\" hold_max=8 quick=on planning=5"
+            "interval=8 hold=\"off\" hold_calls=\"brake > 10\" quiet=\"off\" hold_max=8 planning=5"
         );
         r.set_hold(Scope::All, Some("abs(steer) > 45".into()));
         r.set_hold(Scope::Calls, None);
@@ -373,7 +369,7 @@ mod tests {
         r.watch(watch("lap % 5 == 0", 1));
         assert_eq!(
             r.status(),
-            "interval=60 hold=\"abs(steer) > 45\" hold_calls=\"off\" quiet=\"off\" hold_max=8 quick=on planning=off\n\
+            "interval=60 hold=\"abs(steer) > 45\" hold_calls=\"off\" quiet=\"off\" hold_max=8 planning=off\n\
              指示 n1: 差は毎周\n見張り w1: lap % 5 == 0 → 知らせる"
         );
         assert_eq!(r.hold(Scope::All), Some("abs(steer) > 45"));

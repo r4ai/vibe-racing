@@ -116,7 +116,6 @@ mod tests {
                 "codex".into(),
                 AgentOptions {
                     radio: vec![("model".into(), "m".into())],
-                    desk: vec![("reasoning_effort".into(), "high".into())],
                 },
             )]),
             speaker: Some(8),

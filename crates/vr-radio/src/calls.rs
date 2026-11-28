@@ -488,7 +488,7 @@ mod tests {
         ] {
             let e = event(&format!(r#"{{"type":"{kind}","text":"t","lap":3}}"#));
             assert_eq!(tell(&e, &v), Told::Topic(topic));
-            assert!(crate::quick::TOPICS.contains(&topic));
+            assert!(crate::directive::TELL_TOPICS.contains(&topic));
         }
         let set = |c: &str| {
             format!(r#"{{"type":"adjustment","text":"t","control":"{c}","from":54.0,"to":54.5}}"#)
