@@ -18,38 +18,38 @@ env:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+        group:
+          # DuckDB / telemetry / engine / server / CLI crates (includes crates/vr-cli/tests/architecture.rs).
+          - name: core
+            packages: >-
+              -p vr-core -p vr-iracing -p vr-ams2 -p vr-ac
+              -p vr-replay -p vr-engine -p vr-server -p vr-cli
+            needs_alsa: false
+          # GUI / audio / eval crates (no DuckDB dependency).
+          - name: radio
+            packages: -p vr-radio -p vr-eval
+            needs_alsa: true
+    name: test (${{ matrix.os }}, ${{ matrix.group.name }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       # cpal (vr-radio) links ALSA on Linux.
-      - if: runner.os == 'Linux'
+      - if: runner.os == 'Linux' && matrix.group.needs_alsa
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-
-  architecture:
-    # Crate dependency direction (docs/architecture.md), see crates/vr-cli/tests/architecture.rs.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test -p vr-cli --test architecture
+          key: test-${{ matrix.group.name }}
+      - run: cargo clippy ${{ matrix.group.packages }} --all-targets -- -D warnings
+      - run: cargo test ${{ matrix.group.packages }}
 
   coverage:
     runs-on: ubuntu-latest
@@ -124,6 +124,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
       # Version comes from package.json "packageManager".
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
