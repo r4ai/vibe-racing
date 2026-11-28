@@ -1,10 +1,7 @@
-//! Two long-lived ACP sessions with the agent (Claude Code, Codex...): the
-//! radio, and the desk, where the engineer looks into something at length.
+//! One long-lived ACP session with the agent (Claude Code, Codex...).
 //!
-//! The process and the sessions stay up between questions, so a question
+//! The process and the session stay up between questions, so a question
 //! only costs a `session/prompt` round trip. Replies stream back as chunks.
-//! What the desk reads stays out of the radio's session, and nobody waits for
-//! it: the driver can ask about something else meanwhile.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -127,9 +124,6 @@ pub struct SessionConfig {
     /// The rules, sent along with the first prompt of a session: a prompt of
     /// their own would cost as much as a question.
     pub primer: Option<String>,
-    /// The rules of the desk, and the options that differ there.
-    pub desk_primer: Option<String>,
-    pub desk_options: Vec<(String, String)>,
     pub renew: Renew,
 }
 
@@ -160,8 +154,6 @@ impl Renew {
 /// cancelling its task, the agent process, even while it is still starting.
 pub struct AgentLink {
     pub tx: UnboundedSender<AgentCmd>,
-    /// The desk. Its turns are told by their numbers.
-    pub desk: UnboundedSender<AgentCmd>,
     pub rx: UnboundedReceiver<AgentEvent>,
     task: Option<tokio::task::AbortHandle>,
 }
@@ -170,12 +162,10 @@ impl AgentLink {
     /// Runs the session on the current tokio runtime.
     pub fn spawn(agent: impl ConnectTo<Client> + 'static, config: SessionConfig) -> Self {
         let (tx, cmds) = unbounded_channel();
-        let (desk, desk_cmds) = unbounded_channel();
         let (events, rx) = unbounded_channel();
-        let task = tokio::spawn(run(agent, config, cmds, desk_cmds, events));
+        let task = tokio::spawn(run(agent, config, cmds, events));
         Self {
             tx,
-            desk,
             rx,
             task: Some(task.abort_handle()),
         }
@@ -186,12 +176,7 @@ impl AgentLink {
         let (tx, _) = unbounded_channel();
         let (events, rx) = unbounded_channel();
         let _ = events.send(AgentEvent::Closed { error: Some(error) });
-        Self {
-            desk: tx.clone(),
-            tx,
-            rx,
-            task: None,
-        }
+        Self { tx, rx, task: None }
     }
 }
 
@@ -422,16 +407,15 @@ async fn open(
     Ok((session_id, offered))
 }
 
-/// Runs the sessions until `cmds` closes or the agent goes away.
+/// Runs the session until `cmds` closes or the agent goes away.
 /// Always ends with [`AgentEvent::Closed`].
 pub async fn run(
     agent: impl ConnectTo<Client> + 'static,
     config: SessionConfig,
     cmds: UnboundedReceiver<AgentCmd>,
-    desk_cmds: UnboundedReceiver<AgentCmd>,
     events: UnboundedSender<AgentEvent>,
 ) {
-    let result = sessions(agent, config, cmds, desk_cmds, events.clone()).await;
+    let result = sessions(agent, config, cmds, events.clone()).await;
     let _ = events.send(AgentEvent::Closed {
         error: result.err().map(|e| e.to_string()),
     });
@@ -441,24 +425,18 @@ async fn sessions(
     agent: impl ConnectTo<Client> + 'static,
     config: SessionConfig,
     cmds: UnboundedReceiver<AgentCmd>,
-    desk_cmds: UnboundedReceiver<AgentCmd>,
     events: UnboundedSender<AgentEvent>,
 ) -> agent_client_protocol::Result<()> {
     let permissions = config.permissions;
-    // Either session takes its own out of it.
     let (inbound, radio_rx) = unbounded_channel::<(SessionId, Inbound)>();
-    let (desk_inbound, desk_rx) = unbounded_channel::<(SessionId, Inbound)>();
-    let routes = [inbound, desk_inbound];
-    let updates = routes.clone();
+    let updates = inbound.clone();
 
     Client
         .v1()
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
-                for r in &updates {
-                    let update = Box::new(n.update.clone());
-                    let _ = r.send((n.session_id.clone(), Inbound::Update(update)));
-                }
+                let update = Box::new(n.update.clone());
+                let _ = updates.send((n.session_id.clone(), Inbound::Update(update)));
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -472,13 +450,10 @@ async fn sessions(
                     .title
                     .clone()
                     .unwrap_or_else(|| "tool call".into());
-                for r in &routes {
-                    let title = title.clone();
-                    let _ = r.send((
-                        req.session_id.clone(),
-                        Inbound::Permission { title, allowed },
-                    ));
-                }
+                let _ = inbound.send((
+                    req.session_id.clone(),
+                    Inbound::Permission { title, allowed },
+                ));
                 let outcome = match policy::choose(allowed, &req.options) {
                     Some(o) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                         o.option_id.clone(),
@@ -497,37 +472,23 @@ async fn sessions(
                 )
                 .block_task()
                 .await?;
-            let desk_options = merged(&config.options, &config.desk_options);
-            let lane = |primer, options, inbound| Lane {
-                cx: cx.clone(),
-                cwd: config.cwd.clone(),
+            let radio = Lane {
+                cx,
+                cwd: config.cwd,
                 permissions,
-                options: Arc::new(Mutex::new(options)),
-                primer,
+                options: Arc::new(Mutex::new(config.options)),
+                primer: config.primer,
                 renew: config.renew,
-                inbound,
-                events: events.clone(),
+                inbound: radio_rx,
+                events,
                 used: 0,
-                name: None,
+                name: Some(
+                    init.agent_info
+                        .map(|i| i.title.unwrap_or(i.name))
+                        .unwrap_or_else(|| "agent".into()),
+                ),
             };
-            let mut radio = lane(config.primer.clone(), config.options.clone(), radio_rx);
-            radio.name = Some(
-                init.agent_info
-                    .map(|i| i.title.unwrap_or(i.name))
-                    .unwrap_or_else(|| "agent".into()),
-            );
-            let desk = lane(config.desk_primer.clone(), desk_options, desk_rx);
-            let desk = async move {
-                if let Err(e) = desk.run(desk_cmds).await {
-                    tracing::warn!("desk: {e}");
-                }
-                // The radio goes on without it.
-                std::future::pending().await
-            };
-            tokio::select! {
-                r = radio.run(cmds) => r,
-                r = desk => r,
-            }
+            radio.run(cmds).await
         })
         .await
 }
@@ -960,8 +921,6 @@ mod tests {
             permissions: Permissions::Safe,
             options: vec![],
             primer: primer.map(str::to_string),
-            desk_primer: Some("デスクの規則".into()),
-            desk_options: vec![],
             renew: Renew::NEVER,
         }
     }
@@ -982,7 +941,6 @@ mod tests {
             fake::agent(&["前まで", "0.6。"], prompts.clone()),
             config(None),
             cmd_rx,
-            unbounded_channel().1,
             ev_tx,
         ));
         assert_eq!(
@@ -1237,7 +1195,6 @@ mod tests {
             fake::agent(&["了解。"], prompts.clone()),
             config(None),
             cmd_rx,
-            unbounded_channel().1,
             ev_tx,
         ));
         assert!(matches!(next(&mut ev_rx).await, AgentEvent::Ready { .. }));
@@ -1301,7 +1258,6 @@ mod tests {
             fake::agent(&["a。"], Arc::default()),
             config(None),
             cmd_rx,
-            unbounded_channel().1,
             ev_tx,
         ));
         assert!(matches!(next(&mut ev_rx).await, AgentEvent::Ready { .. }));
@@ -1364,46 +1320,6 @@ mod tests {
             .collect()
     }
 
-    /// What came for the end of `turn`, and all the text of it.
-    async fn answer(rx: &mut UnboundedReceiver<AgentEvent>, wanted: Turn) -> String {
-        let mut out = String::new();
-        loop {
-            match next(rx).await {
-                AgentEvent::Chunk { turn, text } if turn == wanted => out.push_str(&text),
-                AgentEvent::TurnEnd { turn, .. } if turn == wanted => return out,
-                _ => {}
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn the_desk_works_while_the_radio_answers() {
-        let prompts = Arc::new(Mutex::new(Vec::new()));
-        let mut link = AgentLink::spawn(
-            fake::agent(&["はい。", "@速度@調べた。"], prompts.clone()),
-            config(Some("規則")),
-        );
-        // The desk waits; the radio does not.
-        link.desk.send(prompt(1, "slow 調査", true)).unwrap();
-        link.tx.send(prompt(2, "順位", true)).unwrap();
-        assert_eq!(answer(&mut link.rx, 2).await, "はい。");
-        link.desk.send(AgentCmd::Cancel).unwrap();
-        assert_eq!(answer(&mut link.rx, 1).await, "");
-        // Cancelled before it read its rules: they come again.
-        link.desk.send(prompt(3, "速度", true)).unwrap();
-        assert_eq!(answer(&mut link.rx, 3).await, "調べた。");
-        let mut p = prompts.lock().unwrap().clone();
-        p.sort();
-        assert_eq!(
-            p,
-            [
-                "デスクの規則\n\n---\n\nslow 調査",
-                "デスクの規則\n\n---\n\n速度",
-                "規則\n\n---\n\n順位",
-            ]
-        );
-    }
-
     #[tokio::test]
     async fn options_are_set_per_session() {
         let set = Arc::new(Mutex::new(Vec::new()));
@@ -1413,7 +1329,6 @@ mod tests {
                 // The model goes first; what is so already, and what there is
                 // not, is not set.
                 options: pairs(&[("effort", "high"), ("fast-mode", "off"), ("model", "b")]),
-                desk_options: pairs(&[("effort", "low"), ("model", "gone")]),
                 ..config(None)
             },
         );
@@ -1438,12 +1353,5 @@ mod tests {
             .unwrap();
         while !matches!(next(&mut link.rx).await, AgentEvent::Options(_)) {}
         assert_eq!(set.lock().unwrap()[2], "s1 fast-mode=on");
-        // The desk has none yet: with its first prompt.
-        link.desk
-            .send(AgentCmd::Set(pairs(&[("effort", "high")])))
-            .unwrap();
-        link.desk.send(prompt(1, "x", true)).unwrap();
-        answer(&mut link.rx, 1).await;
-        assert_eq!(set.lock().unwrap()[3..], ["s2 effort=high"]);
     }
 }

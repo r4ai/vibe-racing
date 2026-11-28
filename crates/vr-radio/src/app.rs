@@ -69,7 +69,6 @@ pub enum Message {
     HoldDraft(Scope, String),
     /// Laps between looks at the strategy.
     Planning(PlanChoice),
-    Quick(bool),
     NoteDraft(String),
     AddNote,
     /// Drops a standing order or a watch, by its number.
@@ -212,19 +211,16 @@ impl std::fmt::Display for AgentChoice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionChoice {
     pub id: String,
-    /// For the desk only.
-    pub desk: bool,
     pub value: String,
     label: String,
 }
 
 impl OptionChoice {
-    fn all(o: &AgentOption, desk: bool) -> Vec<Self> {
+    fn all(o: &AgentOption) -> Vec<Self> {
         o.choices
             .iter()
             .map(|(value, name)| Self {
                 id: o.id.clone(),
-                desk,
                 value: value.clone(),
                 label: match (o.kind, value.as_str()) {
                     (OptionKind::Speed, "on") => "高速（消費が増える）".into(),
@@ -662,8 +658,7 @@ impl App {
             | Setting::Note(_)
             | Setting::Forgot(_)
             | Setting::Watch(_)
-            | Setting::Planning(_)
-            | Setting::Quick(_) => return,
+            | Setting::Planning(_) => return,
         }
         self.save();
     }
@@ -863,10 +858,6 @@ impl App {
                 self.save();
             }
             Message::Interval(s) => self.rules(|r| r.interval_s = s),
-            Message::Quick(on) => {
-                self.rules(|r| r.quick = on);
-                self.save();
-            }
             Message::Hold(scope, choice) => {
                 let draft = &mut self.hold_drafts[usize::from(scope == Scope::Calls)];
                 *draft = None;
@@ -935,18 +926,11 @@ impl App {
                     .agent_options
                     .entry(agent.clone())
                     .or_default();
-                let list = if c.desk {
-                    &mut saved.desk
-                } else {
-                    &mut saved.radio
-                };
-                *list = merged(list, &[(c.id.clone(), c.value.clone())]);
+                saved.radio = merged(&saved.radio, &[(c.id.clone(), c.value.clone())]);
                 self.config
                     .saved_options
                     .clone_from(&self.settings.agent_options);
-                if !c.desk
-                    && let Some(o) = self.offered.iter_mut().find(|o| o.id == c.id)
-                {
+                if let Some(o) = self.offered.iter_mut().find(|o| o.id == c.id) {
                     // Until the agent says so itself.
                     o.value = c.value;
                 }
@@ -1851,14 +1835,14 @@ mod tests {
         let (mut app, mut cmds, _dir) = wired();
         app.config.agent = config::CODEX_AGENT.into();
         app.offered = App::sample().offered;
-        let pick = |app: &App, i: usize, desk: bool, value: &str| {
-            let all = OptionChoice::all(&app.offered[i], desk);
+        let pick = |app: &App, i: usize, value: &str| {
+            let all = OptionChoice::all(&app.offered[i]);
             all.into_iter().find(|c| c.value == value).unwrap()
         };
-        let fast = pick(&app, 2, false, "on");
+        let fast = pick(&app, 2, "on");
         assert_eq!(fast.to_string(), "高速（消費が増える）");
-        assert_eq!(pick(&app, 2, false, "off").to_string(), "標準");
-        assert_eq!(pick(&app, 0, false, "sol").to_string(), "6.2 Sol");
+        assert_eq!(pick(&app, 2, "off").to_string(), "標準");
+        assert_eq!(pick(&app, 0, "sol").to_string(), "6.2 Sol");
         let _ = app.update(Message::AgentOption(fast));
         assert_eq!(app.offered[2].value, "on");
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
@@ -1870,15 +1854,7 @@ mod tests {
         };
         assert!(o.radio.contains(&pair("fast-mode", "on")));
         assert!(o.radio.contains(&pair("model", "gpt-6.1-terra")));
-        // The desk has an effort of its own.
-        let deep = pick(&app, 1, true, "low");
-        let _ = app.update(Message::AgentOption(deep));
-        assert_eq!(app.offered[1].value, "low");
-        let Ok(Command::SetAgentOptions(o)) = cmds.try_recv() else {
-            panic!("options expected")
-        };
-        assert_eq!(o.desk, [pair("reasoning_effort", "low")]);
-        assert_eq!(o.radio[1], pair("reasoning_effort", "low"));
+        assert!(o.radio.contains(&pair("reasoning_effort", "medium")));
         // Another agent has options of its own.
         assert_eq!(
             app.config.options_of(config::DEFAULT_AGENT),

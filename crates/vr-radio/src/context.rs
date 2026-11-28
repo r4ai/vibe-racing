@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::decide::Decide;
-use crate::quick::{self, Quick};
 use crate::{child, topic};
 
 /// Data later than this is not worth waiting for: the agent looks it up.
@@ -27,20 +26,6 @@ pub struct More {
     pub data: Option<String>,
     /// The answer will take its time.
     pub long: bool,
-    /// The answer itself, worked out without the agent.
-    pub answer: Option<Answer>,
-}
-
-/// An answer that needs no agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    Text(String),
-    /// What was said last, once more.
-    Again,
-    /// A word of agreement, unless something was asked.
-    Ack,
-    /// Hardly anything was heard: how things are.
-    Unclear(String),
 }
 
 pub trait ContextSource: Send + Sync + 'static {
@@ -50,11 +35,6 @@ pub trait ContextSource: Send + Sync + 'static {
     /// More, for what the driver said. Blocking.
     fn fetch_for(&self, _text: &str) -> More {
         More::default()
-    }
-
-    /// The answer to the words, if they need no agent. Blocking.
-    fn answer(&self, _text: &str) -> Option<Answer> {
-        None
     }
 
     /// Everything worth knowing for a closer look at something. Blocking.
@@ -102,12 +82,21 @@ impl ContextSource for Commands {
                 }
             })
             .unwrap_or_default();
-        let mut commands = topic::commands(&found, text);
+        let mut commands = if found.long {
+            let mut all: Vec<String> = topic::STUDY.iter().map(|c| c.to_string()).collect();
+            for c in topic::commands(&found, text) {
+                if !all.iter().any(|x| within(&c, x)) {
+                    all.push(c);
+                }
+            }
+            all
+        } else {
+            topic::commands(&found, text)
+        };
         commands.retain(|c| !self.commands.contains(c));
         More {
             data: self.output(&commands),
             long: found.long,
-            answer: None,
         }
     }
 
@@ -129,33 +118,6 @@ impl ContextSource for Commands {
             }
         }
         self.output(&commands)
-    }
-
-    fn answer(&self, text: &str) -> Option<Answer> {
-        if self.say.is_empty() {
-            return None;
-        }
-        Some(match quick::read(text)? {
-            Quick::Say(topic) => {
-                // The words found a topic; the decision model tells whether its
-                // report is what was asked. Unsure, the agent answers.
-                if let Some(d) = &self.decide {
-                    match d.fits(text, quick::about(topic)) {
-                        Ok(true) => {}
-                        Ok(false) => return None,
-                        Err(e) => {
-                            tracing::warn!("{e:#}");
-                            return None;
-                        }
-                    }
-                }
-                Answer::Text(self.say(topic)?)
-            }
-            Quick::Ack => Answer::Ack,
-            Quick::Here(text) => Answer::Text(text.into()),
-            Quick::Again => Answer::Again,
-            Quick::Unclear => Answer::Unclear(self.say("status")?),
-        })
     }
 
     fn say(&self, topic: &str) -> Option<String> {
@@ -303,59 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn plain_questions_are_answered_by_the_command() {
+    fn say_runs_the_command_for_a_topic() {
         let echo = if cfg!(windows) { "cmd /c echo" } else { "echo" };
         let c = Commands {
             say: echo.into(),
             ..commands(&[])
         };
         assert_eq!(c.say("fuel").as_deref(), Some("fuel"));
-        let text = |t: &str| Some(Answer::Text(t.into()));
-        assert_eq!(c.answer("前との差は"), text("ahead"));
-        assert_eq!(c.answer("今ない。"), text("position"));
-        assert_eq!(c.answer("了解"), Some(Answer::Ack));
-        assert_eq!(c.answer("もう一回"), Some(Answer::Again));
-        assert_eq!(c.answer("んん"), Some(Answer::Unclear("status".into())));
-        assert_eq!(c.answer("なんで遅いの"), None);
-        // Not switched on, or not there.
-        assert_eq!(commands(&[]).answer("前との差は"), None);
         assert_eq!(commands(&[]).say("fuel"), None);
-        let broken = Commands {
-            say: "vr-no-such-program say".into(),
-            ..commands(&[])
-        };
-        assert_eq!(broken.answer("前との差は"), None);
-        assert_eq!(broken.answer("了解"), Some(Answer::Ack));
-    }
-
-    /// Says whether a report answers a call: yes, no, or it is not there.
-    struct Fits(Option<bool>);
-    impl Decide for Fits {
-        fn decide(&self, _: &str) -> anyhow::Result<topic::Found> {
-            Ok(topic::Found::default())
-        }
-        fn fits(&self, _: &str, _: &str) -> anyhow::Result<bool> {
-            self.0.ok_or_else(|| anyhow::anyhow!("offline"))
-        }
-    }
-
-    #[test]
-    fn a_report_is_read_out_only_when_it_answers_the_call() {
-        let echo = if cfg!(windows) { "cmd /c echo" } else { "echo" };
-        let with = |fits| Commands {
-            say: echo.into(),
-            decide: Some(Arc::new(Fits(fits))),
-            ..commands(&[])
-        };
-        assert_eq!(
-            with(Some(true)).answer("ダメージは"),
-            Some(Answer::Text("damage".into()))
-        );
-        // Not what was asked, or not known: the agent answers.
-        assert_eq!(with(Some(false)).answer("ダメージは"), None);
-        assert_eq!(with(None).answer("ダメージは"), None);
-        // Words that need no report need no decision.
-        assert_eq!(with(Some(false)).answer("了解"), Some(Answer::Ack));
     }
 
     #[test]
