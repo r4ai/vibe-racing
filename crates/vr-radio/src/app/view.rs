@@ -9,6 +9,7 @@ use shadcn_iced::prelude::*;
 use shadcn_iced::trace::{self, trace, trace_line};
 use shadcn_iced::typography::muted_text;
 
+use super::paced::paced;
 use super::{
     AgentChoice, AgentStatus, App, Capture, HoldChoice, Message, OptionChoice, Phase, PlanChoice,
     Readiness, SCROLLER, SettingsPage, TurnView, VoiceState, latency,
@@ -27,6 +28,10 @@ const SETTINGS_WIDTH: f32 = 760.0;
 const SETTINGS_HEIGHT: f32 = 560.0;
 const SETTINGS_NAV_WIDTH: f32 = 200.0;
 const VERSION: &str = env!("VR_RADIO_VERSION");
+/// The answer's text: its size and the height of one of its lines, which
+/// the placeholder before it keeps so that nothing jumps when it comes.
+const ANSWER_SIZE: f32 = 17.0;
+const ANSWER_LINE: f32 = 1.6;
 
 fn palette(theme: &Theme) -> shadcn_iced::Palette {
     shadcn_iced::tokens(theme).palette
@@ -362,17 +367,31 @@ impl App {
             Phase::Recording => icon(lucide::MIC).size(32).into(),
             Phase::Speaking => icon(lucide::AUDIO_LINES).size(32).into(),
             Phase::Transcribing | Phase::Researching | Phase::Answering => {
-                spinner().size(32.0).into()
+                paced(spinner().size(32.0))
             }
         };
+        // Fades from the colors of the previous phase.
+        let fading = self.orb_progress();
         let fill = move |t: &Theme| {
-            let p = palette(t);
-            match phase {
-                Phase::Recording => (p.destructive, Color::WHITE),
-                Phase::Speaking => (p.primary, p.primary_foreground),
-                Phase::Idle => (p.muted, p.muted_foreground),
-                _ => (p.secondary, p.secondary_foreground),
+            let now = orb_colors(t, phase);
+            match fading {
+                Some((from, p)) => {
+                    let from = orb_colors(t, from);
+                    (mix(from.0, now.0, p), mix(from.1, now.1, p))
+                }
+                None => now,
             }
+        };
+        let glow = |phase| {
+            if matches!(phase, Phase::Recording | Phase::Speaking) {
+                0.22
+            } else {
+                0.0
+            }
+        };
+        let halo_alpha = match fading {
+            Some((from, p)) => glow(from) + (glow(phase) - glow(from)) * p,
+            None => glow(phase),
         };
         let core = container(center)
             .width(96)
@@ -393,13 +412,8 @@ impl App {
         let ring = 4.0 + 20.0 * level;
         let halo = container(core).padding(ring).style(move |t: &Theme| {
             let (bg, _) = fill(t);
-            let a = if matches!(phase, Phase::Recording | Phase::Speaking) {
-                0.22
-            } else {
-                0.0
-            };
             container::Style {
-                background: Some(Background::Color(alpha(bg, a))),
+                background: Some(Background::Color(alpha(bg, halo_alpha))),
                 border: Border {
                     radius: (48.0 + ring).into(),
                     ..Default::default()
@@ -422,8 +436,21 @@ impl App {
             .center(Length::Fill)
             .into()
         } else {
-            let turns = self.turns.iter().map(turn_view);
-            shadcn_iced::message_scroller::message_scroller(turns)
+            // Built again only when the turn changed: a long race costs no
+            // more per update than a short one.
+            let turns = self
+                .turns
+                .iter()
+                .map(|t| iced::widget::lazy((t.id, t.rev), move |_| turn_view(t)).into());
+            let older = (self.dropped > 0).then(|| {
+                container(muted(
+                    format!("古い交信 {} 件は表示していません", self.dropped),
+                    12.0,
+                ))
+                .center_x(Length::Fill)
+                .into()
+            });
+            shadcn_iced::message_scroller::message_scroller(older.into_iter().chain(turns))
                 .id(SCROLLER)
                 .padding(Padding::new(LOG_PADDING))
                 .on_scroll(|v| Message::Scrolled(shadcn_iced::message_scroller::is_at_end(&v)))
@@ -431,9 +458,9 @@ impl App {
                 .into()
         };
 
-        let mut bottom = column![].spacing(12);
-        if let Some(e) = self.errors.last() {
-            bottom = bottom.push(
+        // Over the log, not above the input: the log keeps its height.
+        let error = self.errors.last().map(|e| {
+            container(
                 alert("エラー")
                     .icon(lucide::CIRCLE_ALERT)
                     .description(e.as_str())
@@ -444,22 +471,25 @@ impl App {
                             .on_press(Message::DismissError),
                     )
                     .variant(shadcn_iced::alert::Variant::Destructive),
-            );
-        }
-        bottom = bottom.push(
-            row![
-                container(
-                    input("文字で質問する", &self.draft)
-                        .on_input(Message::Draft)
-                        .on_submit(Message::Send)
-                )
-                .width(Length::Fill),
-                icon_button(lucide::SEND)
-                    .on_press_maybe((!self.draft.trim().is_empty()).then_some(Message::Send)),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        );
+            )
+            .padding(Padding::new(12.0).left(LOG_PADDING).right(LOG_PADDING))
+        });
+        let content = iced::widget::stack![content]
+            .push(error)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        let bottom = row![
+            container(
+                input("文字で質問する", &self.draft)
+                    .on_input(Message::Draft)
+                    .on_submit(Message::Send)
+            )
+            .width(Length::Fill),
+            icon_button(lucide::SEND)
+                .on_press_maybe((!self.draft.trim().is_empty()).then_some(Message::Send)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
 
         // Always in sight: what the engineer has in mind.
         let plan = self.plan.as_ref().map(|p| {
@@ -1087,6 +1117,28 @@ fn caption_style(
     }
 }
 
+/// The fill and the foreground of the orb in `phase`.
+fn orb_colors(t: &Theme, phase: Phase) -> (Color, Color) {
+    let p = palette(t);
+    match phase {
+        Phase::Recording => (p.destructive, Color::WHITE),
+        Phase::Speaking => (p.primary, p.primary_foreground),
+        Phase::Idle => (p.muted, p.muted_foreground),
+        _ => (p.secondary, p.secondary_foreground),
+    }
+}
+
+/// `a` at 0, `b` at 1.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let at = |x: f32, y: f32| x + (y - x) * t;
+    Color {
+        r: at(a.r, b.r),
+        g: at(a.g, b.g),
+        b: at(a.b, b.b),
+        a: at(a.a, b.a),
+    }
+}
+
 /// A label and a value on one line of the console.
 fn fact<'a>(label: &'static str, value: String) -> Element<'a, Message> {
     row![muted(label, 12.0).width(40), text(value).size(12)]
@@ -1095,8 +1147,8 @@ fn fact<'a>(label: &'static str, value: String) -> Element<'a, Message> {
 }
 
 /// One exchange: the question, the tool calls, the answer and its timing.
-pub(super) fn turn_view(t: &TurnView) -> Element<'_, Message> {
-    let question: Element<'_, Message> = match t.heard_label() {
+pub(super) fn turn_view(t: &TurnView) -> Element<'static, Message> {
+    let question: Element<'static, Message> = match t.heard_label().map(str::to_string) {
         Some(q) if t.call => row![
             badge("自動連絡")
                 .icon(lucide::BELL_RING)
@@ -1115,7 +1167,7 @@ pub(super) fn turn_view(t: &TurnView) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center)
         .into(),
-        None => row![spinner().size(14.0), muted("聞き取り中…", 14.0)]
+        None => row![paced(spinner().size(14.0)), muted("聞き取り中…", 14.0)]
             .spacing(8)
             .align_y(Alignment::Center)
             .into(),
@@ -1132,17 +1184,22 @@ pub(super) fn turn_view(t: &TurnView) -> Element<'_, Message> {
         })));
     }
     if t.asked() {
-        let answer: Element<'_, Message> = if t.thinking() {
-            row![spinner().size(16.0), muted("調べています…", 16.0)]
+        let line = ANSWER_SIZE * ANSWER_LINE;
+        let answer: Element<'static, Message> = if t.thinking() {
+            row![paced(spinner().size(16.0)), muted("調べています…", 16.0)]
                 .spacing(8)
+                .height(line)
                 .align_y(Alignment::Center)
                 .into()
         } else if t.reply.trim().is_empty() {
-            muted("（回答なし）", 16.0).into()
+            container(muted("（回答なし）", 16.0))
+                .height(line)
+                .center_y(line)
+                .into()
         } else {
             text(crate::text::joined(t.reply.trim()))
-                .size(17)
-                .line_height(1.6)
+                .size(ANSWER_SIZE)
+                .line_height(ANSWER_LINE)
                 .into()
         };
         block = block.push(answer);

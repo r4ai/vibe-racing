@@ -35,6 +35,20 @@ fn icon_rgba(size: u32) -> Vec<u8> {
     out
 }
 
+/// Requests from the tray and from later launches, read by the window.
+static EVENTS: std::sync::LazyLock<crate::inbox::Inbox<ResidentEvent>> =
+    std::sync::LazyLock::new(crate::inbox::Inbox::new);
+
+/// The requests, for the one subscription that reads them.
+pub fn events() -> Option<tokio::sync::mpsc::UnboundedReceiver<ResidentEvent>> {
+    EVENTS.take()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn request(event: ResidentEvent) {
+    EVENTS.send(event);
+}
+
 #[cfg(not(windows))]
 pub use stub::*;
 #[cfg(windows)]
@@ -42,14 +56,10 @@ pub use win32::*;
 
 #[cfg(not(windows))]
 mod stub {
-    use super::ResidentEvent;
 
     pub const SUPPORTED: bool = false;
     pub fn install_tray() -> bool {
         false
-    }
-    pub fn poll() -> Option<ResidentEvent> {
-        None
     }
     pub fn starts_with_windows() -> bool {
         false
@@ -68,7 +78,6 @@ mod win32 {
     use std::cell::RefCell;
     use std::path::Path;
     use std::ptr::{null, null_mut};
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
     use tray_icon::{
@@ -84,7 +93,7 @@ mod win32 {
         CreateEventW, INFINITE, SetEvent, WaitForSingleObject,
     };
 
-    use super::{ResidentEvent, icon_rgba, startup_command};
+    use super::{ResidentEvent, icon_rgba, request, startup_command};
 
     pub const SUPPORTED: bool = true;
 
@@ -104,7 +113,6 @@ mod win32 {
     const QUIT: &str = "quit";
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const RUN_VALUE: &str = "VR Radio";
-    static SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
     thread_local! {
         static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
@@ -116,6 +124,22 @@ mod win32 {
 
     /// Must be called on the event-loop thread.
     pub fn install_tray() -> bool {
+        // Called where the tray gets them: the window wakes up only then.
+        MenuEvent::set_event_handler(Some(|e: MenuEvent| match e.id.0.as_str() {
+            SHOW => request(ResidentEvent::Show),
+            QUIT => request(ResidentEvent::Quit),
+            _ => {}
+        }));
+        TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = e
+            {
+                request(ResidentEvent::Show);
+            }
+        }));
         match build() {
             Ok(tray) => {
                 TRAY.set(Some(tray));
@@ -138,30 +162,6 @@ mod win32 {
             .with_tooltip("VR Radio")
             .with_icon(Icon::from_rgba(icon_rgba(32), 32, 32)?)
             .build()?)
-    }
-
-    pub fn poll() -> Option<ResidentEvent> {
-        if SHOW_REQUESTED.swap(false, Ordering::Relaxed) {
-            return Some(ResidentEvent::Show);
-        }
-        while let Ok(e) = MenuEvent::receiver().try_recv() {
-            match e.id.0.as_str() {
-                SHOW => return Some(ResidentEvent::Show),
-                QUIT => return Some(ResidentEvent::Quit),
-                _ => {}
-            }
-        }
-        while let Ok(e) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = e
-            {
-                return Some(ResidentEvent::Show);
-            }
-        }
-        None
     }
 
     pub fn starts_with_windows() -> bool {
@@ -230,7 +230,7 @@ mod win32 {
         std::thread::spawn(move || {
             // SAFETY: the handle is never closed.
             while unsafe { WaitForSingleObject(event as _, INFINITE) } == 0 {
-                SHOW_REQUESTED.store(true, Ordering::Relaxed);
+                request(ResidentEvent::Show);
             }
         });
         true

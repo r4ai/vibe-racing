@@ -7,8 +7,9 @@
 //! menu, `HTMAXBUTTON` on the maximize button for the Snap Layouts flyout.
 //! Other platforms keep their own title bar.
 
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, OnceLock};
+
+use crate::inbox::Inbox;
 
 /// Height of the drawn title bar (logical px).
 pub const TITLE_BAR: f32 = 40.0;
@@ -109,25 +110,22 @@ pub fn hit_test(x: f32, y: f32, width: f32, scale: f32, resize: f32, maximized: 
     Hit::Caption
 }
 
-/// Native events, sent from the window procedure and drained by the UI.
-type Channel = (Mutex<Sender<ChromeEvent>>, Mutex<Receiver<ChromeEvent>>);
-
-fn events() -> &'static Channel {
-    static EVENTS: OnceLock<Channel> = OnceLock::new();
-    EVENTS.get_or_init(|| {
-        let (tx, rx) = channel();
-        (Mutex::new(tx), Mutex::new(rx))
-    })
-}
+/// Native events, sent from the window procedure and read by the UI.
+static EVENTS: LazyLock<Inbox<ChromeEvent>> = LazyLock::new(Inbox::new);
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn emit(event: ChromeEvent) {
-    let _ = events().0.lock().unwrap().send(event);
+    EVENTS.send(event);
 }
 
-/// Events emitted since the last call.
+/// The events, for the one subscription that reads them.
+pub fn events() -> Option<tokio::sync::mpsc::UnboundedReceiver<ChromeEvent>> {
+    EVENTS.take()
+}
+
+/// Events emitted since the last call, while nobody reads them.
 pub fn drain() -> Vec<ChromeEvent> {
-    events().1.lock().unwrap().try_iter().collect()
+    EVENTS.drain()
 }
 
 /// Installs the native behavior on `window` (main thread, once).

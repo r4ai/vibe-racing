@@ -137,6 +137,8 @@ flowchart LR
 | [`src/wav.rs`](../src/wav.rs)             | ダウンミックス、リサンプル、WAV 符号化         |
 | [`src/app.rs`](../src/app.rs)             | 画面の状態、デバイスとエンジンの結線           |
 | [`src/app/view.rs`](../src/app/view.rs)   | 画面のレイアウト                               |
+| [`src/app/paced.rs`](../src/app/paced.rs) | 回転表示の再描画を 30 fps に抑える             |
+| [`src/inbox.rs`](../src/inbox.rs)         | ネイティブのコールバックから画面へのイベント   |
 | [`src/fonts.rs`](../src/fonts.rs)         | 同梱フォント（`assets/fonts/`）                |
 | [`src/chrome.rs`](../src/chrome.rs)       | ウィンドウ枠（Windows のヒットテスト）         |
 | [`src/config.rs`](../src/config.rs)       | 引数・環境変数、Windows の `npx.cmd` 解決      |
@@ -446,7 +448,18 @@ flowchart LR
   - 他の OS は OS のタイトルバーをそのまま使用
 - 左に状態と操作（状態表示・押して話す・止める）、右に交信ログと文字入力。設定はシートに収納
 - 状態は `Phase`（待機・録音・聞き取り・調査・回答・読み上げ）の 1 つだけを表示し、「止める」は処理中だけ有効
+- 交信ログは新しい質問のたびに末尾へ戻る。自動連絡や返答の続きでは、読み返している位置を動かさない
+- エラーはログの上に重ねて出し、ログと入力欄の高さを変えない。返答を待つ行は返答 1 行と同じ高さ
 - 見た目の確認は `cargo run -p vr-radio --example snapshot`（`target/snapshots/` に PNG を出力。`ICED_TEST_BACKEND=tiny-skia`）
+
+### 常駐時の負荷
+
+レース中は何時間も裏で動き続けるため、何も起きていない間は画面を起こさない。
+
+- ホットキー・トレイ・ウィンドウ枠の通知はコールバックからチャネルで受け取り、ポーリングしない（[`src/inbox.rs`](../src/inbox.rs)）
+- 毎フレームの再描画はオーブの色の切り替え（約 0.2 秒）の間だけ。回転表示は 30 fps に間引く
+- 交信は 200 件まで保持し、古いものは表示から外す（`--transcript` の記録には残る）
+- 各交信の表示は `lazy` でキャッシュし、変わった交信だけを作り直す。更新 1 回の負荷はレースの長さで増えない
 
 ### フォント
 

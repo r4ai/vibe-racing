@@ -12,6 +12,25 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+/// Presses (`true`) and releases of the key, as they happen.
+static EVENTS: std::sync::LazyLock<crate::inbox::Inbox<bool>> =
+    std::sync::LazyLock::new(crate::inbox::Inbox::new);
+
+/// The presses and releases, for the one subscription that reads them.
+/// The key's messages are handed over where they arrive, so nothing polls.
+pub fn events() -> Option<tokio::sync::mpsc::UnboundedReceiver<bool>> {
+    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+    let rx = EVENTS.take()?;
+    GlobalHotKeyEvent::set_event_handler(Some(|e: GlobalHotKeyEvent| {
+        EVENTS.send(e.state == HotKeyState::Pressed);
+    }));
+    // Any that came before the handler.
+    while let Ok(e) = GlobalHotKeyEvent::receiver().try_recv() {
+        EVENTS.send(e.state == HotKeyState::Pressed);
+    }
+    Some(rx)
+}
+
 /// Registers `accelerator` (e.g. `F9`, `Ctrl+Shift+Space`) in place of the
 /// current key. Must be called on the event-loop thread.
 pub fn bind(accelerator: &str) -> Result<String, String> {
