@@ -11,7 +11,7 @@ use shadcn_iced::typography::muted_text;
 
 use super::{
     AgentChoice, AgentStatus, App, Capture, HoldChoice, Message, OptionChoice, Phase, PlanChoice,
-    Readiness, SCROLLER, TurnView, VoiceState, latency,
+    Readiness, SCROLLER, SettingsPage, TurnView, VoiceState, latency,
 };
 use crate::agent::{AgentOption, OptionKind, ToolState};
 use crate::chrome;
@@ -23,6 +23,9 @@ use crate::watch::Group;
 
 const CONSOLE_WIDTH: f32 = 288.0;
 const LOG_PADDING: f32 = 24.0;
+const SETTINGS_WIDTH: f32 = 760.0;
+const SETTINGS_HEIGHT: f32 = 560.0;
+const SETTINGS_NAV_WIDTH: f32 = 200.0;
 
 fn palette(theme: &Theme) -> shadcn_iced::Palette {
     shadcn_iced::tokens(theme).palette
@@ -58,9 +61,9 @@ impl App {
         let body = row![self.console(), vertical_separator(), self.log()].height(Length::Fill);
         let page = column![self.title_bar(), separator(), body];
         tab_order(
-            sheet(container(page).style(hairline_bottom), self.settings_open)
-                .title("設定")
-                .description("声・エージェント・操作")
+            dialog(container(page).style(hairline_bottom), self.settings_open)
+                .width(SETTINGS_WIDTH)
+                .padding(0.0)
                 .content(self.settings())
                 .on_close(Message::Settings(false)),
         )
@@ -475,7 +478,127 @@ impl App {
         .into()
     }
 
+    /// The settings window: the pages by kind on the left, the chosen one
+    /// on the right.
     pub(super) fn settings(&self) -> Element<'_, Message> {
+        let page = self.settings_page;
+        let body: Element<'_, Message> = match page {
+            SettingsPage::Talk => column![
+                self.talk_settings(),
+                field("文字起こし", self.stt_settings()),
+            ]
+            .spacing(16)
+            .into(),
+            SettingsPage::Voice => self.voice_settings(),
+            SettingsPage::Calls => self.call_settings(),
+            SettingsPage::Answers => self.answer_settings(),
+            SettingsPage::Orders => column![
+                field("覚えている指示", self.note_settings()),
+                field("見張り", self.watch_settings()),
+            ]
+            .spacing(16)
+            .into(),
+            SettingsPage::Agent => self.agent_settings(),
+            SettingsPage::App => self.resident_settings(),
+        };
+        let (title, description) = page_title(page);
+        let header = column![
+            text(title).size(18).font(shadcn_iced::font::semibold()),
+            muted(description, 13.0),
+        ]
+        .spacing(4)
+        // Room for the close button in the corner.
+        .padding(Padding::new(20.0).right(48).bottom(16));
+        let scroll =
+            iced::widget::scrollable(container(body).padding(Padding::new(20.0).top(16).right(28)))
+                .height(Length::Fill)
+                .direction(iced::widget::scrollable::Direction::Vertical(
+                    shadcn_iced::scroll_area::scrollbar(),
+                ))
+                .style(shadcn_iced::scroll_area::style);
+        let content = column![header, separator(), scroll].width(Length::Fill);
+        container(row![self.settings_nav(), vertical_separator(), content])
+            .height(Length::Fill)
+            .max_height(SETTINGS_HEIGHT)
+            .into()
+    }
+
+    /// The pages, grouped by what they are about.
+    fn settings_nav(&self) -> Element<'_, Message> {
+        let rules = &self.settings.rules;
+        let kept = rules.notes.len() + rules.watches.len();
+        let item = |p: SettingsPage| {
+            let active = self.settings_page == p;
+            let (label, symbol) = page_label(p);
+            let mut line = row![
+                icon(symbol).size(16),
+                container(text(label).size(14).font(if active {
+                    shadcn_iced::font::medium()
+                } else {
+                    shadcn_iced::font::sans()
+                }))
+                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            // What the driver asked for on the radio shows up here too.
+            if p == SettingsPage::Orders && kept > 0 {
+                line = line.push(muted(kept.to_string(), 12.0));
+            }
+            iced::widget::button(container(line).center_y(Length::Fill))
+                .width(Length::Fill)
+                .height(32)
+                .padding(Padding::from([0, 8]))
+                .on_press(Message::SettingsPage(p))
+                .style(move |t: &Theme, status| {
+                    shadcn_iced::sidebar::button_style(t, status, active)
+                })
+        };
+        let group = |label: &'static str, pages: &[SettingsPage]| {
+            let mut col =
+                column![container(muted(label, 12.0)).padding(Padding::from([4, 8]))].spacing(2);
+            for p in pages {
+                col = col.push(item(*p));
+            }
+            col
+        };
+        let nav = column![
+            container(text("設定").size(16).font(shadcn_iced::font::semibold()))
+                .padding(Padding::new(8.0).bottom(4)),
+            group("無線", &[SettingsPage::Talk, SettingsPage::Voice]),
+            group(
+                "エンジニア",
+                &[
+                    SettingsPage::Calls,
+                    SettingsPage::Answers,
+                    SettingsPage::Orders
+                ]
+            ),
+            group("システム", &[SettingsPage::Agent, SettingsPage::App]),
+        ]
+        .spacing(12);
+        container(nav)
+            .width(SETTINGS_NAV_WIDTH)
+            .height(Length::Fill)
+            .padding(12)
+            .style(|t: &Theme| {
+                let t = shadcn_iced::tokens(t);
+                let radius = t.radius_xl();
+                container::Style {
+                    background: Some(Background::Color(t.palette.sidebar)),
+                    text_color: Some(t.palette.sidebar_foreground),
+                    border: Border {
+                        radius: iced::border::radius(0).top_left(radius).bottom_left(radius),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
+    /// Whether, how loud, how fast and in whose voice the answers are read.
+    fn voice_settings(&self) -> Element<'_, Message> {
         let voice: Element<'_, Message> = if self.voices.is_empty() {
             muted_text(match self.voice_state {
                 VoiceState::Starting => "VOICEVOX を起動中…".to_string(),
@@ -498,34 +621,16 @@ impl App {
             .spacing(8)
             .into()
         };
-        let content = column![
-            self.talk_settings(),
-            separator(),
+        column![
             switch(!self.muted)
                 .label("回答を読み上げる")
                 .on_toggle(|on| Message::Muted(!on)),
             field("音量", self.volume_slider()),
             field("話速", self.speed_slider()),
             field("話者", voice),
-            separator(),
-            self.proactive_settings(),
-            separator(),
-            self.rule_settings(),
-            separator(),
-            field("エージェント", self.agent_settings()),
-            field("文字起こし", self.stt_settings()),
-            separator(),
-            self.resident_settings(),
         ]
         .spacing(16)
-        .padding(Padding::new(2.0).right(12));
-        iced::widget::scrollable(content)
-            .height(Length::Fill)
-            .direction(iced::widget::scrollable::Direction::Vertical(
-                shadcn_iced::scroll_area::scrollbar(),
-            ))
-            .style(shadcn_iced::scroll_area::style)
-            .into()
+        .into()
     }
 
     fn speed_slider(&self) -> Element<'_, Message> {
@@ -576,8 +681,9 @@ impl App {
         col.into()
     }
 
-    /// How the engineer talks: how often, when not, and what it keeps in mind.
-    fn rule_settings(&self) -> Element<'_, Message> {
+    /// What the engineer calls about without being asked, how often and
+    /// when not.
+    fn call_settings(&self) -> Element<'_, Message> {
         let r = &self.settings.rules;
         let interval = row![
             slider(0.0..=180.0, f32::from(r.interval_s), |v| {
@@ -590,20 +696,29 @@ impl App {
         ]
         .spacing(12)
         .align_y(Alignment::Center);
+        column![
+            self.proactive_settings(),
+            separator(),
+            field("自動連絡の間隔", interval),
+            field("自動連絡のタイミング", self.hold_settings(Scope::Calls)),
+        ]
+        .spacing(16)
+        .into()
+    }
+
+    /// When and how the engineer answers, and what it thinks about meanwhile.
+    fn answer_settings(&self) -> Element<'_, Message> {
+        let r = &self.settings.rules;
         let mut plan = select(Some(PlanChoice(r.planning)), Message::Planning).width(Length::Fill);
         for n in PlanChoice::ALL {
             plan = plan.option(PlanChoice(n), PlanChoice(n).to_string());
         }
         column![
-            field("自動連絡の間隔", interval),
-            field("自動連絡のタイミング", self.hold_settings(Scope::Calls)),
             field("回答のタイミング", self.hold_settings(Scope::All)),
-            field("裏での作戦立案", plan),
             switch(r.quick)
                 .label("決まった質問にはAIを使わず即答")
                 .on_toggle(Message::Quick),
-            field("覚えている指示", self.note_settings()),
-            field("見張り", self.watch_settings()),
+            field("裏での作戦立案", plan),
         ]
         .spacing(16)
         .into()
@@ -890,6 +1005,34 @@ impl App {
         .spacing(12)
         .into()
     }
+}
+
+/// The name of a page in the sidebar, and its icon.
+fn page_label(page: SettingsPage) -> (&'static str, shadcn_iced::icon::Icon) {
+    match page {
+        SettingsPage::Talk => ("話す", lucide::MIC),
+        SettingsPage::Voice => ("読み上げ", lucide::VOLUME_2),
+        SettingsPage::Calls => ("自動連絡", lucide::BELL_RING),
+        SettingsPage::Answers => ("回答", lucide::MESSAGE_SQUARE),
+        SettingsPage::Orders => ("指示と見張り", lucide::LIST_CHECKS),
+        SettingsPage::Agent => ("エージェント", lucide::BOT),
+        SettingsPage::App => ("アプリ", lucide::APP_WINDOW),
+    }
+}
+
+/// The heading of a page: its name and what is set there. Where the
+/// engineer can change it on the radio too, the line says how to ask.
+fn page_title(page: SettingsPage) -> (&'static str, &'static str) {
+    let description = match page {
+        SettingsPage::Talk => "押して話すキー・ハンドルのボタンと、声の文字起こし",
+        SettingsPage::Voice => "無線で「音量上げて」「ゆっくり話して」とも頼めます",
+        SettingsPage::Calls => "無線で「黙ってて」「ピットの連絡はいらない」とも頼めます",
+        SettingsPage::Answers => "無線で「ブレーキ中は話しかけないで」とも頼めます",
+        SettingsPage::Orders => "無線で頼んだ約束の一覧。ここから消せます",
+        SettingsPage::Agent => "質問に答えるエージェントと、そのモデル・考える量",
+        SettingsPage::App => "ウィンドウを閉じたときと、Windows の起動時の動き",
+    };
+    (page_label(page).0, description)
 }
 
 /// Character, then one of its styles: two short lists instead of one long one.
