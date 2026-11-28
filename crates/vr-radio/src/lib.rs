@@ -21,7 +21,6 @@ pub mod hotkey;
 pub mod http;
 pub mod live;
 pub mod policy;
-pub mod quick;
 pub mod resident;
 pub mod rules;
 pub mod sapi;

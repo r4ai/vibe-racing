@@ -12,70 +12,251 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  clippy:
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+        group:
+          - name: core
+            packages: >-
+              -p vr-core -p vr-iracing -p vr-ams2 -p vr-ac
+              -p vr-replay -p vr-engine -p vr-server -p vr-cli
+            needs_alsa: false
+          - name: radio
+            packages: -p vr-radio -p vr-eval
+            needs_alsa: true
+    name: clippy (${{ matrix.os }}, ${{ matrix.group.name }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       # cpal (vr-radio) links ALSA on Linux.
-      - if: runner.os == 'Linux'
+      - if: runner.os == 'Linux' && matrix.group.needs_alsa
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+        with:
+          key: clippy-${{ matrix.group.name }}
+      - run: cargo clippy ${{ matrix.group.packages }} --all-targets -- -D warnings
 
-  architecture:
-    # Crate dependency direction (docs/architecture.md), see crates/vr-cli/tests/architecture.rs.
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        group:
+          # DuckDB / telemetry / engine / server / CLI crates (includes crates/vr-cli/tests/architecture.rs).
+          - name: core
+            packages: >-
+              -p vr-core -p vr-iracing -p vr-ams2 -p vr-ac
+              -p vr-replay -p vr-engine -p vr-server -p vr-cli
+            needs_alsa: false
+          # GUI / audio / eval crates (no DuckDB dependency).
+          - name: radio
+            packages: -p vr-radio -p vr-eval
+            needs_alsa: true
+    name: test (${{ matrix.os }}, ${{ matrix.group.name }})
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      # cpal (vr-radio) links ALSA on Linux.
+      - if: runner.os == 'Linux' && matrix.group.needs_alsa
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test -p vr-cli --test architecture
+        with:
+          key: test-${{ matrix.group.name }}
+      - run: cargo test ${{ matrix.group.packages }}
 
   coverage:
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - name: core
+            packages: >-
+              -p vr-core -p vr-iracing -p vr-ams2 -p vr-ac
+              -p vr-replay -p vr-engine -p vr-server -p vr-cli
+            needs_alsa: false
+          - name: radio
+            packages: -p vr-radio -p vr-eval
+            needs_alsa: true
+    name: coverage (${{ matrix.group.name }})
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - if: matrix.group.needs_alsa
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: coverage-${{ matrix.group.name }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
       # Unreachable without hardware: the Win32 mapping and the audio devices; without the network: the evaluation runs.
       - run: >-
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov ${{ matrix.group.packages }} --lcov --output-path lcov-${{ matrix.group.name }}.info
           --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs|vr-eval/src/(main|run|judge)\.rs)'
-          --fail-under-lines 90
-      - run: cargo llvm-cov report --summary-only --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs|vr-eval/src/(main|run|judge)\.rs)'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.group.name }}
+          path: lcov-${{ matrix.group.name }}.info
+
+  coverage-report:
+    needs: [coverage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - name: Merge coverage and generate report
+        id: report
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+
+          threshold = 90.0
+          # Merge per-file DA/FNDA records across groups so shared workspace dependencies
+          # (e.g. vr-eval depending on vr-engine/vr-server) are never double-counted.
+          files = {}
+          for path in sorted(pathlib.Path(".").glob("lcov-*.info")):
+              sf = None
+              for raw in path.read_text().splitlines():
+                  if raw.startswith("SF:"):
+                      sf = raw[3:]
+                      files.setdefault(sf, {"lines": {}, "fns": {}, "fn_lines": {}})
+                  elif sf is None:
+                      continue
+                  elif raw.startswith("DA:"):
+                      parts = raw[3:].split(",")
+                      line, hits = int(parts[0]), int(parts[1])
+                      files[sf]["lines"][line] = files[sf]["lines"].get(line, 0) + hits
+                  elif raw.startswith("FN:"):
+                      line_s, name = raw[3:].split(",", 1)
+                      files[sf]["fn_lines"].setdefault(name, int(line_s))
+                      files[sf]["fns"].setdefault(name, 0)
+                  elif raw.startswith("FNDA:"):
+                      hits_s, name = raw[5:].split(",", 1)
+                      files[sf]["fns"][name] = files[sf]["fns"].get(name, 0) + int(hits_s)
+                  elif raw == "end_of_record":
+                      sf = None
+
+          # Write merged lcov.info
+          out_lines = []
+          for sf in sorted(files):
+              rec = files[sf]
+              out_lines.append(f"SF:{sf}")
+              for name, ln in sorted(rec["fn_lines"].items(), key=lambda x: (x[1], x[0])):
+                  out_lines.append(f"FN:{ln},{name}")
+              for name in sorted(rec["fns"]):
+                  out_lines.append(f"FNDA:{rec['fns'][name]},{name}")
+              out_lines.append(f"FNF:{len(rec['fns'])}")
+              out_lines.append(f"FNH:{sum(1 for h in rec['fns'].values() if h > 0)}")
+              for ln in sorted(rec["lines"]):
+                  out_lines.append(f"DA:{ln},{rec['lines'][ln]}")
+              out_lines.append(f"LF:{len(rec['lines'])}")
+              out_lines.append(f"LH:{sum(1 for h in rec['lines'].values() if h > 0)}")
+              out_lines.append("end_of_record")
+          pathlib.Path("lcov.info").write_text("\n".join(out_lines) + "\n")
+
+          def group_of(sf):
+              norm = sf.replace("\\", "/")
+              if "/crates/vr-radio/" in norm or "/crates/vr-eval/" in norm:
+                  return "radio"
+              return "core"
+
+          stats = {
+              g: {"lf": 0, "lh": 0, "fnf": 0, "fnh": 0}
+              for g in ("core", "radio", "total")
+          }
+          for sf, rec in files.items():
+              lf = len(rec["lines"])
+              lh = sum(1 for h in rec["lines"].values() if h > 0)
+              fnf = len(rec["fns"])
+              fnh = sum(1 for h in rec["fns"].values() if h > 0)
+              for bucket in (group_of(sf), "total"):
+                  stats[bucket]["lf"] += lf
+                  stats[bucket]["lh"] += lh
+                  stats[bucket]["fnf"] += fnf
+                  stats[bucket]["fnh"] += fnh
+
+          def fmt(hit, total):
+              pct = (hit / total * 100.0) if total else 100.0
+              return f"{pct:.2f}% ({hit:,} / {total:,})"
+
+          line_pct = (stats["total"]["lh"] / stats["total"]["lf"] * 100.0) if stats["total"]["lf"] else 100.0
+          passed = line_pct >= threshold
+          status = "Passed" if passed else "Failed"
+
+          body = "\n".join([
+              "<!-- coverage-report -->",
+              "## Coverage Report",
+              "",
+              "| Group | Lines | Functions |",
+              "| --- | ---: | ---: |",
+              f"| `core` | {fmt(stats['core']['lh'], stats['core']['lf'])} | {fmt(stats['core']['fnh'], stats['core']['fnf'])} |",
+              f"| `radio` | {fmt(stats['radio']['lh'], stats['radio']['lf'])} | {fmt(stats['radio']['fnh'], stats['radio']['fnf'])} |",
+              f"| **Total** | **{fmt(stats['total']['lh'], stats['total']['lf'])}** | **{fmt(stats['total']['fnh'], stats['total']['fnf'])}** |",
+              "",
+              f"Line coverage threshold: `>= {threshold:.0f}%` — **{status}**",
+          ])
+          pathlib.Path("coverage-comment.md").write_text(body + "\n")
+          print(body)
+
+          if not passed:
+              print(f"::error::Total line coverage {line_pct:.2f}% is below {threshold:.0f}%", file=sys.stderr)
+              sys.exit(1)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
           name: lcov
           path: lcov.info
+      - name: Comment coverage on PR
+        if: >-
+          always() &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          [ -f coverage-comment.md ] || exit 0
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq '.[] | select(.body | contains("<!-- coverage-report -->")) | .id' | head -n 1)
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/${REPO}/issues/comments/${EXISTING}" -F body=@coverage-comment.md > /dev/null
+          else
+            gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -F body=@coverage-comment.md > /dev/null
+          fi
 
   mutants:
     # A full run takes long: PRs check their diff, the full run is weekly or manual.
@@ -124,6 +305,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
       # Version comes from package.json "packageManager".
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

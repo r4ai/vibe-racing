@@ -26,6 +26,7 @@ const LOG_PADDING: f32 = 24.0;
 const SETTINGS_WIDTH: f32 = 760.0;
 const SETTINGS_HEIGHT: f32 = 560.0;
 const SETTINGS_NAV_WIDTH: f32 = 200.0;
+const VERSION: &str = env!("VR_RADIO_VERSION");
 
 fn palette(theme: &Theme) -> shadcn_iced::Palette {
     shadcn_iced::tokens(theme).palette
@@ -103,9 +104,14 @@ impl App {
         .center_x(chrome::TOOLS);
 
         let mut bar = row![
-            text("VR Radio")
-                .size(14)
-                .font(shadcn_iced::font::semibold()),
+            row![
+                text("VR Radio")
+                    .size(14)
+                    .font(shadcn_iced::font::semibold()),
+                muted(VERSION, 12.0),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
             status,
             space::horizontal(),
             settings,
@@ -706,7 +712,7 @@ impl App {
         .into()
     }
 
-    /// When and how the engineer answers, and what it thinks about meanwhile.
+    /// When the engineer answers, and what it thinks about meanwhile.
     fn answer_settings(&self) -> Element<'_, Message> {
         let r = &self.settings.rules;
         let mut plan = select(Some(PlanChoice(r.planning)), Message::Planning).width(Length::Fill);
@@ -715,9 +721,6 @@ impl App {
         }
         column![
             field("回答のタイミング", self.hold_settings(Scope::All)),
-            switch(r.quick)
-                .label("決まった質問にはAIを使わず即答")
-                .on_toggle(Message::Quick),
             field("裏での作戦立案", plan),
         ]
         .spacing(16)
@@ -825,28 +828,22 @@ impl App {
             .into()
     }
 
-    /// What the agent lets choose: model, effort, speed. The desk thinks with
-    /// an effort of its own.
+    /// What the agent lets choose: model, effort, speed.
     fn option_settings(&self) -> Element<'_, Message> {
         let mut col = column![].spacing(8);
         for o in &self.offered {
             col = match o.kind {
-                OptionKind::Model => col.push(self.option_row("モデル", o, false)),
-                OptionKind::Effort => col
-                    .push(self.option_row("考える量（無線）", o, false))
-                    .push(self.option_row("考える量（調査）", o, true)),
-                OptionKind::Speed => col.push(self.option_row("速度", o, false)),
+                OptionKind::Model => col.push(self.option_row("モデル", o)),
+                OptionKind::Effort => col.push(self.option_row("考える量", o)),
+                OptionKind::Speed => col.push(self.option_row("速度", o)),
             };
         }
         col.into()
     }
 
-    fn option_row<'a>(&self, label: &'a str, o: &AgentOption, desk: bool) -> Element<'a, Message> {
-        let own = self.config.options_of(&self.config.agent).desk;
-        let own = own.into_iter().find(|(id, _)| desk && *id == o.id);
-        let value = own.map_or(o.value.clone(), |(_, v)| v);
-        let all = OptionChoice::all(o, desk);
-        let now = all.iter().find(|c| c.value == value).cloned();
+    fn option_row<'a>(&self, label: &'a str, o: &AgentOption) -> Element<'a, Message> {
+        let all = OptionChoice::all(o);
+        let now = all.iter().find(|c| c.value == o.value).cloned();
         let mut pick = select(now, Message::AgentOption).width(Length::Fill);
         for c in all {
             let label = c.to_string();
