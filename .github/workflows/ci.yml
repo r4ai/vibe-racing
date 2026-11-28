@@ -52,30 +52,134 @@ jobs:
       - run: cargo test ${{ matrix.group.packages }}
 
   coverage:
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - name: core
+            packages: >-
+              -p vr-core -p vr-iracing -p vr-ams2 -p vr-ac
+              -p vr-replay -p vr-engine -p vr-server -p vr-cli
+            needs_alsa: false
+          - name: radio
+            packages: -p vr-radio -p vr-eval
+            needs_alsa: true
+    name: coverage (${{ matrix.group.name }})
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - if: matrix.group.needs_alsa
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: coverage-${{ matrix.group.name }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
       # Unreachable without hardware: the Win32 mapping and the audio devices; without the network: the evaluation runs.
       - run: >-
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov ${{ matrix.group.packages }} --lcov --output-path lcov-${{ matrix.group.name }}.info
           --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs|vr-eval/src/(main|run|judge)\.rs)'
-          --fail-under-lines 90
-      - run: cargo llvm-cov report --summary-only --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs|vr-eval/src/(main|run|judge)\.rs)'
+      - run: >-
+          cargo llvm-cov report --json --summary-only
+          --ignore-filename-regex '(vr-iracing/src/shm\.rs|vr-radio/src/(main|audio)\.rs|vr-eval/src/(main|run|judge)\.rs)'
+          > summary-${{ matrix.group.name }}.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.group.name }}
+          path: |
+            lcov-${{ matrix.group.name }}.info
+            summary-${{ matrix.group.name }}.json
+
+  coverage-report:
+    needs: [coverage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - name: Merge coverage and generate report
+        id: report
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          threshold = 90.0
+          groups = ["core", "radio"]
+          totals = {k: {"covered": 0, "count": 0} for k in ("lines", "functions", "regions")}
+          rows = []
+
+          def fmt(metric):
+              c, n = metric["covered"], metric["count"]
+              pct = (c / n * 100.0) if n else 100.0
+              return f"{pct:.2f}% ({c:,} / {n:,})"
+
+          for g in groups:
+              data = json.loads(pathlib.Path(f"summary-{g}.json").read_text())
+              t = data["data"][0]["totals"]
+              for k in totals:
+                  totals[k]["covered"] += t[k]["covered"]
+                  totals[k]["count"] += t[k]["count"]
+              rows.append(f"| `{g}` | {fmt(t['lines'])} | {fmt(t['functions'])} | {fmt(t['regions'])} |")
+
+          line_pct = (totals["lines"]["covered"] / totals["lines"]["count"] * 100.0) if totals["lines"]["count"] else 100.0
+          passed = line_pct >= threshold
+          status = "Passed" if passed else "Failed"
+
+          body = "\n".join([
+              "<!-- coverage-report -->",
+              "## Coverage Report",
+              "",
+              "| Group | Lines | Functions | Regions |",
+              "| --- | ---: | ---: | ---: |",
+              *rows,
+              f"| **Total** | **{fmt(totals['lines'])}** | **{fmt(totals['functions'])}** | **{fmt(totals['regions'])}** |",
+              "",
+              f"Line coverage threshold: `>= {threshold:.0f}%` — **{status}**",
+          ])
+          pathlib.Path("coverage-comment.md").write_text(body + "\n")
+          print(body)
+
+          lcov = "".join(pathlib.Path(f"lcov-{g}.info").read_text() for g in groups)
+          pathlib.Path("lcov.info").write_text(lcov)
+
+          if not passed:
+              print(f"::error::Total line coverage {line_pct:.2f}% is below {threshold:.0f}%", file=sys.stderr)
+              sys.exit(1)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
           name: lcov
           path: lcov.info
+      - name: Comment coverage on PR
+        if: >-
+          always() &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          [ -f coverage-comment.md ] || exit 0
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq '.[] | select(.body | contains("<!-- coverage-report -->")) | .id' | head -n 1)
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/${REPO}/issues/comments/${EXISTING}" -F body=@coverage-comment.md > /dev/null
+          else
+            gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -F body=@coverage-comment.md > /dev/null
+          fi
 
   mutants:
     # A full run takes long: PRs check their diff, the full run is weekly or manual.
